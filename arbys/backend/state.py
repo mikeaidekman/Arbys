@@ -18,6 +18,7 @@ from decimal import Decimal
 from ..adapters.base import MarketDataAdapter
 from ..adapters.draftkings import DraftKingsAdapter, draftkings_enabled
 from ..adapters.kalshi import KalshiAdapter
+from ..adapters.kalshi_ws import KalshiWebSocketAdapter, kalshi_ws_creds_from_env
 from ..adapters.polymarket import PolymarketAdapter
 from ..db import repositories as repo
 from ..db.session import session_scope
@@ -67,9 +68,21 @@ AdapterFactory = Callable[[list[str]], MarketDataAdapter]
 
 
 def _default_adapter_factories() -> dict[str, AdapterFactory]:
+    kalshi_creds = kalshi_ws_creds_from_env()
+
+    def _kalshi_factory(oids: list[str]) -> MarketDataAdapter:
+        if kalshi_creds is not None:
+            key_id, private_key = kalshi_creds
+            log.info("using Kalshi WebSocket adapter (authenticated, real-time)")
+            return KalshiWebSocketAdapter(
+                outcome_ids=oids, api_key_id=key_id, private_key=private_key
+            )
+        log.info("using Kalshi REST poll adapter (no KALSHI_API_KEY_ID/PATH set)")
+        return KalshiAdapter(outcome_ids=oids)
+
     factories: dict[str, AdapterFactory] = {
         "polymarket": lambda oids: PolymarketAdapter(outcome_ids=oids),
-        "kalshi": lambda oids: KalshiAdapter(outcome_ids=oids),
+        "kalshi": _kalshi_factory,
     }
     if draftkings_enabled():
         factories["draftkings"] = lambda oids: DraftKingsAdapter(outcome_ids=oids)
