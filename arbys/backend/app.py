@@ -2,11 +2,14 @@
 
 from __future__ import annotations
 
+from contextlib import asynccontextmanager
 from decimal import Decimal
 
 from fastapi import FastAPI, HTTPException, WebSocket, WebSocketDisconnect
 
 from ..adapters.base import ExecutionIntent, IntentLeg
+from ..db import repositories as repo
+from ..db.session import session_scope
 from ..shared.execution_router import InsufficientLegsError
 from ..shared.types import EventGroup, EventGroupLeg, Quote
 from .schemas import (
@@ -18,11 +21,21 @@ from .schemas import (
     PaperAccountSummary,
     QuoteIn,
 )
-from .state import get_state
+from .state import get_state, reset_state
 
 
 def create_app() -> FastAPI:
-    app = FastAPI(title="Arbys", version="0.1.0")
+    @asynccontextmanager
+    async def lifespan(_app: FastAPI):
+        state = get_state()
+        await state.bootstrap()
+        try:
+            yield
+        finally:
+            await state.shutdown()
+            reset_state()
+
+    app = FastAPI(title="Arbys", version="0.1.0", lifespan=lifespan)
 
     @app.get("/health")
     async def health() -> dict[str, str]:
@@ -62,6 +75,8 @@ def create_app() -> FastAPI:
                 for leg in body.legs
             ),
         )
+        async with session_scope() as session:
+            await repo.upsert_event_group(session, group)
         s.event_groups[group.id] = group
         s.engine.register_group(group)
         return body
@@ -69,6 +84,8 @@ def create_app() -> FastAPI:
     @app.delete("/event-groups/{group_id}", status_code=204)
     async def delete_group(group_id: str) -> None:
         s = get_state()
+        async with session_scope() as session:
+            await repo.delete_event_group(session, group_id)
         s.event_groups.pop(group_id, None)
         s.engine.unregister_group(group_id)
 
@@ -81,6 +98,13 @@ def create_app() -> FastAPI:
         s = get_state()
         q = Quote(outcome_id=body.outcome_id, bid=body.bid, ask=body.ask)
         s.quotebook.upsert(q)
+        async with session_scope() as session:
+            await repo.ensure_outcome_placeholder(
+                session, body.outcome_id, venue_id="unknown"
+            )
+            await repo.insert_quote(
+                session, outcome_id=body.outcome_id, bid=body.bid, ask=body.ask
+            )
         s.engine.on_quote(q)
 
     # ------------------------------------------------------------------
@@ -148,6 +172,16 @@ def create_app() -> FastAPI:
             positions=positions,
             realized_pnl=realized,
         )
+
+    @app.get("/paper/{account_id}/orders")
+    async def paper_orders(account_id: str) -> list[dict]:
+        async with session_scope() as session:
+            return await repo.list_paper_orders(session, account_id)
+
+    @app.get("/paper/{account_id}/pnl-snapshots")
+    async def paper_pnl(account_id: str, limit: int = 500) -> list[dict]:
+        async with session_scope() as session:
+            return await repo.list_pnl_snapshots(session, account_id, limit=limit)
 
     @app.post("/paper/execute", response_model=list[str])
     async def paper_execute(body: ExecuteArbIn) -> list[str]:

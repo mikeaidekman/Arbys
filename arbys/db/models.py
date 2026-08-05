@@ -127,7 +127,11 @@ class Quote(Base):
 
     __tablename__ = "quote"
 
-    id: Mapped[int] = mapped_column(BigInteger, primary_key=True, autoincrement=True)
+    id: Mapped[int] = mapped_column(
+        BigInteger().with_variant(Integer(), "sqlite"),
+        primary_key=True,
+        autoincrement=True,
+    )
     outcome_id: Mapped[str] = mapped_column(ForeignKey("outcome.id"), nullable=False)
     bid: Mapped[Decimal] = mapped_column(NUM, nullable=False)
     ask: Mapped[Decimal] = mapped_column(NUM, nullable=False)
@@ -250,7 +254,11 @@ class PaperPosition(Base):
 class PaperPnlSnapshot(Base):
     __tablename__ = "paper_pnl_snapshot"
 
-    id: Mapped[int] = mapped_column(BigInteger, primary_key=True, autoincrement=True)
+    id: Mapped[int] = mapped_column(
+        BigInteger().with_variant(Integer(), "sqlite"),
+        primary_key=True,
+        autoincrement=True,
+    )
     account_id: Mapped[str] = mapped_column(ForeignKey("paper_account.id"), nullable=False)
     ts: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now(), nullable=False, index=True

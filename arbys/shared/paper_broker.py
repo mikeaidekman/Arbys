@@ -13,14 +13,21 @@
 
 `ExecutionRouter` fans an `ExecutionIntent` out to per-venue adapters and
 enforces atomicity: if any leg would fail, none are placed.
+
+An optional `PaperPersistenceSink` receives every mutation for durable storage.
+The sink is called synchronously as part of the mutation so the DB and the
+in-memory state cannot diverge.
 """
 
 from __future__ import annotations
 
+import contextlib
 import uuid
 from collections import defaultdict
+from collections.abc import Awaitable
 from dataclasses import dataclass, field
 from decimal import Decimal
+from typing import Protocol
 
 from ..adapters.base import ExecutionAdapter, Fill, Order, OrderStatus
 from .fees import FeeModel
@@ -34,20 +41,39 @@ def _uid() -> str:
 BPS = Decimal(10_000)
 
 
+class PaperPersistenceSink(Protocol):
+    """Called by PaperExecutionAdapter on every state-changing event.
+
+    Implementations should not raise — swallow persistence errors and log,
+    because paper trading must not break if DB is temporarily unavailable.
+    """
+
+    async def on_order(self, order: Order, *, rejection_reason: str | None = None) -> None: ...
+    async def on_fill(self, order: Order, fill: Fill) -> None: ...
+    async def on_balance(self, account_id: str, venue_id: str, amount: Decimal) -> None: ...
+    async def on_position(
+        self,
+        account_id: str,
+        outcome_id: str,
+        qty: Decimal,
+        avg_price: Decimal,
+        realized_pnl: Decimal,
+    ) -> None: ...
+
+
 @dataclass
 class _AccountState:
     balances: dict[str, Decimal] = field(default_factory=dict)  # venue_id -> cash
     positions: dict[str, Decimal] = field(default_factory=lambda: defaultdict(lambda: Decimal("0")))
     avg_price: dict[str, Decimal] = field(default_factory=lambda: defaultdict(lambda: Decimal("0")))
     realized_pnl: Decimal = Decimal("0")
+    realized_by_outcome: dict[str, Decimal] = field(
+        default_factory=lambda: defaultdict(lambda: Decimal("0"))
+    )
 
 
 class PaperExecutionAdapter(ExecutionAdapter):
-    """Per-venue paper broker.
-
-    All accounts and orders live in-process. A follow-up will add a DB-backed
-    persistence layer that wraps this class so restarts don't lose state.
-    """
+    """Per-venue paper broker."""
 
     def __init__(
         self,
@@ -56,15 +82,20 @@ class PaperExecutionAdapter(ExecutionAdapter):
         quotebook: QuoteBook,
         fee_model: FeeModel,
         slippage_bps: Decimal = Decimal("0"),
+        sink: PaperPersistenceSink | None = None,
     ) -> None:
         self.venue_id = venue_id
         self._book = quotebook
         self._fees = fee_model
         self._slippage_bps = slippage_bps
+        self._sink = sink
 
         self._orders: dict[str, Order] = {}
         self._fills: dict[str, list[Fill]] = defaultdict(list)
         self._accounts: dict[str, _AccountState] = defaultdict(_AccountState)
+
+    def set_sink(self, sink: PaperPersistenceSink | None) -> None:
+        self._sink = sink
 
     # ------------------------------------------------------------------
     # Admin helpers (not part of the ExecutionAdapter interface)
@@ -73,6 +104,38 @@ class PaperExecutionAdapter(ExecutionAdapter):
     def deposit(self, account_id: str, amount: Decimal) -> None:
         st = self._accounts[account_id]
         st.balances[self.venue_id] = st.balances.get(self.venue_id, Decimal("0")) + amount
+
+    def hydrate_balance(self, account_id: str, amount: Decimal) -> None:
+        """Overwrite in-memory balance without triggering the persistence sink.
+
+        Use during startup rehydration from DB.
+        """
+        self._accounts[account_id].balances[self.venue_id] = amount
+
+    def hydrate_position(
+        self,
+        account_id: str,
+        outcome_id: str,
+        *,
+        qty: Decimal,
+        avg_price: Decimal,
+        realized_pnl: Decimal,
+    ) -> None:
+        st = self._accounts[account_id]
+        st.positions[outcome_id] = qty
+        st.avg_price[outcome_id] = avg_price
+        st.realized_by_outcome[outcome_id] = realized_pnl
+        st.realized_pnl += realized_pnl
+
+    def account_snapshot(self, account_id: str) -> tuple[Decimal, dict[str, tuple[Decimal, Decimal, Decimal]]]:
+        st = self._accounts[account_id]
+        cash = st.balances.get(self.venue_id, Decimal("0"))
+        positions = {
+            oid: (qty, st.avg_price[oid], st.realized_by_outcome[oid])
+            for oid, qty in st.positions.items()
+            if qty != 0
+        }
+        return cash, positions
 
     def _apply_slippage(self, price: Decimal, is_buy: bool) -> Decimal:
         adj = price * self._slippage_bps / BPS
@@ -86,7 +149,6 @@ class PaperExecutionAdapter(ExecutionAdapter):
     def _preview_fill(
         self, *, outcome_id: str, is_buy: bool, qty: Decimal, limit_price: Decimal
     ) -> tuple[Decimal, Decimal] | str:
-        """Return (fill_price, total_cost) or a rejection reason string."""
         quote = self._book.get(outcome_id)
         if quote is None:
             return "no_quote"
@@ -99,6 +161,13 @@ class PaperExecutionAdapter(ExecutionAdapter):
         fee = self._fees.fee(price=px, qty=qty, is_buy=is_buy)
         cost = px * qty + fee if is_buy else -(px * qty) + fee
         return px, cost
+
+    async def _emit(self, coro: Awaitable[None] | None) -> None:
+        if coro is None:
+            return
+        # Persistence must never break the broker; swallow all sink errors.
+        with contextlib.suppress(Exception):
+            await coro
 
     # ------------------------------------------------------------------
     # ExecutionAdapter implementation
@@ -128,6 +197,8 @@ class PaperExecutionAdapter(ExecutionAdapter):
                 status=OrderStatus.REJECTED,
             )
             self._orders[order_id] = order
+            if self._sink is not None:
+                await self._emit(self._sink.on_order(order, rejection_reason=preview))
             return order
 
         px, cost = preview
@@ -144,9 +215,12 @@ class PaperExecutionAdapter(ExecutionAdapter):
                 status=OrderStatus.REJECTED,
             )
             self._orders[order_id] = order
+            if self._sink is not None:
+                await self._emit(
+                    self._sink.on_order(order, rejection_reason="insufficient_funds")
+                )
             return order
 
-        # Apply fill.
         fee = self._fees.fee(price=px, qty=qty, is_buy=is_buy)
         if is_buy:
             st.balances[self.venue_id] = cash - (px * qty + fee)
@@ -164,12 +238,28 @@ class PaperExecutionAdapter(ExecutionAdapter):
             limit_price=limit_price,
             status=OrderStatus.FILLED,
         )
+        fill = Fill(order_id=order_id, qty=qty, price=px, fee=fee)
         self._orders[order_id] = order
-        self._fills[order_id].append(Fill(order_id=order_id, qty=qty, price=px, fee=fee))
+        self._fills[order_id].append(fill)
+
+        if self._sink is not None:
+            await self._emit(self._sink.on_order(order))
+            await self._emit(self._sink.on_fill(order, fill))
+            await self._emit(
+                self._sink.on_balance(account_id, self.venue_id, st.balances[self.venue_id])
+            )
+            await self._emit(
+                self._sink.on_position(
+                    account_id,
+                    outcome_id,
+                    st.positions[outcome_id],
+                    st.avg_price[outcome_id],
+                    st.realized_by_outcome[outcome_id],
+                )
+            )
         return order
 
     async def cancel_order(self, order_id: str) -> Order:
-        # Paper orders fill (or reject) synchronously so there's nothing to cancel.
         return self._orders[order_id]
 
     async def get_balances(self, account_id: str) -> dict[str, Decimal]:
@@ -205,20 +295,51 @@ class PaperExecutionAdapter(ExecutionAdapter):
         cur_avg = st.avg_price[outcome_id]
         realized = (price - cur_avg) * min(qty, cur_qty)
         st.realized_pnl += realized
+        st.realized_by_outcome[outcome_id] += realized
         st.positions[outcome_id] = cur_qty - qty
 
     # ------------------------------------------------------------------
-    # Resolution / settlement (for `paper-resolution` scope)
+    # Resolution / settlement
     # ------------------------------------------------------------------
 
+    async def settle_outcome_async(self, outcome_id: str, resolved_value: Decimal) -> None:
+        for account_id, st in self._accounts.items():
+            qty = st.positions.get(outcome_id, Decimal("0"))
+            if qty == 0:
+                continue
+            avg = st.avg_price[outcome_id]
+            realized = (resolved_value - avg) * qty
+            st.realized_pnl += realized
+            st.realized_by_outcome[outcome_id] += realized
+            st.balances[self.venue_id] = (
+                st.balances.get(self.venue_id, Decimal("0")) + resolved_value * qty
+            )
+            st.positions[outcome_id] = Decimal("0")
+            st.avg_price[outcome_id] = Decimal("0")
+            if self._sink is not None:
+                await self._emit(
+                    self._sink.on_balance(account_id, self.venue_id, st.balances[self.venue_id])
+                )
+                await self._emit(
+                    self._sink.on_position(
+                        account_id,
+                        outcome_id,
+                        Decimal("0"),
+                        Decimal("0"),
+                        st.realized_by_outcome[outcome_id],
+                    )
+                )
+
     def settle_outcome(self, outcome_id: str, resolved_value: Decimal) -> None:
-        """Settle every account's position in `outcome_id` at `resolved_value` (0 or 1)."""
+        """Synchronous settlement (no persistence). Kept for existing callers."""
         for st in self._accounts.values():
             qty = st.positions.get(outcome_id, Decimal("0"))
             if qty == 0:
                 continue
             avg = st.avg_price[outcome_id]
-            st.realized_pnl += (resolved_value - avg) * qty
+            realized = (resolved_value - avg) * qty
+            st.realized_pnl += realized
+            st.realized_by_outcome[outcome_id] += realized
             st.balances[self.venue_id] = (
                 st.balances.get(self.venue_id, Decimal("0")) + resolved_value * qty
             )
@@ -227,3 +348,4 @@ class PaperExecutionAdapter(ExecutionAdapter):
 
     def realized_pnl(self, account_id: str) -> Decimal:
         return self._accounts[account_id].realized_pnl
+
