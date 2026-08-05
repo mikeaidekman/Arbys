@@ -72,7 +72,7 @@ See the full plan in `~/.copilot/session-state/<session-id>/plan.md`. Progress:
 4. **Phase 3 — Event-group mapping + engine runtime** ✅
 5. **Phase 4 — Paper trading** ✅ (in-memory; DB persistence TBD)
 6. **Phase 5 — API + frontend** ✅
-7. **Phase 6 — Hardening** — backtest harness ✅, observability ✅, operator docs TBD
+7. **Phase 6 — Hardening** — backtest harness ✅, observability ✅, [operator runbook](docs/RUNBOOK.md) ✅
 
 ## Running locally
 
