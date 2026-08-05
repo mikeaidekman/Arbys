@@ -12,12 +12,12 @@ from fastapi import FastAPI, HTTPException, WebSocket, WebSocketDisconnect
 # uvicorn is launched with no explicit --env-file.
 load_dotenv()
 
-from ..adapters.base import ExecutionIntent, IntentLeg
-from ..db import repositories as repo
-from ..db.session import session_scope
-from ..shared.execution_router import InsufficientLegsError
-from ..shared.types import EventGroup, EventGroupLeg, Quote
-from .schemas import (
+from ..adapters.base import ExecutionIntent, IntentLeg  # noqa: E402
+from ..db import repositories as repo  # noqa: E402
+from ..db.session import session_scope  # noqa: E402
+from ..shared.execution_router import InsufficientLegsError  # noqa: E402
+from ..shared.types import EventGroup, EventGroupLeg, Quote  # noqa: E402
+from .schemas import (  # noqa: E402
     ArbLegOut,
     ArbOpportunityOut,
     EventGroupIn,
@@ -28,7 +28,7 @@ from .schemas import (
     PaperAccountSummary,
     QuoteIn,
 )
-from .state import get_state, reset_state
+from .state import get_state, reset_state  # noqa: E402
 
 
 def create_app() -> FastAPI:

@@ -9,12 +9,12 @@ import sys
 
 from arbys.db import repositories as repo
 from arbys.db.session import configure_engine, create_all, session_scope
-from arbys.discovery.service import discover_mlb_event_groups
+from arbys.discovery.service import discover_all_event_groups
 
 
 async def _main(dry_run: bool) -> int:
-    groups = await discover_mlb_event_groups()
-    print(f"discovered {len(groups)} cross-venue MLB group(s):")
+    groups = await discover_all_event_groups()
+    print(f"discovered {len(groups)} cross-venue group(s):")
     for g in groups:
         print(f"  - {g.id}  ({g.title})  legs={len(g.legs)}")
         for leg in g.legs:

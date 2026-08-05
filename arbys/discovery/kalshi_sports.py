@@ -6,6 +6,7 @@ import asyncio
 import logging
 from dataclasses import dataclass
 from datetime import date
+from typing import Protocol
 
 import httpx
 
@@ -19,23 +20,29 @@ _REQUEST_SPACING_S = 0.15  # ~6 req/s; Kalshi public tier tolerates this
 _MAX_429_RETRIES = 4
 
 
+class Participant(Protocol):
+    code: str
+    full_name: str
+
+
 @dataclass(frozen=True)
 class VenueGame:
-    """A single game as seen on one venue.
+    """A single game/match as seen on one venue.
 
-    ``home`` and ``away`` follow the venue's convention. For Kalshi,
-    the event title reads "Away vs Home" (per US sports convention:
-    "Detroit vs San Francisco" = SF at home). We record the pair
-    without asserting home/away so the matcher can rely on the set.
+    ``participants`` is a 2-tuple; each item exposes ``.code`` (canonical short
+    ID used for cross-venue matching) and ``.full_name``. For team sports the
+    tuple contains ``Team`` instances; for tennis it contains ``Player``
+    instances. We record the pair without asserting home/away so the matcher
+    can rely on the unordered set of codes.
 
-    ``outcome_ids[team.code]`` is the venue-specific ID to reference
-    that team's YES-side market on that venue.
+    ``outcome_ids[participant.code]`` is the venue-specific ID to reference
+    that side's YES-side market on that venue.
     """
 
     sport: str
     venue_id: str
     game_date: date
-    teams: tuple[Team, Team]
+    teams: tuple[Participant, Participant]
     outcome_ids: dict[str, str]
     ref: str  # venue-specific identifier (event ticker, market slug, etc.)
 

@@ -10,25 +10,53 @@ from ..db import repositories as repo
 from ..db.session import session_scope
 from ..shared.types import EventGroup
 from .kalshi_sports import fetch_kalshi_mlb_games
+from .kalshi_tennis import fetch_kalshi_tennis_matches
 from .matcher import match_games, match_to_event_group
 from .polymarket_sports import fetch_polymarket_sports_games
+from .polymarket_tennis import fetch_polymarket_tennis_matches
 from .teams import MLB_RESOLVER
 
 log = logging.getLogger(__name__)
 
 
 async def discover_mlb_event_groups() -> list[EventGroup]:
-    """Run one MLB discovery pass and return the EventGroups to register.
-
-    This is the pure, side-effect-free entry point — no DB or state
-    mutation. Suitable for CLI scripts and tests.
-    """
+    """Run one MLB discovery pass and return the EventGroups to register."""
     kalshi_games, poly_games = await asyncio.gather(
         fetch_kalshi_mlb_games(resolver=MLB_RESOLVER),
         fetch_polymarket_sports_games(resolver=MLB_RESOLVER, sport="mlb"),
     )
     matches = match_games(kalshi_games, poly_games)
     return [match_to_event_group(m) for m in matches]
+
+
+async def discover_tennis_event_groups() -> list[EventGroup]:
+    """Run one ATP+WTA discovery pass and return the EventGroups to register.
+
+    Kalshi's tennis tickers embed a "trading day" that can differ from the
+    match's UTC date, so we allow a 1-day tolerance when matching.
+    """
+    kalshi_games, poly_games = await asyncio.gather(
+        fetch_kalshi_tennis_matches(),
+        fetch_polymarket_tennis_matches(),
+    )
+    matches = match_games(kalshi_games, poly_games, date_tolerance_days=1)
+    return [match_to_event_group(m) for m in matches]
+
+
+async def discover_all_event_groups() -> list[EventGroup]:
+    """Aggregate discovery across every sport we currently support."""
+    results = await asyncio.gather(
+        discover_mlb_event_groups(),
+        discover_tennis_event_groups(),
+        return_exceptions=True,
+    )
+    groups: list[EventGroup] = []
+    for r in results:
+        if isinstance(r, BaseException):
+            log.exception("discovery sub-pass failed", exc_info=r)
+            continue
+        groups.extend(r)
+    return groups
 
 
 class DiscoveryService:
@@ -71,7 +99,7 @@ class DiscoveryService:
     async def run_once(self) -> int:
         """Public: run one discovery pass. Returns count of groups registered/updated."""
         try:
-            groups = await discover_mlb_event_groups()
+            groups = await discover_all_event_groups()
         except Exception:
             log.exception("discovery pass failed")
             return 0
