@@ -13,7 +13,7 @@ from sqlalchemy.ext.asyncio import (
     create_async_engine,
 )
 
-DEFAULT_DB_URL = "postgresql+asyncpg://arbys:arbys@localhost:5432/arbys"
+DEFAULT_DB_URL = "sqlite+aiosqlite:///./arbys-local.db"
 
 
 def _get_db_url() -> str:
