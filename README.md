@@ -4,10 +4,11 @@ Prediction market arbitrage scanner with paper trading. Surfaces guaranteed-prof
 opportunities across Polymarket, Kalshi, and DraftKings, and lets you validate
 them with a paper broker that fills against real live odds.
 
-## Status: v0.1 — working end-to-end backend slice ✅
+## Status: v0.2 — full backend + React frontend ✅
 
-Full read-scan-detect-paper-execute loop is implemented and tested (51 tests
-green, ruff clean):
+Full read-scan-detect-paper-execute loop is implemented and tested (52 tests
+green, ruff clean). The Vite/React frontend provides live opportunities,
+portfolio, and admin views.
 
 * **Shared arb math** — types, odds converters, per-venue fee models,
   cross-venue and complementary-set detectors, stake sizing.
@@ -19,17 +20,19 @@ green, ruff clean):
   fees, position tracking, settlement/PnL. `ExecutionRouter` enforces
   all-or-nothing multi-leg tickets.
 * **FastAPI backend** — REST endpoints for event groups, quotes,
-  opportunities, paper accounts, and paper-execute; live WebSocket for
-  opportunities.
+  opportunities, paper accounts, orders, PnL snapshots, and paper-execute;
+  live WebSocket for opportunities. Lifespan hook hydrates state from DB.
 * **Backtest harness** — replay any quote sequence and optionally auto-paper-
   execute detected opportunities.
-* **Persistence layer** — SQLAlchemy 2 models + Alembic initial migration
-  covering venues, markets, outcomes, event groups, quotes, opportunities,
-  and full paper-trading tables. Docker Compose for local Postgres.
+* **Persistence layer** — SQLAlchemy 2 async repos wired into every mutation.
+  Postgres via Docker Compose in prod; SQLite for tests.
+* **Frontend (Vite + React + TS + Tailwind)** — opportunities table with WS
+  streaming, opportunity detail with paper-execute button, portfolio with
+  equity curve, admin allowlist editor.
 * **Observability** — structlog setup util.
 
-Remaining work is the React frontend, wiring the persistence layer into the
-running backend (currently all in-memory), and operator docs.
+Remaining work: WS streaming for Polymarket/Kalshi adapters (currently
+polling) and operator docs.
 
 ## Layout
 
@@ -68,19 +71,25 @@ See the full plan in `~/.copilot/session-state/<session-id>/plan.md`. Progress:
 3. **Phase 2 — Adapters** ✅ (polling; WS streams TBD)
 4. **Phase 3 — Event-group mapping + engine runtime** ✅
 5. **Phase 4 — Paper trading** ✅ (in-memory; DB persistence TBD)
-6. **Phase 5 — API + frontend** — backend done; React frontend TBD
+6. **Phase 5 — API + frontend** ✅
 7. **Phase 6 — Hardening** — backtest harness ✅, observability ✅, operator docs TBD
 
 ## Running locally
 
 ```bash
-# Postgres (only needed once you wire the persistence layer in)
+# Postgres (optional; SQLite works for dev/tests)
 docker compose up -d postgres
 alembic upgrade head
 
 # Backend
 uvicorn arbys.backend.app:app --reload
 # → http://127.0.0.1:8000/docs
+
+# Frontend (in another terminal)
+cd frontend
+npm install
+npm run dev
+# → http://localhost:5173  (proxies /api and /ws to :8000)
 ```
 
 Push a mock quote (no real venues needed):
