@@ -10,6 +10,27 @@ export interface EventGroup {
   legs: EventGroupLeg[];
 }
 
+export interface MonitoredLeg {
+  outcome_id: string;
+  venue_id: string;
+  is_yes_side: boolean;
+  bid: string | null;
+  ask: string | null;
+}
+
+export interface MonitoredGroup {
+  id: string;
+  title: string;
+  legs: MonitoredLeg[];
+  best_yes_ask: string | null;
+  best_yes_venue: string | null;
+  best_no_ask: string | null;
+  best_no_venue: string | null;
+  arb_edge: string | null;
+  has_arb: boolean;
+  fully_quoted: boolean;
+}
+
 export interface ArbLeg {
   outcome_id: string;
   venue_id: string;

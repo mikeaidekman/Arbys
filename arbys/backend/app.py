@@ -5,7 +5,12 @@ from __future__ import annotations
 from contextlib import asynccontextmanager
 from decimal import Decimal
 
+from dotenv import load_dotenv
 from fastapi import FastAPI, HTTPException, WebSocket, WebSocketDisconnect
+
+# Load .env from the working directory so ARBYS_* flags are honored when
+# uvicorn is launched with no explicit --env-file.
+load_dotenv()
 
 from ..adapters.base import ExecutionIntent, IntentLeg
 from ..db import repositories as repo
@@ -18,6 +23,8 @@ from .schemas import (
     EventGroupIn,
     EventGroupOut,
     ExecuteArbIn,
+    MonitoredGroupOut,
+    MonitoredLegOut,
     PaperAccountSummary,
     QuoteIn,
 )
@@ -131,6 +138,70 @@ def create_app() -> FastAPI:
                 for leg in opp.legs
             ],
         )
+
+    @app.get("/monitored", response_model=list[MonitoredGroupOut])
+    async def list_monitored() -> list[MonitoredGroupOut]:
+        """Return every registered event group + current quotes + arb edge.
+
+        For each group, ``arb_edge = 1 - (best_yes_ask + best_no_ask)`` where
+        the two asks are the cheapest way to buy each side of the canonical
+        proposition across venues. Positive edge means a risk-free arb exists
+        (before fees).
+        """
+        s = get_state()
+        out: list[MonitoredGroupOut] = []
+        for g in s.event_groups.values():
+            legs_out: list[MonitoredLegOut] = []
+            best_yes_ask: Decimal | None = None
+            best_yes_venue: str | None = None
+            best_no_ask: Decimal | None = None
+            best_no_venue: str | None = None
+            all_quoted = True
+            for leg in g.legs:
+                q = s.quotebook.get(leg.outcome_id)
+                bid = q.bid if q else None
+                ask = q.ask if q else None
+                if q is None or q.ask is None:
+                    all_quoted = False
+                legs_out.append(
+                    MonitoredLegOut(
+                        outcome_id=leg.outcome_id,
+                        venue_id=leg.venue_id,
+                        is_yes_side=leg.is_yes_side,
+                        bid=bid,
+                        ask=ask,
+                    )
+                )
+                if ask is not None:
+                    if leg.is_yes_side:
+                        if best_yes_ask is None or ask < best_yes_ask:
+                            best_yes_ask = ask
+                            best_yes_venue = leg.venue_id
+                    else:
+                        if best_no_ask is None or ask < best_no_ask:
+                            best_no_ask = ask
+                            best_no_venue = leg.venue_id
+            edge: Decimal | None = None
+            has_arb = False
+            if best_yes_ask is not None and best_no_ask is not None:
+                edge = Decimal("1") - (best_yes_ask + best_no_ask)
+                has_arb = edge > 0
+            out.append(
+                MonitoredGroupOut(
+                    id=g.id,
+                    title=g.title,
+                    legs=legs_out,
+                    best_yes_ask=best_yes_ask,
+                    best_yes_venue=best_yes_venue,
+                    best_no_ask=best_no_ask,
+                    best_no_venue=best_no_venue,
+                    arb_edge=edge,
+                    has_arb=has_arb,
+                    fully_quoted=all_quoted,
+                )
+            )
+        out.sort(key=lambda m: (not m.has_arb, m.arb_edge is None, -(float(m.arb_edge) if m.arb_edge is not None else 0)))
+        return out
 
     @app.get("/opportunities", response_model=list[ArbOpportunityOut])
     async def list_opps(limit: int = 50) -> list[ArbOpportunityOut]:

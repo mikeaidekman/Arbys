@@ -1,6 +1,7 @@
 import type {
   ArbOpportunity,
   EventGroup,
+  MonitoredGroup,
   PaperAccountSummary,
   PaperOrder,
   PnlSnapshot,
@@ -36,6 +37,8 @@ export const api = {
 
   listOpportunities: (limit = 50) =>
     req<ArbOpportunity[]>(`/opportunities?limit=${limit}`),
+
+  listMonitored: () => req<MonitoredGroup[]>("/monitored"),
 
   executeArb: (opportunity_index: number, account_id?: string) =>
     req<string[]>("/paper/execute", {

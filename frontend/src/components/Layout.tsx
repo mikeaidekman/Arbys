@@ -19,6 +19,9 @@ export function Layout() {
             <NavLink to="/" end className={linkCls}>
               Opportunities
             </NavLink>
+            <NavLink to="/monitored" className={linkCls}>
+              Monitored
+            </NavLink>
             <NavLink to="/portfolio" className={linkCls}>
               Portfolio
             </NavLink>
