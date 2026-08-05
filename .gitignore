@@ -42,3 +42,14 @@ Thumbs.db
 *.log
 data/
 output/
+
+# Test / lint caches
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+htmlcov/
+.coverage
+
+# Node
+node_modules/
+frontend/dist/
