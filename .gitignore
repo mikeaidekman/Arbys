@@ -42,6 +42,8 @@ Thumbs.db
 *.log
 data/
 output/
+*.db
+arbys-local.db
 
 # Test / lint caches
 .pytest_cache/

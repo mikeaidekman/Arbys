@@ -135,9 +135,14 @@ Add `arbys/adapters/<venue>.py` implementing `MarketDataAdapter` from
 - `stream_quotes(outcome_ids) -> AsyncIterator[Quote]` — optional WS stream;
   fall back to polling if the venue has no WS.
 
-Follow the Polymarket adapter as a template. Tests should use
-`httpx.MockTransport` (see `tests/adapters/test_polymarket.py`) — do **not**
-hit the real venue in tests.
+Follow the Polymarket adapter as a template. `PolymarketAdapter` uses a
+WebSocket (`wss://ws-subscriptions-clob.polymarket.com/ws/market`) as its
+primary transport with automatic REST-poll fallback if the WS connection fails
+repeatedly (default: 3 failures within 60s → switches to REST until WS
+recovers). Set `use_websocket=False` on construction to force REST-only.
+Tests should use `httpx.MockTransport` for REST paths and an in-process
+`websockets.serve` server for WS paths (see `tests/adapters/test_polymarket.py`) —
+do **not** hit the real venue in tests.
 
 ### 3.4 Wire the adapter into ingest
 
