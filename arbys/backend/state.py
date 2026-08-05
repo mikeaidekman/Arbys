@@ -9,13 +9,21 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
-from collections import deque
+import logging
+import os
+from collections import defaultdict, deque
+from collections.abc import Callable
 from decimal import Decimal
 
+from ..adapters.base import MarketDataAdapter
+from ..adapters.draftkings import DraftKingsAdapter, draftkings_enabled
+from ..adapters.kalshi import KalshiAdapter
+from ..adapters.polymarket import PolymarketAdapter
 from ..db import repositories as repo
 from ..db.session import session_scope
 from ..ingest.engine_runtime import EngineRuntime
 from ..ingest.pnl_service import PnlSnapshotService
+from ..ingest.worker import IngestWorker
 from ..shared.arb_engine import ArbOpportunity
 from ..shared.execution_router import ExecutionRouter
 from ..shared.fees import (
@@ -29,9 +37,30 @@ from ..shared.persistence import AccountScopedSink, DbPaperPersistenceSink
 from ..shared.quotebook import QuoteBook
 from ..shared.types import EventGroup
 
+log = logging.getLogger(__name__)
+
 MAX_RECENT_OPPS = 500
 
 DEFAULT_STARTING_BALANCE = Decimal("1000")
+
+
+def _ingest_enabled() -> bool:
+    """Live-ingest master switch. Off by default so tests never touch the network."""
+    return os.environ.get("ARBYS_ENABLE_INGEST", "0") == "1"
+
+
+# venue_id -> factory(outcome_ids) -> MarketDataAdapter
+AdapterFactory = Callable[[list[str]], MarketDataAdapter]
+
+
+def _default_adapter_factories() -> dict[str, AdapterFactory]:
+    factories: dict[str, AdapterFactory] = {
+        "polymarket": lambda oids: PolymarketAdapter(outcome_ids=oids),
+        "kalshi": lambda oids: KalshiAdapter(outcome_ids=oids),
+    }
+    if draftkings_enabled():
+        factories["draftkings"] = lambda oids: DraftKingsAdapter(outcome_ids=oids)
+    return factories
 
 
 class AppState:
@@ -68,6 +97,10 @@ class AppState:
             quotebook=self.quotebook,
             account_ids=[self.default_account_id],
         )
+
+        self.adapter_factories: dict[str, AdapterFactory] = _default_adapter_factories()
+        self._adapters: list[MarketDataAdapter] = []
+        self._ingest_worker: IngestWorker | None = None
 
     async def bootstrap(self) -> None:
         """Ensure schema, seed reference data, and hydrate in-memory state."""
@@ -143,7 +176,68 @@ class AppState:
 
         await self.pnl_service.start()
 
+        if _ingest_enabled():
+            await self._start_ingest()
+        else:
+            log.info("ARBYS_ENABLE_INGEST != 1; live market data ingest is disabled")
+
+    async def _start_ingest(self) -> None:
+        """Build one adapter per venue with registered outcomes; start worker."""
+        outcomes_by_venue: dict[str, list[str]] = defaultdict(list)
+        for group in self.event_groups.values():
+            for leg in group.legs:
+                outcomes_by_venue[leg.venue_id].append(leg.outcome_id)
+
+        adapters: list[MarketDataAdapter] = []
+        for venue_id, outcome_ids in outcomes_by_venue.items():
+            factory = self.adapter_factories.get(venue_id)
+            if factory is None:
+                log.warning(
+                    "no adapter factory registered for venue %s; skipping %d outcomes",
+                    venue_id,
+                    len(outcome_ids),
+                )
+                continue
+            dedup = sorted(set(outcome_ids))
+            adapters.append(factory(dedup))
+            log.info("ingest: %s adapter built for %d outcomes", venue_id, len(dedup))
+
+        if not adapters:
+            log.info("ingest: no adapters to start (no event groups registered)")
+            return
+
+        self._adapters = adapters
+        self._ingest_worker = IngestWorker(
+            adapters=adapters,
+            quotebook=self.quotebook,
+            on_quote=self.engine.on_quote,
+        )
+        await self._ingest_worker.start()
+        log.info("ingest worker started with %d adapters", len(adapters))
+
+    async def _stop_ingest(self) -> None:
+        if self._ingest_worker is not None:
+            await self._ingest_worker.stop()
+            self._ingest_worker = None
+        for adapter in self._adapters:
+            close = getattr(adapter, "close", None)
+            if close is not None:
+                with contextlib.suppress(Exception):
+                    await close()
+        self._adapters = []
+
+    async def restart_ingest(self) -> None:
+        """Public: stop and restart ingest to pick up new outcome subscriptions.
+
+        No-op when ``ARBYS_ENABLE_INGEST`` is off.
+        """
+        if not _ingest_enabled():
+            return
+        await self._stop_ingest()
+        await self._start_ingest()
+
     async def shutdown(self) -> None:
+        await self._stop_ingest()
         await self.pnl_service.stop()
 
     def _record_opportunity(self, opp: ArbOpportunity) -> None:

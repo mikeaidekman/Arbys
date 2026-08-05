@@ -36,7 +36,7 @@ async def main() -> None:
 
     try:
         await asyncio.wait_for(pump(), timeout=DURATION_S)
-    except asyncio.TimeoutError:
+    except TimeoutError:
         pass
     finally:
         await stream.aclose()

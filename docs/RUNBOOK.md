@@ -146,9 +146,19 @@ do **not** hit the real venue in tests.
 
 ### 3.4 Wire the adapter into ingest
 
-Register the adapter in whatever bootstraps `IngestWorker` (currently invoked
-manually — see `arbys/ingest/ingest_worker.py`). For local smoke tests you
-can skip live ingest entirely and use the admin **Push quote** tool.
+`AppState.bootstrap()` builds one adapter per venue from
+`AppState.adapter_factories` (defaults registered in `state.py`) and starts a
+single `IngestWorker` covering all outcomes registered on any event group.
+Whenever an event group is created or deleted via the REST API, ingest is
+restarted so new outcome subscriptions take effect.
+
+**Ingest is off by default** — set `ARBYS_ENABLE_INGEST=1` in `.env` to
+enable it. When disabled, quotes must be pushed via `POST /quotes` (useful
+for demos and tests).
+
+To register a new venue's factory, mutate `self.adapter_factories` on the
+`AppState` instance before `bootstrap()` runs, or add it directly to
+`_default_adapter_factories()` in `state.py`.
 
 ### 3.5 (Later) Implement a LiveExecutionAdapter
 
