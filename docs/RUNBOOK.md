@@ -94,6 +94,29 @@ curl -X POST http://localhost:8000/quotes -H "content-type: application/json" `
 
 Sum of 0.40 + (1 − 0.50) = 0.90 < 1 → an opportunity appears in the table.
 
+## 2.1 Auto-discovery (cross-venue MLB)
+
+Instead of curating each event group by hand, the backend can scan Kalshi and
+Polymarket every N minutes and register any MLB games it finds on both venues.
+
+Enable in `.env`:
+
+```
+ARBYS_ENABLE_INGEST=1
+ARBYS_ENABLE_DISCOVERY=1
+ARBYS_DISCOVERY_INTERVAL_S=600
+```
+
+One-off from the CLI:
+
+```powershell
+.\venv\Scripts\python.exe scripts\discover_mlb.py --dry-run   # just print
+.\venv\Scripts\python.exe scripts\discover_mlb.py             # upsert into DB
+```
+
+Discovery matches by `(sport, game_date, unordered team pair)` so opening-day
+tickers with unusual home/away conventions still align across venues.
+
 ## 3. Adding a new venue
 
 Adding a fourth venue is a scoped change; the arb engine, paper broker, and

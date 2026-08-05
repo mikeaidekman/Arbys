@@ -49,6 +49,19 @@ def _ingest_enabled() -> bool:
     return os.environ.get("ARBYS_ENABLE_INGEST", "0") == "1"
 
 
+def _discovery_enabled() -> bool:
+    """Auto-discovery master switch. Off by default so tests never touch the network."""
+    return os.environ.get("ARBYS_ENABLE_DISCOVERY", "0") == "1"
+
+
+def _discovery_interval_s() -> float:
+    raw = os.environ.get("ARBYS_DISCOVERY_INTERVAL_S", "600")
+    try:
+        return max(30.0, float(raw))
+    except ValueError:
+        return 600.0
+
+
 # venue_id -> factory(outcome_ids) -> MarketDataAdapter
 AdapterFactory = Callable[[list[str]], MarketDataAdapter]
 
@@ -101,6 +114,7 @@ class AppState:
         self.adapter_factories: dict[str, AdapterFactory] = _default_adapter_factories()
         self._adapters: list[MarketDataAdapter] = []
         self._ingest_worker: IngestWorker | None = None
+        self._discovery_service = None
 
     async def bootstrap(self) -> None:
         """Ensure schema, seed reference data, and hydrate in-memory state."""
@@ -181,6 +195,15 @@ class AppState:
         else:
             log.info("ARBYS_ENABLE_INGEST != 1; live market data ingest is disabled")
 
+        if _discovery_enabled():
+            from ..discovery.service import DiscoveryService
+
+            self._discovery_service = DiscoveryService(self, interval_s=_discovery_interval_s())
+            await self._discovery_service.start()
+            log.info("discovery service started (interval=%.0fs)", _discovery_interval_s())
+        else:
+            log.info("ARBYS_ENABLE_DISCOVERY != 1; auto-discovery is disabled")
+
     async def _start_ingest(self) -> None:
         """Build one adapter per venue with registered outcomes; start worker."""
         outcomes_by_venue: dict[str, list[str]] = defaultdict(list)
@@ -237,6 +260,9 @@ class AppState:
         await self._start_ingest()
 
     async def shutdown(self) -> None:
+        if self._discovery_service is not None:
+            await self._discovery_service.stop()
+            self._discovery_service = None
         await self._stop_ingest()
         await self.pnl_service.stop()
 
