@@ -52,4 +52,6 @@ export const api = {
     req<PaperOrder[]>(`/paper/${account_id}/orders`),
   paperPnl: (account_id: string, limit = 500) =>
     req<PnlSnapshot[]>(`/paper/${account_id}/pnl-snapshots?limit=${limit}`),
+  paperReset: (account_id: string) =>
+    req<PaperAccountSummary>(`/paper/${account_id}/reset`, { method: "POST" }),
 };

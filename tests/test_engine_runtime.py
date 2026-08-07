@@ -19,7 +19,12 @@ async def test_engine_emits_opportunity_on_qualifying_quote_update():
     book = QuoteBook()
     fees = {"poly": ZeroFeeModel("poly"), "kals": ZeroFeeModel("kals")}
     opps: list[ArbOpportunity] = []
-    engine = EngineRuntime(quotebook=book, fees=fees, on_opportunity=opps.append)
+    engine = EngineRuntime(
+        quotebook=book,
+        fees=fees,
+        on_opportunity=opps.append,
+        target_payoff=Decimal("1"),
+    )
 
     engine.register_group(
         EventGroup(

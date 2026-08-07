@@ -9,6 +9,7 @@ from __future__ import annotations
 import logging
 from collections import defaultdict
 from collections.abc import Callable
+from decimal import Decimal
 
 from ..shared.arb_engine import (
     ArbOpportunity,
@@ -23,6 +24,8 @@ log = logging.getLogger(__name__)
 
 OpportunityHandler = Callable[[ArbOpportunity], None]
 
+DEFAULT_TARGET_PAYOFF = Decimal("100")
+
 
 class EngineRuntime:
     def __init__(
@@ -31,10 +34,12 @@ class EngineRuntime:
         quotebook: QuoteBook,
         fees: FeeModelRegistry,
         on_opportunity: OpportunityHandler | None = None,
+        target_payoff: Decimal = DEFAULT_TARGET_PAYOFF,
     ) -> None:
         self._book = quotebook
         self._fees = fees
         self._on_opp = on_opportunity or (lambda _o: None)
+        self._target_payoff = target_payoff
         self._groups: dict[str, EventGroup] = {}
         self._outcome_to_groups: dict[str, set[str]] = defaultdict(set)
 
@@ -62,7 +67,9 @@ class EngineRuntime:
         quotes = {leg.outcome_id: self._book.get(leg.outcome_id) for leg in group.legs}
         quotes = {oid: q for oid, q in quotes.items() if q is not None}
 
-        cross = detect_cross_venue_two_leg(group, quotes, self._fees)
+        cross = detect_cross_venue_two_leg(
+            group, quotes, self._fees, target_payoff=self._target_payoff
+        )
         if cross is not None:
             self._on_opp(cross)
 
@@ -73,6 +80,12 @@ class EngineRuntime:
         for venue_id, legs in by_venue.items():
             if len(legs) < 2:
                 continue
-            comp = detect_complementary_set(f"{group_id}:{venue_id}", legs, quotes, self._fees)
+            comp = detect_complementary_set(
+                f"{group_id}:{venue_id}",
+                legs,
+                quotes,
+                self._fees,
+                target_payoff=self._target_payoff,
+            )
             if comp is not None:
                 self._on_opp(comp)

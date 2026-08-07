@@ -12,6 +12,7 @@ from .kalshi_sports import VenueGame
 from .players import Player, parse_vs_title, strip_prefix
 
 POLY_GAMMA_URL = "https://gamma-api.polymarket.com/markets"
+POLY_EVENTS_URL = "https://gamma-api.polymarket.com/events"
 
 # Substrings we look for in slug or question to gate tennis markets.
 TENNIS_MARKERS = ("atp-", "wta-", "tennis")
@@ -22,23 +23,61 @@ async def fetch_polymarket_tennis_matches(
     http_client: httpx.AsyncClient | None = None,
     limit: int = 500,
 ) -> list[VenueGame]:
+    """Fetch tennis matches from Polymarket.
+
+    Prefers the ``/events?tag_slug=tennis`` endpoint because it returns
+    tennis events regardless of 24h volume rank. The ``/markets`` endpoint
+    ordered by ``volume24hr`` used to miss most matches once politics /
+    crypto crowded the top-N. Falls back to the flat markets endpoint if
+    the events call fails, and unions results by slug.
+    """
     owns_client = http_client is None
     client = http_client or httpx.AsyncClient(timeout=15.0)
     try:
-        resp = await client.get(
-            POLY_GAMMA_URL,
-            params={
-                "closed": "false",
-                "active": "true",
-                "limit": limit,
-                "order": "volume24hr",
-                "ascending": "false",
-            },
-        )
-        resp.raise_for_status()
-        markets = resp.json()
+        markets_by_slug: dict[str, dict[str, Any]] = {}
+
+        try:
+            events_resp = await client.get(
+                POLY_EVENTS_URL,
+                params={
+                    "closed": "false",
+                    "active": "true",
+                    "tag_slug": "tennis",
+                    "limit": limit,
+                    "order": "startDate",
+                    "ascending": "false",
+                },
+            )
+            events_resp.raise_for_status()
+            for event in events_resp.json() or []:
+                for m in event.get("markets") or []:
+                    slug = m.get("slug")
+                    if slug:
+                        markets_by_slug.setdefault(slug, m)
+        except (httpx.HTTPError, json.JSONDecodeError):
+            pass
+
+        try:
+            markets_resp = await client.get(
+                POLY_GAMMA_URL,
+                params={
+                    "closed": "false",
+                    "active": "true",
+                    "limit": limit,
+                    "order": "volume24hr",
+                    "ascending": "false",
+                },
+            )
+            markets_resp.raise_for_status()
+            for m in markets_resp.json() or []:
+                slug = m.get("slug")
+                if slug:
+                    markets_by_slug.setdefault(slug, m)
+        except (httpx.HTTPError, json.JSONDecodeError):
+            pass
+
         games: list[VenueGame] = []
-        for m in markets:
+        for m in markets_by_slug.values():
             game = _parse_tennis_market(m)
             if game is not None:
                 games.append(game)

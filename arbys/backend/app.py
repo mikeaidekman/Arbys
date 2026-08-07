@@ -256,6 +256,12 @@ def create_app() -> FastAPI:
         async with session_scope() as session:
             return await repo.list_pnl_snapshots(session, account_id, limit=limit)
 
+    @app.post("/paper/{account_id}/reset", response_model=PaperAccountSummary)
+    async def paper_reset(account_id: str) -> PaperAccountSummary:
+        s = get_state()
+        await s.reset_paper_account(account_id)
+        return await paper_summary(account_id)
+
     @app.post("/paper/execute", response_model=list[str])
     async def paper_execute(body: ExecuteArbIn) -> list[str]:
         s = get_state()

@@ -64,7 +64,7 @@ pytest
 
 ## Roadmap
 
-See the full plan in `~/.copilot/session-state/<session-id>/plan.md`. Progress:
+Progress:
 
 1. **Phase 0 — Foundations** ✅
 2. **Phase 1 — Arb math** ✅

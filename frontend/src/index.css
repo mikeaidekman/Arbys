@@ -1,9 +1,67 @@
 @import "tailwindcss";
 
+/* The industry design system owns colors, type, borders, shadows, radii, and
+   the .card/.blueprint/.btn/.tag/.table/.nav/.field/.input primitives. This
+   file only carries the Vantage terminal's local helpers, lifted verbatim
+   from the mockup <style> block plus a couple of layout resets. */
+
 html, body, #root { height: 100%; }
-body {
-  margin: 0;
-  font-family: system-ui, -apple-system, 'Segoe UI', Roboto, sans-serif;
-  background: #0b0e14;
-  color: #d5dae1;
+body { margin: 0; }
+
+a { color: var(--color-accent); }
+a:hover { color: var(--color-accent-700); }
+
+@keyframes vt-pulse {
+  0%, 100% { opacity: 1; }
+  50% { opacity: 0.25; }
+}
+
+.vt-mono {
+  font-family: ui-monospace, "SF Mono", Menlo, monospace;
+}
+
+:root {
+  --vt-green: #1f9d55;
+  --vt-green-dark: #167a42;
+  --vt-green-tint: #e7f6ec;
+}
+
+.vt-card {
+  transition: border-color 120ms, box-shadow 120ms;
+  background: var(--color-bg);
+}
+.vt-card.vt-arb {
+  border-color: var(--vt-green);
+  box-shadow: 0 0 0 1px var(--vt-green), var(--shadow-sm);
+}
+
+.vt-scroll::-webkit-scrollbar { width: 8px; }
+.vt-scroll::-webkit-scrollbar-thumb { background: var(--color-divider); }
+
+.vt-combo {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 1px;
+  padding: 5px 7px;
+  font-size: 11px;
+  line-height: 1.25;
+}
+.vt-combo:disabled { cursor: not-allowed; }
+.vt-combo-active {
+  background: var(--vt-green) !important;
+  color: #fff !important;
+  border-color: var(--vt-green) !important;
+  box-shadow: 0 0 0 1px var(--vt-green);
+}
+.vt-combo-active:hover { background: var(--vt-green-dark) !important; }
+
+.vt-filled {
+  padding: 6px 8px;
+  font-size: 11px;
+  text-align: center;
+  border: 1px solid var(--vt-green);
+  color: var(--vt-green-dark);
+  background: var(--vt-green-tint);
 }

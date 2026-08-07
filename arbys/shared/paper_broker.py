@@ -112,6 +112,19 @@ class PaperExecutionAdapter(ExecutionAdapter):
         """
         self._accounts[account_id].balances[self.venue_id] = amount
 
+    def reset_account(self, account_id: str) -> None:
+        """Wipe in-memory state (balances, positions, realized PnL) for account.
+
+        Also drops any orders/fills that referenced this account. Does not touch
+        the DB — callers must delete persisted rows separately.
+        """
+        self._accounts.pop(account_id, None)
+        # _orders and _fills are keyed by order_id; we can't cheaply filter by
+        # account here, so we drop everything. Safe for the current single-
+        # account paper setup.
+        self._orders.clear()
+        self._fills.clear()
+
     def hydrate_position(
         self,
         account_id: str,

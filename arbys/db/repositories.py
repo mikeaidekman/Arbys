@@ -275,6 +275,35 @@ async def insert_paper_pnl_snapshot(
     )
 
 
+async def delete_paper_history(session: AsyncSession, account_id: str) -> None:
+    """Wipe all paper trading history for an account.
+
+    Deletes pnl snapshots, fills (via their orders), orders, positions, and
+    balances. Leaves the paper_account row itself intact.
+    """
+    order_ids = (
+        await session.execute(
+            select(m.PaperOrder.id).where(m.PaperOrder.account_id == account_id)
+        )
+    ).scalars().all()
+    if order_ids:
+        await session.execute(
+            delete(m.PaperFill).where(m.PaperFill.order_id.in_(order_ids))
+        )
+    await session.execute(
+        delete(m.PaperOrder).where(m.PaperOrder.account_id == account_id)
+    )
+    await session.execute(
+        delete(m.PaperPnlSnapshot).where(m.PaperPnlSnapshot.account_id == account_id)
+    )
+    await session.execute(
+        delete(m.PaperPosition).where(m.PaperPosition.account_id == account_id)
+    )
+    await session.execute(
+        delete(m.PaperBalance).where(m.PaperBalance.account_id == account_id)
+    )
+
+
 async def list_recent_opportunities(session: AsyncSession, *, limit: int = 50) -> list[dict]:
     rows = (
         await session.execute(

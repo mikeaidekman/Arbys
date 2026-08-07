@@ -37,6 +37,7 @@ async def run_backtest(
     starting_balances: dict[str, Decimal] | None = None,
     execute: bool = False,
     account_id: str = "bt",
+    target_payoff: Decimal = Decimal("1"),
 ) -> BacktestResult:
     book = QuoteBook()
     result = BacktestResult()
@@ -55,7 +56,12 @@ async def run_backtest(
     def on_opp(opp: ArbOpportunity) -> None:
         result.opportunities.append(opp)
 
-    engine = EngineRuntime(quotebook=book, fees=fees, on_opportunity=on_opp)
+    engine = EngineRuntime(
+        quotebook=book,
+        fees=fees,
+        on_opportunity=on_opp,
+        target_payoff=target_payoff,
+    )
     for group in event_groups:
         engine.register_group(group)
 

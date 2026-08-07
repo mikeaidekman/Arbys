@@ -22,6 +22,7 @@ from ..adapters.kalshi_ws import KalshiWebSocketAdapter, kalshi_ws_creds_from_en
 from ..adapters.polymarket import PolymarketAdapter
 from ..db import repositories as repo
 from ..db.session import session_scope
+from ..ingest.auto_settle_service import AutoSettleService
 from ..ingest.engine_runtime import EngineRuntime
 from ..ingest.pnl_service import PnlSnapshotService
 from ..ingest.worker import IngestWorker
@@ -123,6 +124,11 @@ class AppState:
             quotebook=self.quotebook,
             account_ids=[self.default_account_id],
         )
+        self.auto_settle_service = AutoSettleService(
+            event_groups=self.event_groups,
+            brokers=self.paper_brokers,
+            quotebook=self.quotebook,
+        )
 
         self.adapter_factories: dict[str, AdapterFactory] = _default_adapter_factories()
         self._adapters: list[MarketDataAdapter] = []
@@ -202,6 +208,7 @@ class AppState:
                 )
 
         await self.pnl_service.start()
+        await self.auto_settle_service.start()
 
         if _ingest_enabled():
             await self._start_ingest()
@@ -277,7 +284,32 @@ class AppState:
             await self._discovery_service.stop()
             self._discovery_service = None
         await self._stop_ingest()
+        await self.auto_settle_service.stop()
         await self.pnl_service.stop()
+
+    async def reset_paper_account(self, account_id: str) -> None:
+        """Wipe all history for a paper account and re-seed starting balances.
+
+        Clears in-memory broker state, deletes DB history, re-seeds
+        `DEFAULT_STARTING_BALANCE` per venue in memory and DB. Also clears the
+        auto-settle service's memoized "already settled" set so previously
+        settled groups can settle again if they re-trigger.
+        """
+        for broker in self.paper_brokers.values():
+            broker.reset_account(account_id)
+        async with session_scope() as session:
+            await repo.delete_paper_history(session, account_id)
+        for venue_id, broker in self.paper_brokers.items():
+            broker.hydrate_balance(account_id, DEFAULT_STARTING_BALANCE)
+            async with session_scope() as session:
+                await repo.upsert_paper_balance(
+                    session,
+                    account_id=account_id,
+                    venue_id=venue_id,
+                    amount=DEFAULT_STARTING_BALANCE,
+                )
+        self.auto_settle_service.clear_settled()
+        log.info("paper account %s reset to $%s per venue", account_id, DEFAULT_STARTING_BALANCE)
 
     def _record_opportunity(self, opp: ArbOpportunity) -> None:
         self.opportunities.appendleft(opp)
