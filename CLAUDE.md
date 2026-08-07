@@ -22,7 +22,7 @@ Run everything from the repo root with the venv Python — `venv\Scripts\python.
 — rather than a bare `python`.
 
 ```powershell
-venv\Scripts\python.exe -m pytest -q            # 116 tests, must stay green
+venv\Scripts\python.exe -m pytest -q            # 117 tests, must stay green
 venv\Scripts\python.exe -m ruff check .         # must stay clean
 venv\Scripts\python.exe -m mypy arbys           # see caveat below — NOT clean today
 ```
@@ -130,19 +130,16 @@ or commit it; query it if you need to inspect state.
 
 ## Known defects
 
-**Paper positions are hydrated into every broker on restart.**
-[state.py](arbys/backend/state.py) `bootstrap()` fans each persisted
-`paper_position` row out to all three brokers, because the `paper_position`
-table has no `venue_id` column — it's keyed on `account_id` + `outcome_id` only.
-`GET /paper/{account_id}` then sums qty across brokers and reports the same
-realized PnL under each venue, so **position qty and realized PnL come back 3×
-inflated after any backend restart**, and auto-settle would credit the resolved
-value three times.
+None currently tracked.
 
-A fresh process is correct, which is why the suite is green — nothing covers
-restart hydration with open positions. Fixing it needs a `venue_id` column on
-`paper_position` plus a migration and a hydration filter. Add a regression test
-that boots, persists a position, re-boots, and asserts single-counting.
+Previously listed here and now fixed (migration `0002`): `paper_position` had no
+`venue_id`, so restart hydration fanned every row out to all three brokers and
+`GET /paper/{account_id}` reported qty and realized PnL 3× inflated. The table is
+now keyed on `account_id` + `venue_id` + `outcome_id`, `bootstrap()` routes each
+row to its owning broker only, and `test_open_positions_hydrate_once_per_venue`
+in [tests/test_backend_e2e.py](tests/test_backend_e2e.py) covers the restart
+path. **Keep `venue_id` in that key** — dropping it silently reintroduces the
+inflation, which no fresh-process test can catch.
 
 ## Repo facts
 

@@ -44,6 +44,10 @@ data/
 output/
 *.db
 arbys-local.db
+# SQLite sidecars (rollback journal / WAL) — created next to the db at runtime
+*.db-journal
+*.db-wal
+*.db-shm
 
 # Test / lint caches
 .pytest_cache/

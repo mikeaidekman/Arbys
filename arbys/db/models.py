@@ -241,13 +241,18 @@ class PaperPosition(Base):
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
     account_id: Mapped[str] = mapped_column(ForeignKey("paper_account.id"), nullable=False)
+    venue_id: Mapped[str] = mapped_column(ForeignKey("venue.id"), nullable=False)
     outcome_id: Mapped[str] = mapped_column(ForeignKey("outcome.id"), nullable=False)
     qty: Mapped[Decimal] = mapped_column(NUM, nullable=False, default=Decimal("0"))
     avg_price: Mapped[Decimal] = mapped_column(NUM, nullable=False, default=Decimal("0"))
     realized_pnl: Mapped[Decimal] = mapped_column(NUM, nullable=False, default=Decimal("0"))
 
+    # venue_id is part of the key: outcome_id is venue-native, but one broker
+    # exists per venue and each must hydrate only its own rows on restart.
     __table_args__ = (
-        UniqueConstraint("account_id", "outcome_id", name="uq_paper_pos_acct_outcome"),
+        UniqueConstraint(
+            "account_id", "venue_id", "outcome_id", name="uq_paper_pos_acct_venue_outcome"
+        ),
     )
 
 

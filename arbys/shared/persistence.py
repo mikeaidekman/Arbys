@@ -49,11 +49,14 @@ class DbPaperPersistenceSink:
         qty: Decimal,
         avg_price: Decimal,
         realized_pnl: Decimal,
+        *,
+        venue_id: str,
     ) -> None:
         async with session_scope() as session:
             await repo.upsert_paper_position(
                 session,
                 account_id=account_id,
+                venue_id=venue_id,
                 outcome_id=outcome_id,
                 qty=qty,
                 avg_price=avg_price,
@@ -97,7 +100,9 @@ class AccountScopedSink:
         qty: Decimal,
         avg_price: Decimal,
         realized_pnl: Decimal,
+        *,
+        venue_id: str,
     ) -> None:
         await self._inner.on_position(
-            account_id, outcome_id, qty, avg_price, realized_pnl
+            account_id, outcome_id, qty, avg_price, realized_pnl, venue_id=venue_id
         )

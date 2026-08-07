@@ -232,13 +232,15 @@ async def insert_paper_fill(
 
 
 async def upsert_paper_position(
-    session: AsyncSession, *, account_id: str, outcome_id: str,
+    session: AsyncSession, *, account_id: str, venue_id: str, outcome_id: str,
     qty: Decimal, avg_price: Decimal, realized_pnl: Decimal,
 ) -> None:
+    await ensure_outcome_placeholder(session, outcome_id, venue_id=venue_id)
     row = (
         await session.execute(
             select(m.PaperPosition).where(
                 m.PaperPosition.account_id == account_id,
+                m.PaperPosition.venue_id == venue_id,
                 m.PaperPosition.outcome_id == outcome_id,
             )
         )
@@ -247,6 +249,7 @@ async def upsert_paper_position(
         session.add(
             m.PaperPosition(
                 account_id=account_id,
+                venue_id=venue_id,
                 outcome_id=outcome_id,
                 qty=qty,
                 avg_price=avg_price,

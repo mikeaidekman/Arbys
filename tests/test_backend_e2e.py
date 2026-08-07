@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import os
+from decimal import Decimal
 from pathlib import Path
 
 import pytest
@@ -90,4 +91,58 @@ def test_state_survives_restart(tmp_path):
         # Default paper balance should have hydrated (not double-seeded).
         r = client.get("/paper/default")
         assert r.status_code == 200
+
+
+def test_open_positions_hydrate_once_per_venue(tmp_path):
+    """Regression: an open position must not fan out to every paper broker.
+
+    `paper_position` is keyed on (account_id, venue_id, outcome_id). Before
+    venue_id existed, restart hydration handed each row to all three brokers,
+    so GET /paper summed the same position once per broker and reported qty
+    and realized PnL inflated by the broker count.
+    """
+    with TestClient(create_app()) as client:
+        r = client.post(
+            "/event-groups",
+            json={
+                "id": "eg-hydrate",
+                "title": "Hydration check",
+                "legs": [
+                    {"outcome_id": "p-yes", "venue_id": "polymarket", "is_yes_side": True},
+                    {"outcome_id": "k-no", "venue_id": "kalshi", "is_yes_side": False},
+                ],
+            },
+        )
+        assert r.status_code == 201
+
+        assert client.post(
+            "/quotes", json={"outcome_id": "p-yes", "bid": "0.40", "ask": "0.40"}
+        ).status_code == 204
+        assert client.post(
+            "/quotes", json={"outcome_id": "k-no", "bid": "0.50", "ask": "0.50"}
+        ).status_code == 204
+
+        assert client.post("/paper/execute", json={"opportunity_index": 0}).status_code == 200
+
+        before = client.get("/paper/default").json()
+        assert Decimal(before["positions"]["p-yes"]) > 0
+        assert Decimal(before["positions"]["k-no"]) > 0
+
+    # More than one broker must exist, or this test cannot detect fan-out.
+    assert len(state_module.get_state().paper_brokers) > 1
+
+    # Simulate restart: fresh in-memory state, same DB file.
+    state_module.reset_state()
+    db_session.reset_engine()
+
+    with TestClient(create_app()) as client:
+        after = client.get("/paper/default").json()
+
+    # Compare as Decimal — the DB round-trip changes the string scale
+    # ("100" -> "100.000000000000") without changing the value.
+    def as_decimals(d: dict) -> dict:
+        return {k: Decimal(v) for k, v in d.items()}
+
+    assert as_decimals(after["positions"]) == as_decimals(before["positions"])
+    assert as_decimals(after["realized_pnl"]) == as_decimals(before["realized_pnl"])
 

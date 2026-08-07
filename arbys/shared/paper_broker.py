@@ -58,6 +58,8 @@ class PaperPersistenceSink(Protocol):
         qty: Decimal,
         avg_price: Decimal,
         realized_pnl: Decimal,
+        *,
+        venue_id: str,
     ) -> None: ...
 
 
@@ -268,6 +270,7 @@ class PaperExecutionAdapter(ExecutionAdapter):
                     st.positions[outcome_id],
                     st.avg_price[outcome_id],
                     st.realized_by_outcome[outcome_id],
+                    venue_id=self.venue_id,
                 )
             )
         return order
@@ -340,6 +343,7 @@ class PaperExecutionAdapter(ExecutionAdapter):
                         Decimal("0"),
                         Decimal("0"),
                         st.realized_by_outcome[outcome_id],
+                        venue_id=self.venue_id,
                     )
                 )
 

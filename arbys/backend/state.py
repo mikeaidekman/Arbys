@@ -185,7 +185,10 @@ class AppState:
                 seeded_balance_venues.add(row.venue_id)
 
         for row in positions:
-            for broker in self.paper_brokers.values():
+            # Route to the owning venue only. Fanning a row out to every broker
+            # double/triple-counts qty and realized PnL in GET /paper on restart.
+            broker = self.paper_brokers.get(row.venue_id)
+            if broker is not None:
                 broker.hydrate_position(
                     self.default_account_id,
                     row.outcome_id,
