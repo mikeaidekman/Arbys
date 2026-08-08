@@ -76,6 +76,16 @@ Layers, strictly inward-depending:
   100 rows** ordered by 24h volume, where league games never outrank politics.
   NBA is wired but **unverified** — `KXNBAGAME` had no open events in the
   offseason, so recheck its codes and title format when the season starts.
+
+  **Neither venue publishes a live score or game clock** (checked 2026-08-08).
+  Kalshi has no score field; its `settlement_sources` just point at ESPN.
+  Polymarket's payload does contain the words `score` and `inning`, but only in
+  prose — a prop market's question, a link to mlb.com/scores, a narrative
+  blurb, and `teams[].record`, which is the *season* record, not the game
+  score. Both do report an exact start (`occurrence_datetime` /
+  `gameStartTime`), which is what `event_group.start_time` and the card
+  countdown use. Live scores would need a third-party feed; decided against
+  in favour of the countdown alone.
 - `arbys/ingest/` — async services: quote `worker`, `engine_runtime` (arb
   detection, triggered only on affected event groups), `pnl_service`,
   `auto_settle_service`.
