@@ -31,13 +31,14 @@ async def test_run_once_registers_new_groups_and_restarts_ingest(monkeypatch):
         ref="p",
     )
 
-    async def fake_kalshi(**_):
-        return [kalshi_game]
+    # Discovery now fans out over several team sports; only mlb has games here.
+    async def fake_kalshi(*, sport="mlb", **_):
+        return [kalshi_game] if sport == "mlb" else []
 
-    async def fake_poly(**_):
-        return [poly_game]
+    async def fake_poly(*, sport="mlb", **_):
+        return [poly_game] if sport == "mlb" else []
 
-    monkeypatch.setattr(service_mod, "fetch_kalshi_mlb_games", fake_kalshi)
+    monkeypatch.setattr(service_mod, "fetch_kalshi_team_games", fake_kalshi)
     monkeypatch.setattr(service_mod, "fetch_polymarket_sports_games", fake_poly)
 
     async def _empty(**_):
@@ -90,13 +91,14 @@ async def test_run_once_noop_when_group_unchanged(monkeypatch):
         ref="p",
     )
 
-    async def fake_kalshi(**_):
-        return [kalshi_game]
+    # Discovery now fans out over several team sports; only mlb has games here.
+    async def fake_kalshi(*, sport="mlb", **_):
+        return [kalshi_game] if sport == "mlb" else []
 
-    async def fake_poly(**_):
-        return [poly_game]
+    async def fake_poly(*, sport="mlb", **_):
+        return [poly_game] if sport == "mlb" else []
 
-    monkeypatch.setattr(service_mod, "fetch_kalshi_mlb_games", fake_kalshi)
+    monkeypatch.setattr(service_mod, "fetch_kalshi_team_games", fake_kalshi)
     monkeypatch.setattr(service_mod, "fetch_polymarket_sports_games", fake_poly)
 
     async def _empty(**_):

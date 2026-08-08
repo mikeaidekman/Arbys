@@ -64,13 +64,16 @@ MLB_TEAMS: tuple[Team, ...] = (
 class TeamResolver:
     """Bidirectional team code <-> name resolver, case- and punctuation-tolerant.
 
-    Kalshi's abbreviated ``title`` field looks like "Los Angeles D" or
-    "Chicago C" — the last word is a truncated nickname. We match on
-    (city, first_letter_of_nickname) to recover the code, which is more
-    robust than trying to expand the truncation.
+    Kalshi only disambiguates when it has to. A city fielding two teams comes
+    through as "Los Angeles D" / "Chicago C" — city plus the nickname's first
+    letter. Every other city arrives bare: "Atlanta", "Kansas City". Both forms
+    have to resolve, and a bare *shared* city ("Chicago") must stay unresolved
+    rather than guess.
     """
 
-    def __init__(self, teams: tuple[Team, ...]) -> None:
+    def __init__(
+        self, teams: tuple[Team, ...], aliases: dict[str, str] | None = None
+    ) -> None:
         self._by_code: dict[str, Team] = {t.code.upper(): t for t in teams}
         # (city_lower, nickname_first_letter) -> code. Handles collisions
         # (Chicago C/W, Los Angeles D/A, New York M/Y) via nickname prefix.
@@ -83,25 +86,41 @@ class TeamResolver:
         for t in teams:
             self._by_full[f"{t.city} {t.nickname}".lower()] = t
             self._by_full[t.nickname.lower()] = t
+        # Bare city -> team, but only where the city fields exactly one team.
+        # Shared cities are deliberately absent so they resolve to None.
+        city_counts: dict[str, int] = {}
+        for t in teams:
+            city_counts[t.city.lower()] = city_counts.get(t.city.lower(), 0) + 1
+        self._by_city_unique: dict[str, Team] = {
+            t.city.lower(): t for t in teams if city_counts[t.city.lower()] == 1
+        }
+        for alias, code in (aliases or {}).items():
+            team = self._by_code.get(code.upper())
+            if team is not None:
+                self._by_full[alias.strip().lower()] = team
 
     def by_code(self, code: str) -> Team | None:
         return self._by_code.get(code.upper())
 
     def by_kalshi_title(self, title: str) -> Team | None:
-        """Resolve a title like "Los Angeles D" or "New York Y" to a Team."""
+        """Resolve a title like "Los Angeles D", "New York Y", or "Atlanta"."""
         t = title.strip()
         if not t:
             return None
-        # Direct full-name / nickname match first.
+        # Direct full-name / nickname / alias match first.
         team = self._by_full.get(t.lower())
         if team is not None:
             return team
-        # Split into city and truncated nickname.
+        # City plus truncated nickname, e.g. "New York Y".
         parts = t.rsplit(" ", 1)
-        if len(parts) != 2:
-            return None
-        city_part, nick_part = parts
-        return self._by_city_and_prefix.get((city_part.lower(), nick_part[0].upper()))
+        if len(parts) == 2:
+            city_part, nick_part = parts
+            team = self._by_city_and_prefix.get((city_part.lower(), nick_part[0].upper()))
+            if team is not None:
+                return team
+        # Bare city, e.g. "Atlanta" or "Kansas City". Only resolves when that
+        # city fields a single team, so "Chicago" alone stays None.
+        return self._by_city_unique.get(t.lower())
 
     def by_polymarket_name(self, name: str) -> Team | None:
         """Resolve a Polymarket outcome or question fragment like
@@ -123,7 +142,99 @@ class TeamResolver:
         return None
 
 
-MLB_RESOLVER = TeamResolver(MLB_TEAMS)
+# Venue-specific labels that match no city/nickname rule.
+MLB_ALIASES = {
+    "a's": "ATH",
+    "as": "ATH",
+    "oakland athletics": "ATH",
+}
+
+MLB_RESOLVER = TeamResolver(MLB_TEAMS, aliases=MLB_ALIASES)
 
 
-TEAM_MAPS = {"mlb": MLB_RESOLVER}
+# Kalshi NFL codes and titles, verified against KXNFLGAME events on 2026-08-08.
+# Kalshi sends the bare city ("Detroit", "Green Bay") except for the two shared
+# cities, which arrive as "Los Angeles C" / "New York G".
+NFL_TEAMS: tuple[Team, ...] = (
+    Team("ARI", "Arizona Cardinals", "Arizona", "Cardinals"),
+    Team("ATL", "Atlanta Falcons", "Atlanta", "Falcons"),
+    Team("BAL", "Baltimore Ravens", "Baltimore", "Ravens"),
+    Team("BUF", "Buffalo Bills", "Buffalo", "Bills"),
+    Team("CAR", "Carolina Panthers", "Carolina", "Panthers"),
+    Team("CHI", "Chicago Bears", "Chicago", "Bears"),
+    Team("CIN", "Cincinnati Bengals", "Cincinnati", "Bengals"),
+    Team("CLE", "Cleveland Browns", "Cleveland", "Browns"),
+    Team("DAL", "Dallas Cowboys", "Dallas", "Cowboys"),
+    Team("DEN", "Denver Broncos", "Denver", "Broncos"),
+    Team("DET", "Detroit Lions", "Detroit", "Lions"),
+    Team("GB", "Green Bay Packers", "Green Bay", "Packers"),
+    Team("HOU", "Houston Texans", "Houston", "Texans"),
+    Team("IND", "Indianapolis Colts", "Indianapolis", "Colts"),
+    Team("JAX", "Jacksonville Jaguars", "Jacksonville", "Jaguars"),
+    Team("KC", "Kansas City Chiefs", "Kansas City", "Chiefs"),
+    Team("LV", "Las Vegas Raiders", "Las Vegas", "Raiders"),
+    Team("LAC", "Los Angeles Chargers", "Los Angeles", "Chargers"),
+    Team("LAR", "Los Angeles Rams", "Los Angeles", "Rams"),
+    Team("MIA", "Miami Dolphins", "Miami", "Dolphins"),
+    Team("MIN", "Minnesota Vikings", "Minnesota", "Vikings"),
+    Team("NE", "New England Patriots", "New England", "Patriots"),
+    Team("NO", "New Orleans Saints", "New Orleans", "Saints"),
+    Team("NYG", "New York Giants", "New York", "Giants"),
+    Team("NYJ", "New York Jets", "New York", "Jets"),
+    Team("PHI", "Philadelphia Eagles", "Philadelphia", "Eagles"),
+    Team("PIT", "Pittsburgh Steelers", "Pittsburgh", "Steelers"),
+    Team("SF", "San Francisco 49ers", "San Francisco", "49ers"),
+    Team("SEA", "Seattle Seahawks", "Seattle", "Seahawks"),
+    Team("TB", "Tampa Bay Buccaneers", "Tampa Bay", "Buccaneers"),
+    Team("TEN", "Tennessee Titans", "Tennessee", "Titans"),
+    Team("WAS", "Washington Commanders", "Washington", "Commanders"),
+)
+
+NFL_RESOLVER = TeamResolver(NFL_TEAMS)
+
+
+# NBA. Codes follow Kalshi's documented convention, but KXNBAGAME had no open
+# events when this was written (deep offseason), so unlike MLB and NFL these
+# are NOT verified against live venue data. Recheck the codes and the
+# yes_sub_title format once the season opens.
+NBA_TEAMS: tuple[Team, ...] = (
+    Team("ATL", "Atlanta Hawks", "Atlanta", "Hawks"),
+    Team("BOS", "Boston Celtics", "Boston", "Celtics"),
+    Team("BKN", "Brooklyn Nets", "Brooklyn", "Nets"),
+    Team("CHA", "Charlotte Hornets", "Charlotte", "Hornets"),
+    Team("CHI", "Chicago Bulls", "Chicago", "Bulls"),
+    Team("CLE", "Cleveland Cavaliers", "Cleveland", "Cavaliers"),
+    Team("DAL", "Dallas Mavericks", "Dallas", "Mavericks"),
+    Team("DEN", "Denver Nuggets", "Denver", "Nuggets"),
+    Team("DET", "Detroit Pistons", "Detroit", "Pistons"),
+    Team("GS", "Golden State Warriors", "Golden State", "Warriors"),
+    Team("HOU", "Houston Rockets", "Houston", "Rockets"),
+    Team("IND", "Indiana Pacers", "Indiana", "Pacers"),
+    Team("LAC", "Los Angeles Clippers", "Los Angeles", "Clippers"),
+    Team("LAL", "Los Angeles Lakers", "Los Angeles", "Lakers"),
+    Team("MEM", "Memphis Grizzlies", "Memphis", "Grizzlies"),
+    Team("MIA", "Miami Heat", "Miami", "Heat"),
+    Team("MIL", "Milwaukee Bucks", "Milwaukee", "Bucks"),
+    Team("MIN", "Minnesota Timberwolves", "Minnesota", "Timberwolves"),
+    Team("NO", "New Orleans Pelicans", "New Orleans", "Pelicans"),
+    Team("NYK", "New York Knicks", "New York", "Knicks"),
+    Team("OKC", "Oklahoma City Thunder", "Oklahoma City", "Thunder"),
+    Team("ORL", "Orlando Magic", "Orlando", "Magic"),
+    Team("PHI", "Philadelphia 76ers", "Philadelphia", "76ers"),
+    Team("PHX", "Phoenix Suns", "Phoenix", "Suns"),
+    Team("POR", "Portland Trail Blazers", "Portland", "Trail Blazers"),
+    Team("SAC", "Sacramento Kings", "Sacramento", "Kings"),
+    Team("SA", "San Antonio Spurs", "San Antonio", "Spurs"),
+    Team("TOR", "Toronto Raptors", "Toronto", "Raptors"),
+    Team("UTA", "Utah Jazz", "Utah", "Jazz"),
+    Team("WAS", "Washington Wizards", "Washington", "Wizards"),
+)
+
+NBA_RESOLVER = TeamResolver(NBA_TEAMS)
+
+
+TEAM_MAPS = {
+    "mlb": MLB_RESOLVER,
+    "nfl": NFL_RESOLVER,
+    "nba": NBA_RESOLVER,
+}

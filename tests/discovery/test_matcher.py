@@ -72,6 +72,60 @@ def test_match_games_date_mismatch_does_not_match():
     assert match_games(kalshi, poly) == []
 
 
+def test_match_games_matches_every_game_of_a_series():
+    """MLB plays the same pair on consecutive days; each game is its own group.
+
+    Bucketing by (sport, pair) alone collapsed a 3-game series to a single
+    match anchored on the earliest date, silently dropping the rest.
+    """
+    kalshi = [
+        _game("kalshi", ("NYM", "ATL"), d, {"NYM": f"K-NYM-{d}", "ATL": f"K-ATL-{d}"})
+        for d in ("2026-08-10", "2026-08-11", "2026-08-12")
+    ]
+    poly = [
+        _game("polymarket", ("NYM", "ATL"), d, {"NYM": f"P-NYM-{d}", "ATL": f"P-ATL-{d}"})
+        for d in ("2026-08-10", "2026-08-11", "2026-08-12")
+    ]
+    matches = match_games(kalshi, poly)
+    assert len(matches) == 3
+    assert [m.game_date for m in matches] == ["2026-08-10", "2026-08-11", "2026-08-12"]
+    for m in matches:
+        assert set(m.per_venue.keys()) == {"kalshi", "polymarket"}
+        # Each match must carry that date's own outcome ids, not another game's.
+        for venue, g in m.per_venue.items():
+            assert all(m.game_date in oid for oid in g.outcome_ids.values()), (venue, g)
+
+
+def test_match_games_tolerance_does_not_fuse_consecutive_series_games():
+    """With tolerance, a venue must still pair with its own-date counterpart.
+
+    Fusing Monday's Kalshi game with Tuesday's Polymarket game would invent an
+    arb between two different games.
+    """
+    kalshi = [
+        _game("kalshi", ("NYM", "ATL"), d, {"NYM": f"K-NYM-{d}", "ATL": f"K-ATL-{d}"})
+        for d in ("2026-08-10", "2026-08-11")
+    ]
+    poly = [
+        _game("polymarket", ("NYM", "ATL"), d, {"NYM": f"P-NYM-{d}", "ATL": f"P-ATL-{d}"})
+        for d in ("2026-08-10", "2026-08-11")
+    ]
+    matches = match_games(kalshi, poly, date_tolerance_days=1)
+    for m in matches:
+        k = m.per_venue["kalshi"].game_date.isoformat()
+        p = m.per_venue["polymarket"].game_date.isoformat()
+        assert k == p, f"fused different games: kalshi={k} polymarket={p}"
+
+
+def test_match_games_tolerance_still_bridges_offset_dates():
+    """Tennis relies on tolerance: Kalshi's trading day can trail the UTC date."""
+    kalshi = [_game("kalshi", ("LAD", "CHC"), "2026-08-05", {"LAD": "K1", "CHC": "K2"})]
+    poly = [_game("polymarket", ("LAD", "CHC"), "2026-08-06", {"LAD": "P1", "CHC": "P2"})]
+    matches = match_games(kalshi, poly, date_tolerance_days=1)
+    assert len(matches) == 1
+    assert set(matches[0].per_venue.keys()) == {"kalshi", "polymarket"}
+
+
 def test_match_to_event_group_builds_four_legs():
     kalshi = _game("kalshi", ("LAD", "CHC"), "2026-08-05", {"LAD": "K-LAD:YES", "CHC": "K-CHC:YES"})
     poly = _game("polymarket", ("LAD", "CHC"), "2026-08-05", {"LAD": "P-LAD", "CHC": "P-CHC"})

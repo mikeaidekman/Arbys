@@ -31,6 +31,37 @@ def test_by_kalshi_title_unknown_returns_none():
     assert MLB_RESOLVER.by_kalshi_title("") is None
 
 
+# Kalshi only appends the truncated-nickname letter when a city fields more
+# than one team. For the other 24 cities it sends the bare city name, which
+# used to resolve to None and silently drop the whole game from discovery.
+def test_by_kalshi_title_bare_city_single_word():
+    assert MLB_RESOLVER.by_kalshi_title("Atlanta").code == "ATL"
+    assert MLB_RESOLVER.by_kalshi_title("Boston").code == "BOS"
+    assert MLB_RESOLVER.by_kalshi_title("Miami").code == "MIA"
+    assert MLB_RESOLVER.by_kalshi_title("Toronto").code == "TOR"
+
+
+def test_by_kalshi_title_bare_city_multi_word():
+    # "Kansas City" must not be read as city="Kansas" + nickname="C".
+    assert MLB_RESOLVER.by_kalshi_title("Kansas City").code == "KC"
+    assert MLB_RESOLVER.by_kalshi_title("San Diego").code == "SD"
+    assert MLB_RESOLVER.by_kalshi_title("Tampa Bay").code == "TB"
+    assert MLB_RESOLVER.by_kalshi_title("St. Louis").code == "STL"
+
+
+def test_by_kalshi_title_athletics_alias():
+    # Kalshi labels the Athletics "A's"; they have no city-qualified form.
+    assert MLB_RESOLVER.by_kalshi_title("A's").code == "ATH"
+    assert MLB_RESOLVER.by_kalshi_title("Athletics").code == "ATH"
+
+
+def test_by_kalshi_title_shared_city_stays_ambiguous():
+    # A bare shared city is genuinely ambiguous and must not guess a team.
+    assert MLB_RESOLVER.by_kalshi_title("Chicago") is None
+    assert MLB_RESOLVER.by_kalshi_title("New York") is None
+    assert MLB_RESOLVER.by_kalshi_title("Los Angeles") is None
+
+
 def test_by_polymarket_name_full_form():
     assert MLB_RESOLVER.by_polymarket_name("Los Angeles Dodgers").code == "LAD"
     assert MLB_RESOLVER.by_polymarket_name("chicago cubs").code == "CHC"

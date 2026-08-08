@@ -12,6 +12,15 @@ from .kalshi_sports import VenueGame
 from .teams import TeamResolver
 
 POLY_GAMMA_URL = "https://gamma-api.polymarket.com/markets"
+POLY_EVENTS_URL = "https://gamma-api.polymarket.com/events"
+
+# Polymarket tag slug to query per sport. The tagged /events endpoint returns
+# a league's games regardless of 24h volume rank.
+SPORT_TAG_SLUGS = {
+    "mlb": "mlb",
+    "nfl": "nfl",
+    "nba": "nba",
+}
 
 
 async def fetch_polymarket_sports_games(
@@ -20,30 +29,73 @@ async def fetch_polymarket_sports_games(
     sport: str,
     http_client: httpx.AsyncClient | None = None,
     limit: int = 500,
+    tag_slug: str | None = None,
 ) -> list[VenueGame]:
     """Fetch active Polymarket markets, keep those that parse as a
     two-team ``vs`` game using ``resolver``.
+
+    Queries the ``/events?tag_slug=<league>`` endpoint first. The flat
+    ``/markets`` endpoint is ordered by ``volume24hr`` and silently caps at
+    100 rows, so an in-season league never outranks politics and esports
+    there — MLB returned zero games for exactly that reason. ``/markets`` is
+    still unioned in as a fallback, matching the tennis path.
 
     Only the ``sport`` label is attached to results — the resolver is
     the actual filter (unknown team names are dropped).
     """
     owns_client = http_client is None
     client = http_client or httpx.AsyncClient(timeout=15.0)
+    slug = tag_slug or SPORT_TAG_SLUGS.get(sport, sport)
     try:
-        resp = await client.get(
-            POLY_GAMMA_URL,
-            params={
-                "closed": "false",
-                "active": "true",
-                "limit": limit,
-                "order": "volume24hr",
-                "ascending": "false",
-            },
-        )
-        resp.raise_for_status()
-        markets = resp.json()
+        markets_by_key: dict[str, dict[str, Any]] = {}
+
+        def _remember(m: dict[str, Any]) -> None:
+            key = str(m.get("slug") or m.get("id") or m.get("question") or "")
+            if key:
+                markets_by_key.setdefault(key, m)
+
+        try:
+            events_resp = await client.get(
+                POLY_EVENTS_URL,
+                params={
+                    "closed": "false",
+                    "active": "true",
+                    "tag_slug": slug,
+                    "limit": limit,
+                    "order": "startDate",
+                    "ascending": "false",
+                },
+            )
+            events_resp.raise_for_status()
+            for event in events_resp.json() or []:
+                if not isinstance(event, dict):
+                    continue
+                for m in event.get("markets") or []:
+                    if isinstance(m, dict):
+                        _remember(m)
+        except (httpx.HTTPError, json.JSONDecodeError):
+            pass
+
+        try:
+            resp = await client.get(
+                POLY_GAMMA_URL,
+                params={
+                    "closed": "false",
+                    "active": "true",
+                    "limit": limit,
+                    "order": "volume24hr",
+                    "ascending": "false",
+                },
+            )
+            resp.raise_for_status()
+            for m in resp.json() or []:
+                if isinstance(m, dict):
+                    _remember(m)
+        except (httpx.HTTPError, json.JSONDecodeError):
+            pass
+
         games: list[VenueGame] = []
-        for m in markets:
+        for m in markets_by_key.values():
             game = _parse_market(m, resolver, sport)
             if game is not None:
                 games.append(game)

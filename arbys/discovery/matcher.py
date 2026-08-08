@@ -37,9 +37,14 @@ def match_games(
 
     Only returns matches with games from >= 2 distinct venues. Order of
     the input lists doesn't matter; games within a venue that don't
-    match another venue are dropped. When multiple games on the same
-    venue could plausibly match (rare), the one closest in date to
-    the other venue's game wins.
+    match another venue are dropped.
+
+    A pair can meet more than once in the discovery window — MLB plays
+    three-game series on consecutive days — so each bucket is split into
+    date clusters and every cluster yields its own match. Within a cluster a
+    venue contributes at most one game, the one nearest the cluster anchor,
+    which keeps tolerance from fusing Monday's game on one venue with
+    Tuesday's on the other.
     """
     # Bucket by (sport, participant-pair) only — apply date tolerance within
     # each bucket. This is O(n log n) in the number of games per pair.
@@ -53,31 +58,41 @@ def match_games(
     for _key, games in buckets.items():
         if {g.venue_id for g in games} == {games[0].venue_id}:
             continue  # single venue only
-        # Take the earliest game as the anchor for canonical date + participants.
         games.sort(key=lambda g: g.game_date)
-        anchor = games[0]
-        anchor_teams_sorted = sorted(anchor.teams, key=lambda t: t.code)
-        per_venue: dict[str, VenueGame] = {}
-        for g in games:
-            if abs(g.game_date - anchor.game_date) > tol:
+        claimed = [False] * len(games)
+
+        for i, anchor in enumerate(games):
+            if claimed[i]:
                 continue
-            # Prefer the game closest in date if a venue already has one.
-            existing = per_venue.get(g.venue_id)
-            if existing is None or abs(g.game_date - anchor.game_date) < abs(
-                existing.game_date - anchor.game_date
-            ):
-                per_venue[g.venue_id] = g
-        if len(per_venue) < 2:
-            continue
-        matches.append(
-            CrossVenueMatch(
-                sport=anchor.sport,
-                game_date=anchor.game_date.isoformat(),
-                team_a=anchor_teams_sorted[0],
-                team_b=anchor_teams_sorted[1],
-                per_venue=per_venue,
+            # Greedily build one cluster around the earliest unclaimed game.
+            per_venue: dict[str, VenueGame] = {}
+            chosen_idx: dict[str, int] = {}
+            for j in range(i, len(games)):
+                if claimed[j]:
+                    continue
+                g = games[j]
+                if abs(g.game_date - anchor.game_date) > tol:
+                    continue
+                existing = per_venue.get(g.venue_id)
+                if existing is None or abs(g.game_date - anchor.game_date) < abs(
+                    existing.game_date - anchor.game_date
+                ):
+                    per_venue[g.venue_id] = g
+                    chosen_idx[g.venue_id] = j
+            for j in chosen_idx.values():
+                claimed[j] = True
+            if len(per_venue) < 2:
+                continue
+            anchor_teams_sorted = sorted(anchor.teams, key=lambda t: t.code)
+            matches.append(
+                CrossVenueMatch(
+                    sport=anchor.sport,
+                    game_date=anchor.game_date.isoformat(),
+                    team_a=anchor_teams_sorted[0],
+                    team_b=anchor_teams_sorted[1],
+                    per_venue=per_venue,
+                )
             )
-        )
     matches.sort(key=lambda m: (m.game_date, m.team_a.code, m.team_b.code))
     return matches
 

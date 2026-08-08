@@ -47,25 +47,40 @@ class VenueGame:
     ref: str  # venue-specific identifier (event ticker, market slug, etc.)
 
 
-async def fetch_kalshi_mlb_games(
+# Kalshi series ticker per team sport. All share the same event/market shape:
+# "<SERIES>-<yyMONdd[hhmm]><CODES>" with one market per side whose
+# ``yes_sub_title`` is the team's city (or "City X" where a city has two teams).
+SERIES_TICKERS = {
+    "mlb": "KXMLBGAME",
+    "nfl": "KXNFLGAME",
+    "nba": "KXNBAGAME",
+}
+
+
+async def fetch_kalshi_team_games(
     *,
     resolver: TeamResolver,
+    sport: str,
+    series_ticker: str | None = None,
     http_client: httpx.AsyncClient | None = None,
     limit: int = 100,
 ) -> list[VenueGame]:
-    """Fetch open MLB game events from Kalshi and return VenueGame per game."""
+    """Fetch open game events for a team sport and return a VenueGame per game."""
+    series = series_ticker or SERIES_TICKERS.get(sport)
+    if series is None:
+        raise ValueError(f"no Kalshi series ticker known for sport {sport!r}")
     owns_client = http_client is None
     client = http_client or httpx.AsyncClient(timeout=15.0, base_url=KALSHI_BASE)
     try:
         events_resp = await _get_with_retry(
-            client, "/events", {"series_ticker": "KXMLBGAME", "status": "open", "limit": limit}
+            client, "/events", {"series_ticker": series, "status": "open", "limit": limit}
         )
         events_resp.raise_for_status()
         events = events_resp.json().get("events", [])
 
         games: list[VenueGame] = []
         for ev in events:
-            game = await _parse_kalshi_event(client, ev, resolver)
+            game = await _parse_kalshi_event(client, ev, resolver, sport=sport)
             if game is not None:
                 games.append(game)
             await asyncio.sleep(_REQUEST_SPACING_S)
@@ -75,8 +90,20 @@ async def fetch_kalshi_mlb_games(
             await client.aclose()
 
 
+async def fetch_kalshi_mlb_games(
+    *,
+    resolver: TeamResolver,
+    http_client: httpx.AsyncClient | None = None,
+    limit: int = 100,
+) -> list[VenueGame]:
+    """Fetch open MLB game events from Kalshi and return VenueGame per game."""
+    return await fetch_kalshi_team_games(
+        resolver=resolver, sport="mlb", http_client=http_client, limit=limit
+    )
+
+
 async def _parse_kalshi_event(
-    client: httpx.AsyncClient, event: dict, resolver: TeamResolver
+    client: httpx.AsyncClient, event: dict, resolver: TeamResolver, *, sport: str = "mlb"
 ) -> VenueGame | None:
     event_ticker = event.get("event_ticker") or ""
     if not event_ticker:
@@ -112,7 +139,7 @@ async def _parse_kalshi_event(
 
     team_list = tuple(teams_found.values())
     return VenueGame(
-        sport="mlb",
+        sport=sport,
         venue_id="kalshi",
         game_date=game_date,
         teams=(team_list[0], team_list[1]),
