@@ -22,7 +22,7 @@ Run everything from the repo root with the venv Python — `venv\Scripts\python.
 — rather than a bare `python`.
 
 ```powershell
-venv\Scripts\python.exe -m pytest -q            # 117 tests, must stay green
+venv\Scripts\python.exe -m pytest -q            # 128 tests, must stay green
 venv\Scripts\python.exe -m ruff check .         # must stay clean
 venv\Scripts\python.exe -m mypy arbys           # see caveat below — NOT clean today
 ```
@@ -63,7 +63,19 @@ Layers, strictly inward-depending:
   `ExecutionAdapter` ABCs in `base.py`. WS-first with REST-poll fallback.
 - `arbys/discovery/` — scans Kalshi + Polymarket for the same real-world game
   and auto-registers cross-venue event groups. Matching is by
-  `(sport, game_date, unordered team pair)`.
+  `(sport, game_date, unordered team pair)`, then split into date clusters so
+  a team pair meeting on consecutive days (MLB series) yields one group per
+  game. Team sports share one path: `fetch_kalshi_team_games` +
+  `SERIES_TICKERS` on the Kalshi side, `/events?tag_slug=<league>` +
+  `SPORT_TAG_SLUGS` on the Polymarket side. Adding a league means adding a
+  team table, a series ticker, and a tag slug.
+
+  Two traps, both of which silently returned zero groups rather than erroring:
+  Kalshi sends a **bare city** (`"Atlanta"`) except where a city fields two
+  teams (`"New York Y"`), and Polymarket's flat `/markets` endpoint **caps at
+  100 rows** ordered by 24h volume, where league games never outrank politics.
+  NBA is wired but **unverified** — `KXNBAGAME` had no open events in the
+  offseason, so recheck its codes and title format when the season starts.
 - `arbys/ingest/` — async services: quote `worker`, `engine_runtime` (arb
   detection, triggered only on affected event groups), `pnl_service`,
   `auto_settle_service`.
