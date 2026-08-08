@@ -1,5 +1,5 @@
-import { useMemo, useState } from "react";
-import { useQuery } from "@tanstack/react-query";
+import { useMemo, useRef, useState } from "react";
+import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { api } from "../api/client";
 import type { ArbOpportunity, MonitoredGroup } from "../api/types";
 import { useOpportunityStream } from "../hooks/useOpportunityStream";
@@ -19,31 +19,30 @@ import { useNow } from "../hooks/useNow";
 const VENUES = ["Polymarket", "Kalshi"];
 
 export function TerminalPage() {
+  const qc = useQueryClient();
   const { data: monitored = [] } = useQuery<MonitoredGroup[]>({
     queryKey: ["monitored"],
     queryFn: () => api.listMonitored(),
     refetchInterval: 3_000,
   });
 
-  const { data: restOpps = [] } = useQuery<ArbOpportunity[]>({
+  // GET /opportunities is the authoritative live set — entries exist only
+  // while the detector still finds that edge at current quotes. The websocket
+  // announces new edges but cannot announce dead ones, so it triggers a
+  // refetch rather than contributing entries of its own.
+  const { data: opportunities = [] } = useQuery<ArbOpportunity[]>({
     queryKey: ["opps"],
     queryFn: () => api.listOpportunities(200),
     refetchInterval: 3_000,
   });
-  const { items: streamed } = useOpportunityStream(200);
-  const opportunities = useMemo(() => {
-    const seen = new Set<string>();
-    const key = (o: ArbOpportunity) =>
-      `${o.event_group_id}:${o.total_stake}:${o.guaranteed_profit_bps}`;
-    const out: ArbOpportunity[] = [];
-    for (const o of [...streamed, ...restOpps]) {
-      const k = key(o);
-      if (seen.has(k)) continue;
-      seen.add(k);
-      out.push(o);
-    }
-    return out;
-  }, [streamed, restOpps]);
+  const lastPush = useRef(0);
+  useOpportunityStream(() => {
+    // Coalesce bursts; the 3s poll is the floor either way.
+    const now = Date.now();
+    if (now - lastPush.current < 500) return;
+    lastPush.current = now;
+    qc.invalidateQueries({ queryKey: ["opps"] });
+  });
 
   const [sportFilter, setSportFilter] = useState("All");
   const [arbOnly, setArbOnly] = useState(false);

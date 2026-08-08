@@ -1,14 +1,22 @@
 import { useEffect, useRef, useState } from "react";
-import type { ArbOpportunity } from "../api/types";
 
 /**
- * Subscribes to /ws/opportunities and keeps a rolling buffer of recent
- * pushed opportunities. Auto-reconnects with exponential backoff.
+ * Subscribes to /ws/opportunities and signals that the live set has changed.
+ *
+ * Deliberately keeps no buffer of pushed opportunities. The socket announces
+ * *new* edges; it never announces that an edge died, so a client-side buffer
+ * of pushes is a log of things that were once true — exactly the shape of
+ * staleness the server side was just fixed for. The authoritative live set is
+ * whatever GET /opportunities returns, so a push simply prompts a refetch.
+ *
+ * Auto-reconnects with exponential backoff. `onPush` is held in a ref so a
+ * caller passing an inline closure does not tear down the socket each render.
  */
-export function useOpportunityStream(maxBuffer = 100) {
-  const [items, setItems] = useState<ArbOpportunity[]>([]);
+export function useOpportunityStream(onPush: () => void) {
   const [connected, setConnected] = useState(false);
   const wsRef = useRef<WebSocket | null>(null);
+  const onPushRef = useRef(onPush);
+  onPushRef.current = onPush;
 
   useEffect(() => {
     let cancelled = false;
@@ -23,13 +31,9 @@ export function useOpportunityStream(maxBuffer = 100) {
         setConnected(true);
         backoff = 500;
       };
-      ws.onmessage = (ev) => {
-        try {
-          const opp = JSON.parse(ev.data) as ArbOpportunity;
-          setItems((prev) => [opp, ...prev].slice(0, maxBuffer));
-        } catch {
-          /* ignore parse errors */
-        }
+      ws.onmessage = () => {
+        // Payload intentionally ignored — it is a change notification.
+        onPushRef.current();
       };
       ws.onclose = () => {
         setConnected(false);
@@ -46,7 +50,7 @@ export function useOpportunityStream(maxBuffer = 100) {
       cancelled = true;
       wsRef.current?.close();
     };
-  }, [maxBuffer]);
+  }, []);
 
-  return { items, connected };
+  return { connected };
 }

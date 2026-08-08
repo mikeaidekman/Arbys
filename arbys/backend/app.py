@@ -266,11 +266,15 @@ def create_app() -> FastAPI:
     @app.post("/paper/execute", response_model=list[str])
     async def paper_execute(body: ExecuteArbIn) -> list[str]:
         s = get_state()
-        opportunities = list(s.opportunities)
         if body.event_group_id is not None:
+            # Re-detect against the live quote book rather than filling from a
+            # stored record. A previously detected opportunity carries the
+            # prices it was found at; replaying those is what produced
+            # "limit_exceeded" once the market moved.
+            fresh = s.live_opportunities_for(body.event_group_id)
             wanted = set(body.outcome_ids) if body.outcome_ids else None
             opp = None
-            for candidate in opportunities:
+            for candidate in fresh:
                 if candidate.event_group_id != body.event_group_id:
                     continue
                 if wanted is not None:
@@ -281,13 +285,14 @@ def create_app() -> FastAPI:
                 break
             if opp is None:
                 raise HTTPException(
-                    status_code=404,
+                    status_code=409,
                     detail=(
-                        "no live opportunity for event_group_id="
-                        f"{body.event_group_id!r} with those legs"
+                        "edge no longer available at live quotes for "
+                        f"event_group_id={body.event_group_id!r}"
                     ),
                 )
         else:
+            opportunities = list(s.opportunities)
             if body.opportunity_index < 0 or body.opportunity_index >= len(opportunities):
                 raise HTTPException(status_code=404, detail="opportunity_index out of range")
             opp = opportunities[body.opportunity_index]

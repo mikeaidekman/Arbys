@@ -150,6 +150,96 @@ def _register(client, group_id, poly_outcome, kalshi_outcome):
     assert r.status_code == 201
 
 
+def test_opportunities_are_live_not_a_log():
+    """/opportunities must show what is executable now, not everything seen.
+
+    It used to be an append-only deque: re-detections piled up and nothing was
+    removed when an edge died, so one busy market could fill the buffer and
+    evict every other group's opportunity.
+    """
+    with TestClient(create_app()) as client:
+        _register(client, "eg-live", "l-yes", "l-no")
+
+        def quote(oid, px):
+            assert client.post(
+                "/quotes", json={"outcome_id": oid, "bid": px, "ask": px}
+            ).status_code == 204
+
+        quote("l-yes", "0.40")
+        quote("l-no", "0.50")
+        assert len(client.get("/opportunities?limit=500").json()) >= 1
+
+        # Re-push identical quotes many times: the same edge, not new ones.
+        for _ in range(25):
+            quote("l-yes", "0.40")
+            quote("l-no", "0.50")
+        opps = client.get("/opportunities?limit=500").json()
+        assert len(opps) == 1, f"duplicates accumulated: {len(opps)}"
+
+        # Kill the edge — the entry must disappear, not linger.
+        quote("l-no", "0.70")
+        assert client.get("/opportunities?limit=500").json() == []
+
+        # And come back when the edge returns.
+        quote("l-no", "0.50")
+        assert len(client.get("/opportunities?limit=500").json()) == 1
+
+
+def test_busy_group_does_not_evict_another_groups_opportunity():
+    """A market that re-ticks constantly must not crowd out other games."""
+    with TestClient(create_app()) as client:
+        _register(client, "eg-busy", "b-yes", "b-no")
+        _register(client, "eg-quiet", "q-yes", "q-no")
+
+        def quote(oid, px):
+            client.post("/quotes", json={"outcome_id": oid, "bid": px, "ask": px})
+
+        quote("q-yes", "0.30")
+        quote("q-no", "0.40")  # quiet group has a standing edge
+        for i in range(300):
+            # Busy group re-detects on every tick.
+            quote("b-yes", "0.10")
+            quote("b-no", "0.80" if i % 2 else "0.81")
+
+        groups = {o["event_group_id"] for o in client.get("/opportunities?limit=500").json()}
+        assert "eg-quiet" in groups, "quiet group was evicted by a busy one"
+
+
+def test_execute_prices_against_live_quotes_not_the_recorded_opportunity():
+    """Filling must use current quotes; a dead edge must be refused."""
+    with TestClient(create_app()) as client:
+        _register(client, "eg-move", "m-yes", "m-no")
+
+        def quote(oid, px):
+            client.post("/quotes", json={"outcome_id": oid, "bid": px, "ask": px})
+
+        quote("m-yes", "0.40")
+        quote("m-no", "0.50")
+        assert len(client.get("/opportunities").json()) == 1
+
+        # Market moves against the edge before we execute.
+        quote("m-no", "0.75")
+
+        r = client.post(
+            "/paper/execute",
+            json={"event_group_id": "eg-move", "outcome_ids": ["m-yes", "m-no"]},
+        )
+        assert r.status_code == 409, r.text
+        assert "live quotes" in r.json()["detail"]
+        assert client.get("/paper/default").json()["positions"] == {}
+
+        # Edge returns at a *different* price — the fill must use the new one.
+        quote("m-no", "0.45")
+        r = client.post(
+            "/paper/execute",
+            json={"event_group_id": "eg-move", "outcome_ids": ["m-yes", "m-no"]},
+        )
+        assert r.status_code == 200, r.text
+        orders = client.get("/paper/default/orders").json()
+        filled = {o["outcome_id"]: o for o in orders if o["status"] == "filled"}
+        assert Decimal(filled["m-no"]["limit_price"]) == Decimal("0.45"), filled["m-no"]
+
+
 def test_execute_by_event_group_picks_that_group(tmp_path):
     """Executing by descriptor must fill the named group, not a list position.
 
@@ -194,15 +284,19 @@ def test_execute_by_event_group_rejects_unknown_descriptor(tmp_path):
             ).status_code == 204
 
         # Right group, legs that are not part of any live opportunity.
+        # 409 rather than 404: the group exists, the edge just isn't there.
         r = client.post(
             "/paper/execute",
             json={"event_group_id": "eg-alpha", "outcome_ids": ["a-yes", "nope"]},
         )
-        assert r.status_code == 404
+        assert r.status_code == 409
 
         # Unknown group entirely.
         r = client.post("/paper/execute", json={"event_group_id": "eg-missing"})
-        assert r.status_code == 404
+        assert r.status_code == 409
+
+        # Neither attempt may fill anything.
+        assert client.get("/paper/default").json()["positions"] == {}
 
 
 def test_open_positions_hydrate_once_per_venue(tmp_path):

@@ -11,7 +11,7 @@ import asyncio
 import contextlib
 import logging
 import os
-from collections import defaultdict, deque
+from collections import defaultdict
 from collections.abc import Callable
 from decimal import Decimal
 
@@ -41,7 +41,20 @@ from ..shared.types import EventGroup
 
 log = logging.getLogger(__name__)
 
-MAX_RECENT_OPPS = 500
+
+def _opp_fingerprint(opp: ArbOpportunity) -> tuple:
+    """Identity of an opportunity for change detection.
+
+    Two detections with the same group and the same priced legs are the same
+    edge seen twice, not news.
+    """
+    return (
+        opp.event_group_id,
+        tuple(
+            (leg.venue_id, leg.outcome_id, leg.is_buy, leg.price, leg.qty)
+            for leg in opp.legs
+        ),
+    )
 
 DEFAULT_STARTING_BALANCE = Decimal("1000")
 
@@ -99,7 +112,10 @@ class AppState:
             "draftkings": SportsbookFeeModel("draftkings"),
         }
         self.event_groups: dict[str, EventGroup] = {}
-        self.opportunities: deque[ArbOpportunity] = deque(maxlen=MAX_RECENT_OPPS)
+        # source group id -> that group's currently-executable opportunities.
+        # Keyed by group so an evaluation can replace the whole set, including
+        # removing entries when the edge disappears.
+        self._opps_by_group: dict[str, list[ArbOpportunity]] = {}
         self._opp_subscribers: list[asyncio.Queue[ArbOpportunity]] = []
 
         self.default_account_id = "default"
@@ -117,7 +133,7 @@ class AppState:
         self.engine = EngineRuntime(
             quotebook=self.quotebook,
             fees=self.fees,
-            on_opportunity=self._record_opportunity,
+            on_opportunities=self._set_group_opportunities,
         )
         self.pnl_service = PnlSnapshotService(
             brokers=self.paper_brokers,
@@ -314,14 +330,35 @@ class AppState:
         self.auto_settle_service.clear_settled()
         log.info("paper account %s reset to $%s per venue", account_id, DEFAULT_STARTING_BALANCE)
 
-    def _record_opportunity(self, opp: ArbOpportunity) -> None:
-        self.opportunities.appendleft(opp)
-        # Fire-and-forget persistence.
-        with contextlib.suppress(RuntimeError):
-            asyncio.get_running_loop().create_task(self._persist_opp(opp))
-        for q in list(self._opp_subscribers):
-            with contextlib.suppress(asyncio.QueueFull):
-                q.put_nowait(opp)
+    def _set_group_opportunities(
+        self, group_id: str, opps: list[ArbOpportunity]
+    ) -> None:
+        """Replace a group's live opportunities with the latest evaluation.
+
+        The set is authoritative: anything the group previously offered and no
+        longer does is dropped here. That is what keeps `opportunities` a
+        picture of what is executable *now* rather than a log of everything
+        ever detected.
+
+        Re-detections that are byte-identical to what we already hold are not
+        re-broadcast or re-persisted. A quiet, lopsided market re-triggers the
+        detector on every tick, and without this one such game buried every
+        other group's opportunity and wrote a DB row per tick.
+        """
+        previous = {_opp_fingerprint(o): o for o in self._opps_by_group.get(group_id, ())}
+        if opps:
+            self._opps_by_group[group_id] = list(opps)
+        else:
+            self._opps_by_group.pop(group_id, None)
+
+        for opp in opps:
+            if _opp_fingerprint(opp) in previous:
+                continue  # unchanged — already broadcast and persisted
+            with contextlib.suppress(RuntimeError):
+                asyncio.get_running_loop().create_task(self._persist_opp(opp))
+            for q in list(self._opp_subscribers):
+                with contextlib.suppress(asyncio.QueueFull):
+                    q.put_nowait(opp)
 
     async def _persist_opp(self, opp: ArbOpportunity) -> None:
         try:
@@ -329,6 +366,27 @@ class AppState:
                 await repo.insert_opportunity(session, opp)
         except Exception:
             pass
+
+    @property
+    def opportunities(self) -> list[ArbOpportunity]:
+        """Every currently-executable opportunity, richest edge first.
+
+        This is live state, not history: an entry exists only while the
+        detector still finds that edge at current quotes.
+        """
+        flat = [o for opps in self._opps_by_group.values() for o in opps]
+        flat.sort(key=lambda o: (o.guaranteed_profit_bps, o.guaranteed_profit), reverse=True)
+        return flat
+
+    def live_opportunities_for(self, event_group_id: str) -> list[ArbOpportunity]:
+        """Re-run detection now and return what is executable at live quotes.
+
+        Complementary (same-venue) opportunities are published under a
+        synthetic ``<group>:<venue>`` id, so strip that suffix to find the
+        event group the engine actually knows about.
+        """
+        base_id = event_group_id.split(":", 1)[0]
+        return self.engine.evaluate_now(base_id)
 
     def subscribe_opportunities(self) -> asyncio.Queue[ArbOpportunity]:
         q: asyncio.Queue[ArbOpportunity] = asyncio.Queue(maxsize=100)
