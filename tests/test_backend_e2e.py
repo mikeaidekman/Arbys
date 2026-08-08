@@ -93,6 +93,76 @@ def test_state_survives_restart(tmp_path):
         assert r.status_code == 200
 
 
+def _register(client, group_id, poly_outcome, kalshi_outcome):
+    r = client.post(
+        "/event-groups",
+        json={
+            "id": group_id,
+            "title": f"Group {group_id}",
+            "legs": [
+                {"outcome_id": poly_outcome, "venue_id": "polymarket", "is_yes_side": True},
+                {"outcome_id": kalshi_outcome, "venue_id": "kalshi", "is_yes_side": False},
+            ],
+        },
+    )
+    assert r.status_code == 201
+
+
+def test_execute_by_event_group_picks_that_group(tmp_path):
+    """Executing by descriptor must fill the named group, not a list position.
+
+    The frontend merges websocket-pushed opportunities ahead of REST ones, so
+    its array order differs from the server's. Passing a position from that
+    array as opportunity_index can fill a different arb than the one shown.
+    """
+    with TestClient(create_app()) as client:
+        _register(client, "eg-alpha", "a-yes", "a-no")
+        _register(client, "eg-beta", "b-yes", "b-no")
+
+        # Both groups carry a live arb; beta is cheaper so ordering differs
+        # from registration order.
+        for oid, px in (("a-yes", "0.40"), ("a-no", "0.50"),
+                        ("b-yes", "0.10"), ("b-no", "0.30")):
+            assert client.post(
+                "/quotes", json={"outcome_id": oid, "bid": px, "ask": px}
+            ).status_code == 204
+
+        opps = client.get("/opportunities").json()
+        assert {o["event_group_id"] for o in opps} >= {"eg-alpha", "eg-beta"}
+
+        r = client.post(
+            "/paper/execute",
+            json={"event_group_id": "eg-beta", "outcome_ids": ["b-yes", "b-no"]},
+        )
+        assert r.status_code == 200, r.text
+        assert len(r.json()) == 2
+
+        positions = client.get("/paper/default").json()["positions"]
+        assert "b-yes" in positions and "b-no" in positions
+        # The other group must be untouched regardless of list ordering.
+        assert "a-yes" not in positions and "a-no" not in positions
+
+
+def test_execute_by_event_group_rejects_unknown_descriptor(tmp_path):
+    with TestClient(create_app()) as client:
+        _register(client, "eg-alpha", "a-yes", "a-no")
+        for oid, px in (("a-yes", "0.40"), ("a-no", "0.50")):
+            assert client.post(
+                "/quotes", json={"outcome_id": oid, "bid": px, "ask": px}
+            ).status_code == 204
+
+        # Right group, legs that are not part of any live opportunity.
+        r = client.post(
+            "/paper/execute",
+            json={"event_group_id": "eg-alpha", "outcome_ids": ["a-yes", "nope"]},
+        )
+        assert r.status_code == 404
+
+        # Unknown group entirely.
+        r = client.post("/paper/execute", json={"event_group_id": "eg-missing"})
+        assert r.status_code == 404
+
+
 def test_open_positions_hydrate_once_per_venue(tmp_path):
     """Regression: an open position must not fan out to every paper broker.
 

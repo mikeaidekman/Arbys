@@ -68,8 +68,21 @@ class QuoteIn(BaseModel):
 
 
 class ExecuteArbIn(BaseModel):
+    """Which opportunity to fill.
+
+    Prefer ``event_group_id`` (+ optionally ``outcome_ids``): the server
+    resolves it against the *current* opportunity list at execution time.
+    ``opportunity_index`` is a position in a list the client fetched earlier
+    and the engine rewrites continuously, so it can select a different arb
+    than the caller saw. It is retained for compatibility only.
+    """
+
     opportunity_index: int = 0
     account_id: str | None = None
+    event_group_id: str | None = None
+    # Buy-leg outcome ids identifying the exact combination to fill. When
+    # omitted, any live opportunity for the event group is eligible.
+    outcome_ids: list[str] | None = None
 
 
 class PaperAccountSummary(BaseModel):

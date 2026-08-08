@@ -265,9 +265,31 @@ def create_app() -> FastAPI:
     @app.post("/paper/execute", response_model=list[str])
     async def paper_execute(body: ExecuteArbIn) -> list[str]:
         s = get_state()
-        if body.opportunity_index < 0 or body.opportunity_index >= len(s.opportunities):
-            raise HTTPException(status_code=404, detail="opportunity_index out of range")
-        opp = list(s.opportunities)[body.opportunity_index]
+        opportunities = list(s.opportunities)
+        if body.event_group_id is not None:
+            wanted = set(body.outcome_ids) if body.outcome_ids else None
+            opp = None
+            for candidate in opportunities:
+                if candidate.event_group_id != body.event_group_id:
+                    continue
+                if wanted is not None:
+                    buy_legs = {leg.outcome_id for leg in candidate.legs if leg.is_buy}
+                    if buy_legs != wanted:
+                        continue
+                opp = candidate
+                break
+            if opp is None:
+                raise HTTPException(
+                    status_code=404,
+                    detail=(
+                        "no live opportunity for event_group_id="
+                        f"{body.event_group_id!r} with those legs"
+                    ),
+                )
+        else:
+            if body.opportunity_index < 0 or body.opportunity_index >= len(opportunities):
+                raise HTTPException(status_code=404, detail="opportunity_index out of range")
+            opp = opportunities[body.opportunity_index]
         account_id = body.account_id or s.default_account_id
         intent = ExecutionIntent(
             event_group_id=opp.event_group_id,

@@ -9,9 +9,11 @@ import { AccountPanel } from "../components/AccountPanel";
 import {
   buildCombos,
   categoryOf,
+  compareGroups,
   isCompleted,
   isCrossVenue,
 } from "../lib/combo";
+import { usePriceMoves } from "../hooks/usePriceMoves";
 
 const VENUES = ["Polymarket", "Kalshi"];
 
@@ -46,10 +48,19 @@ export function TerminalPage() {
   const [arbOnly, setArbOnly] = useState(false);
   const [filledMap, setFilledMap] = useState<Record<string, "comboA" | "comboB">>({});
 
+  // Sorted here so every downstream list keeps a stable order. /monitored
+  // returns dict-insertion order, which shifts as discovery registers games —
+  // that is what made cards jump between polls.
   const liveGroups = useMemo(
-    () => monitored.filter((g) => isCrossVenue(g) && !isCompleted(g)),
+    () =>
+      monitored
+        .filter((g) => isCrossVenue(g) && !isCompleted(g))
+        .slice()
+        .sort(compareGroups),
     [monitored],
   );
+
+  const priceMoves = usePriceMoves(monitored);
 
   const filtered = useMemo(() => {
     let list = liveGroups;
@@ -170,6 +181,7 @@ export function TerminalPage() {
                   onFilled={(id, combo) =>
                     setFilledMap((m) => ({ ...m, [id]: combo }))
                   }
+                  priceMoves={priceMoves}
                 />
               ))}
             </div>

@@ -40,10 +40,22 @@ export const api = {
 
   listMonitored: () => req<MonitoredGroup[]>("/monitored"),
 
-  executeArb: (opportunity_index: number, account_id?: string) =>
+  /**
+   * Fill an arb identified by its event group and buy legs. The server
+   * resolves it against the live opportunity list at execution time.
+   *
+   * Deliberately not index-based: this client merges websocket-pushed
+   * opportunities ahead of REST ones, so an index into our array does not
+   * address the same entry in the server's list.
+   */
+  executeArb: (
+    event_group_id: string,
+    outcome_ids: string[],
+    account_id?: string,
+  ) =>
     req<string[]>("/paper/execute", {
       method: "POST",
-      body: JSON.stringify({ opportunity_index, account_id }),
+      body: JSON.stringify({ event_group_id, outcome_ids, account_id }),
     }),
 
   paperSummary: (account_id: string) =>

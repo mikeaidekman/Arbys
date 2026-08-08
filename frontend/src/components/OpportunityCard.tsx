@@ -1,10 +1,15 @@
 import { useMutation, useQueryClient } from "@tanstack/react-query";
-import type { ArbOpportunity, MonitoredGroup } from "../api/types";
+import type { ArbOpportunity, MonitoredGroup, MonitoredLeg } from "../api/types";
+import type { PriceMove } from "../hooks/usePriceMoves";
 import {
+  COMBO_STATE_BADGE,
+  COMBO_STATE_LABEL,
   askToCents,
   buildCombos,
+  buyOutcomeIds,
+  comboState,
   edgeCentsDisplay,
-  findOpportunityIndex,
+  findOpportunity,
   type Combo,
 } from "../lib/combo";
 import { api } from "../api/client";
@@ -15,6 +20,33 @@ interface Props {
   opportunities: ArbOpportunity[];
   filledCombo: "comboA" | "comboB" | null;
   onFilled: (groupId: string, combo: "comboA" | "comboB") => void;
+  priceMoves: Map<string, PriceMove>;
+}
+
+function LegPrice({
+  label,
+  leg,
+  moves,
+}: {
+  label: string;
+  leg: MonitoredLeg | null | undefined;
+  moves: Map<string, PriceMove>;
+}) {
+  const move = leg ? moves.get(leg.outcome_id) : undefined;
+  return (
+    <span className="vt-mono">
+      {label}{" "}
+      <span className={move ? "vt-move" : undefined}>
+        {askToCents(leg?.ask ?? null)}¢
+        {move && (
+          <span className="vt-move-delta">
+            {move.dir === "up" ? "▲" : "▼"}
+            {Math.abs(move.delta * 100).toFixed(0)}
+          </span>
+        )}
+      </span>
+    </span>
+  );
 }
 
 export function OpportunityCard({
@@ -23,6 +55,7 @@ export function OpportunityCard({
   opportunities,
   filledCombo,
   onFilled,
+  priceMoves,
 }: Props) {
   const [a, b] = buildCombos(group);
   const isArb = a.favorable || b.favorable;
@@ -84,8 +117,8 @@ export function OpportunityCard({
       </div>
 
       <div style={{ display: "flex", gap: "var(--space-3)", fontSize: 11, padding: "2px 0" }}>
-        <span className="vt-mono">Poly {askToCents(polyLeg?.ask ?? null)}¢</span>
-        <span className="vt-mono">Kalshi {askToCents(kalshiLeg?.ask ?? null)}¢</span>
+        <LegPrice label="Poly" leg={polyLeg} moves={priceMoves} />
+        <LegPrice label="Kalshi" leg={kalshiLeg} moves={priceMoves} />
       </div>
 
       {filledCombo ? (
@@ -128,15 +161,16 @@ function ComboButton({
   onFilled: () => void;
 }) {
   const qc = useQueryClient();
-  const oppIndex = combo.favorable
-    ? findOpportunityIndex(opportunities, group, combo)
+  const opportunity = combo.favorable
+    ? findOpportunity(opportunities, group, combo)
     : null;
-  const executable = combo.favorable && oppIndex != null;
+  const state = comboState(combo, opportunity);
+  const executable = state === "ready";
 
   const exec = useMutation({
     mutationFn: () => {
-      if (oppIndex == null) throw new Error("no matching opportunity");
-      return api.executeArb(oppIndex);
+      if (opportunity == null) throw new Error("no matching opportunity");
+      return api.executeArb(opportunity.event_group_id, buyOutcomeIds(opportunity));
     },
     onSuccess: () => {
       onFilled();
@@ -145,23 +179,27 @@ function ComboButton({
     },
   });
 
+  const badge = COMBO_STATE_BADGE[state];
+  const failed = exec.isError;
+
   return (
     <button
       type="button"
       className={`btn vt-combo ${executable ? "vt-combo-active" : "btn-secondary"}`}
       disabled={!executable || exec.isPending}
       onClick={() => exec.mutate()}
-      title={
-        !combo.favorable
-          ? "no edge"
-          : oppIndex == null
-          ? "waiting for engine"
-          : "execute both legs as a paper order"
-      }
+      title={failed ? `execution failed: ${exec.error?.message ?? ""}` : COMBO_STATE_LABEL[state]}
     >
       <span>{label}</span>
+      {/* A bare disabled button reads as broken — always say why. */}
       <span className="vt-mono" style={{ fontWeight: 600 }}>
-        {edgeCentsDisplay(combo.edge)}
+        {failed
+          ? "failed"
+          : exec.isPending
+          ? "…"
+          : executable
+          ? edgeCentsDisplay(combo.edge)
+          : badge}
       </span>
     </button>
   );
