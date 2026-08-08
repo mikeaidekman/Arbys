@@ -8,7 +8,7 @@ from typing import Any
 
 import httpx
 
-from .kalshi_sports import VenueGame
+from .kalshi_sports import VenueGame, _parse_utc
 from .players import Player, parse_vs_title, strip_prefix
 
 POLY_GAMMA_URL = "https://gamma-api.polymarket.com/markets"
@@ -144,6 +144,7 @@ def _parse_tennis_market(market: dict[str, Any]) -> VenueGame | None:
         teams=(p_a, p_b),
         outcome_ids=outcome_ids,
         ref=str(market.get("slug") or market.get("id") or ""),
+        start_time=_parse_utc(market.get("gameStartTime")),
     )
 
 

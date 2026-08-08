@@ -14,6 +14,7 @@ from .kalshi_sports import (
     VenueGame,
     _get_with_retry,
     _parse_ticker_date,
+    _parse_utc,
 )
 from .players import parse_vs_title
 
@@ -79,11 +80,14 @@ async def _parse_kalshi_tennis_event(
         return None
 
     outcome_ids: dict[str, str] = {}
+    start_time = None
     for m in markets:
         ticker = m.get("ticker")
         yes_sub_title = (m.get("yes_sub_title") or "").strip()
         if not ticker or not yes_sub_title:
             continue
+        if start_time is None:
+            start_time = _parse_utc(m.get("occurrence_datetime"))
         # Kalshi's yes_sub_title for tennis is just the player's last name.
         code = yes_sub_title.split()[-1].upper()
         if code == p_a.code:
@@ -101,6 +105,7 @@ async def _parse_kalshi_tennis_event(
         teams=(p_a, p_b),
         outcome_ids=outcome_ids,
         ref=event_ticker,
+        start_time=start_time,
     )
 
 

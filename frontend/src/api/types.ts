@@ -21,6 +21,8 @@ export interface MonitoredLeg {
 export interface MonitoredGroup {
   id: string;
   title: string;
+  /** Scheduled start of the real-world event, ISO-8601 UTC. Null when unknown. */
+  start_time: string | null;
   legs: MonitoredLeg[];
   best_yes_ask: string | null;
   best_yes_venue: string | null;

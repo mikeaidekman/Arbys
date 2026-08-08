@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import os
+from datetime import UTC, datetime
 from decimal import Decimal
 from pathlib import Path
 
@@ -11,7 +12,10 @@ from fastapi.testclient import TestClient
 
 from arbys.backend import state as state_module
 from arbys.backend.app import create_app
+from arbys.db import repositories as repo
 from arbys.db import session as db_session
+from arbys.db.session import create_all, session_scope
+from arbys.shared.types import EventGroup, EventGroupLeg
 
 
 @pytest.fixture(autouse=True)
@@ -91,6 +95,44 @@ def test_state_survives_restart(tmp_path):
         # Default paper balance should have hydrated (not double-seeded).
         r = client.get("/paper/default")
         assert r.status_code == 200
+
+
+async def test_event_group_start_time_round_trips_in_db():
+    """start_time must survive the DB round trip and later re-registration."""
+    start = datetime(2026, 8, 10, 23, 7, tzinfo=UTC)
+    group = EventGroup(
+        id="mlb-BOS-TOR-2026-08-10",
+        title="Boston vs Toronto",
+        start_time=start,
+        legs=(
+            EventGroupLeg(outcome_id="p-bos", venue_id="polymarket", is_yes_side=True),
+            EventGroupLeg(outcome_id="k-tor", venue_id="kalshi", is_yes_side=False),
+        ),
+    )
+
+    await create_all()
+    async with session_scope() as session:
+        await repo.ensure_venue(session, "polymarket", name="Polymarket", kind="exchange")
+        await repo.ensure_venue(session, "kalshi", name="Kalshi", kind="exchange")
+        await repo.upsert_event_group(session, group)
+
+    async with session_scope() as session:
+        stored = next(g for g in await repo.list_event_groups(session) if g.id == group.id)
+    assert stored.start_time is not None
+    # SQLite drops the tzinfo on read; compare the instant, not the object.
+    got = stored.start_time
+    if got.tzinfo is None:
+        got = got.replace(tzinfo=UTC)
+    assert got == start
+
+    # A later discovery pass whose venue reported no time must not erase it.
+    async with session_scope() as session:
+        await repo.upsert_event_group(
+            session, EventGroup(id=group.id, title=group.title, legs=group.legs)
+        )
+    async with session_scope() as session:
+        stored = next(g for g in await repo.list_event_groups(session) if g.id == group.id)
+    assert stored.start_time is not None, "re-register wiped a known start_time"
 
 
 def _register(client, group_id, poly_outcome, kalshi_outcome):

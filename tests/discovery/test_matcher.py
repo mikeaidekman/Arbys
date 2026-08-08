@@ -1,4 +1,5 @@
-from datetime import date
+from dataclasses import replace
+from datetime import UTC, date, datetime
 
 from arbys.discovery.kalshi_sports import VenueGame
 from arbys.discovery.matcher import match_games, match_to_event_group
@@ -124,6 +125,32 @@ def test_match_games_tolerance_still_bridges_offset_dates():
     matches = match_games(kalshi, poly, date_tolerance_days=1)
     assert len(matches) == 1
     assert set(matches[0].per_venue.keys()) == {"kalshi", "polymarket"}
+
+
+def test_event_group_carries_earliest_venue_start_time():
+    """The group's start_time comes from the venues, deterministically."""
+    k = _game("kalshi", ("LAD", "CHC"), "2026-08-05", {"LAD": "K1", "CHC": "K2"})
+    p = _game("polymarket", ("LAD", "CHC"), "2026-08-05", {"LAD": "P1", "CHC": "P2"})
+    k = replace(k, start_time=datetime(2026, 8, 5, 18, 20, tzinfo=UTC))
+    p = replace(p, start_time=datetime(2026, 8, 5, 18, 25, tzinfo=UTC))
+
+    group = match_to_event_group(match_games([k], [p])[0])
+    assert group.start_time == datetime(2026, 8, 5, 18, 20, tzinfo=UTC)
+
+
+def test_event_group_start_time_none_when_no_venue_reports_one():
+    k = _game("kalshi", ("LAD", "CHC"), "2026-08-05", {"LAD": "K1", "CHC": "K2"})
+    p = _game("polymarket", ("LAD", "CHC"), "2026-08-05", {"LAD": "P1", "CHC": "P2"})
+    group = match_to_event_group(match_games([k], [p])[0])
+    assert group.start_time is None
+
+
+def test_event_group_start_time_uses_the_venue_that_has_one():
+    k = _game("kalshi", ("LAD", "CHC"), "2026-08-05", {"LAD": "K1", "CHC": "K2"})
+    p = _game("polymarket", ("LAD", "CHC"), "2026-08-05", {"LAD": "P1", "CHC": "P2"})
+    p = replace(p, start_time=datetime(2026, 8, 5, 23, 10, tzinfo=UTC))
+    group = match_to_event_group(match_games([k], [p])[0])
+    assert group.start_time == datetime(2026, 8, 5, 23, 10, tzinfo=UTC)
 
 
 def test_match_to_event_group_builds_four_legs():

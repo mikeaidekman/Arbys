@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from datetime import datetime
 from decimal import Decimal
 
 from pydantic import BaseModel
@@ -51,6 +52,8 @@ class MonitoredLegOut(BaseModel):
 class MonitoredGroupOut(BaseModel):
     id: str
     title: str
+    # Scheduled start of the real-world event, UTC. None when unknown.
+    start_time: datetime | None
     legs: list[MonitoredLegOut]
     best_yes_ask: Decimal | None
     best_yes_venue: str | None

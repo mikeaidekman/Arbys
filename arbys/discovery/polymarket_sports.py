@@ -8,7 +8,7 @@ from typing import Any
 
 import httpx
 
-from .kalshi_sports import VenueGame
+from .kalshi_sports import VenueGame, _parse_utc
 from .teams import TeamResolver
 
 POLY_GAMMA_URL = "https://gamma-api.polymarket.com/markets"
@@ -137,6 +137,7 @@ def _parse_market(market: dict[str, Any], resolver: TeamResolver, sport: str) ->
     if set(outcome_ids.keys()) != {team_a.code, team_b.code}:
         return None
 
+    start_time = _parse_utc(market.get("gameStartTime"))
     game_date = _extract_game_date(market)
     if game_date is None:
         return None
@@ -148,18 +149,15 @@ def _parse_market(market: dict[str, Any], resolver: TeamResolver, sport: str) ->
         teams=(team_a, team_b),
         outcome_ids=outcome_ids,
         ref=str(market.get("slug") or market.get("id") or ""),
+        start_time=start_time,
     )
 
 
 def _extract_game_date(market: dict[str, Any]) -> date | None:
     """Prefer ``gameStartTime`` (UTC), fall back to a date embedded in ``slug``."""
-    gst = market.get("gameStartTime")
-    if isinstance(gst, str) and gst:
-        s = gst.replace(" ", "T").replace("+00", "+00:00")
-        try:
-            return datetime.fromisoformat(s).date()
-        except ValueError:
-            pass
+    dt = _parse_utc(market.get("gameStartTime"))
+    if dt is not None:
+        return dt.date()
     slug = market.get("slug") or ""
     if isinstance(slug, str):
         parts = slug.split("-")

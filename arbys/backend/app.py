@@ -190,6 +190,7 @@ def create_app() -> FastAPI:
                 MonitoredGroupOut(
                     id=g.id,
                     title=g.title,
+                    start_time=g.start_time,
                     legs=legs_out,
                     best_yes_ask=best_yes_ask,
                     best_yes_venue=best_yes_venue,

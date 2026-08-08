@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from datetime import timedelta
+from datetime import datetime, timedelta
 
 from ..shared.types import EventGroup, EventGroupLeg
 from .kalshi_sports import Participant, VenueGame
@@ -16,6 +16,15 @@ class CrossVenueMatch:
     team_a: Participant  # canonical side (alphabetically first code)
     team_b: Participant
     per_venue: dict[str, VenueGame]
+
+    def start_time(self) -> datetime | None:
+        """Earliest start time any venue reports for this game.
+
+        Venues agree closely in practice; taking the earliest keeps the value
+        deterministic regardless of dict ordering.
+        """
+        times = [g.start_time for g in self.per_venue.values() if g.start_time is not None]
+        return min(times) if times else None
 
     def event_group_id(self) -> str:
         return f"{self.sport}-{self.team_a.code}-{self.team_b.code}-{self.game_date}"
@@ -117,4 +126,5 @@ def match_to_event_group(match: CrossVenueMatch) -> EventGroup:
         id=match.event_group_id(),
         title=match.event_group_title(),
         legs=tuple(legs),
+        start_time=match.start_time(),
     )

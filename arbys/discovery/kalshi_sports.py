@@ -5,7 +5,7 @@ from __future__ import annotations
 import asyncio
 import logging
 from dataclasses import dataclass
-from datetime import date
+from datetime import UTC, date, datetime
 from typing import Protocol
 
 import httpx
@@ -45,6 +45,11 @@ class VenueGame:
     teams: tuple[Participant, Participant]
     outcome_ids: dict[str, str]
     ref: str  # venue-specific identifier (event ticker, market slug, etc.)
+    # Scheduled first pitch / kickoff in UTC, when the venue reports one.
+    # Kalshi exposes it as ``occurrence_datetime`` on the market; Polymarket
+    # as ``gameStartTime``. ``game_date`` remains the matching key because
+    # not every venue/sport supplies a time.
+    start_time: datetime | None = None
 
 
 # Kalshi series ticker per team sport. All share the same event/market shape:
@@ -123,11 +128,14 @@ async def _parse_kalshi_event(
 
     outcome_ids: dict[str, str] = {}
     teams_found: dict[str, Team] = {}
+    start_time: datetime | None = None
     for m in markets:
         ticker = m.get("ticker")
         yes_sub_title = m.get("yes_sub_title") or ""
         if not ticker or not yes_sub_title:
             continue
+        if start_time is None:
+            start_time = _parse_utc(m.get("occurrence_datetime"))
         team = resolver.by_kalshi_title(yes_sub_title)
         if team is None:
             continue
@@ -145,7 +153,25 @@ async def _parse_kalshi_event(
         teams=(team_list[0], team_list[1]),
         outcome_ids=outcome_ids,
         ref=event_ticker,
+        start_time=start_time,
     )
+
+
+def _parse_utc(value: object) -> datetime | None:
+    """Parse an ISO-8601 timestamp into an aware UTC datetime."""
+    if not isinstance(value, str) or not value:
+        return None
+    s = value.strip().replace(" ", "T")
+    if s.endswith("Z"):
+        s = s[:-1] + "+00:00"
+    # "+00" is a valid Postgres-style offset but not ISO-8601.
+    if len(s) >= 3 and s[-3] in "+-" and s[-2:].isdigit():
+        s = s + ":00"
+    try:
+        dt = datetime.fromisoformat(s)
+    except ValueError:
+        return None
+    return dt.replace(tzinfo=UTC) if dt.tzinfo is None else dt.astimezone(UTC)
 
 
 _MONTHS = {

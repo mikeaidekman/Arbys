@@ -1,4 +1,4 @@
-from datetime import date
+from datetime import UTC, date, datetime
 
 import httpx
 import pytest
@@ -62,6 +62,61 @@ async def test_fetch_polymarket_sports_games_falls_back_to_slug_date():
     )
     await client.aclose()
     assert len(games) == 1
+    assert games[0].game_date == date(2026, 8, 5)
+
+
+@pytest.mark.asyncio
+async def test_fetch_polymarket_sports_games_captures_start_time():
+    """gameStartTime is the exact kickoff, not just the date."""
+    payload = [
+        {
+            "question": "Los Angeles Dodgers vs. Chicago Cubs",
+            "outcomes": ["Los Angeles Dodgers", "Chicago Cubs"],
+            "clobTokenIds": ["tok_lad", "tok_chc"],
+            # Polymarket's "+00" offset is not valid ISO-8601 on its own.
+            "gameStartTime": "2026-08-05 18:20:00+00",
+            "slug": "mlb-lad-chc-2026-08-05",
+        }
+    ]
+
+    def handler(_):
+        return httpx.Response(200, json=payload)
+
+    client = httpx.AsyncClient(transport=httpx.MockTransport(handler), timeout=5.0)
+    games = await fetch_polymarket_sports_games(
+        resolver=MLB_RESOLVER, sport="mlb", http_client=client
+    )
+    await client.aclose()
+
+    assert len(games) == 1
+    st = games[0].start_time
+    assert st is not None
+    assert st == datetime(2026, 8, 5, 18, 20, tzinfo=UTC)
+    # The date key must still agree with the timestamp.
+    assert games[0].game_date == date(2026, 8, 5)
+
+
+@pytest.mark.asyncio
+async def test_fetch_polymarket_sports_games_tolerates_missing_start_time():
+    payload = [
+        {
+            "question": "Los Angeles Dodgers vs. Chicago Cubs",
+            "outcomes": ["Los Angeles Dodgers", "Chicago Cubs"],
+            "clobTokenIds": ["tok_lad", "tok_chc"],
+            "slug": "mlb-lad-chc-2026-08-05",
+        }
+    ]
+
+    def handler(_):
+        return httpx.Response(200, json=payload)
+
+    client = httpx.AsyncClient(transport=httpx.MockTransport(handler), timeout=5.0)
+    games = await fetch_polymarket_sports_games(
+        resolver=MLB_RESOLVER, sport="mlb", http_client=client
+    )
+    await client.aclose()
+    assert len(games) == 1
+    assert games[0].start_time is None
     assert games[0].game_date == date(2026, 8, 5)
 
 

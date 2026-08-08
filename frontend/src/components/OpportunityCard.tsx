@@ -9,6 +9,7 @@ import {
   buyOutcomeIds,
   comboState,
   edgeCentsDisplay,
+  eventClock,
   findOpportunity,
   type Combo,
 } from "../lib/combo";
@@ -21,6 +22,8 @@ interface Props {
   filledCombo: "comboA" | "comboB" | null;
   onFilled: (groupId: string, combo: "comboA" | "comboB") => void;
   priceMoves: Map<string, PriceMove>;
+  /** Shared page ticker, so every card's countdown advances together. */
+  now: number;
 }
 
 function LegPrice({
@@ -56,10 +59,11 @@ export function OpportunityCard({
   filledCombo,
   onFilled,
   priceMoves,
+  now,
 }: Props) {
   const [a, b] = buildCombos(group);
   const isArb = a.favorable || b.favorable;
-  const marketLabel = group.legs[0]?.outcome_id ?? group.id;
+  const clock = eventClock(group, now);
   const polyLeg = group.legs.find((l) => l.venue_id === "polymarket" && l.is_yes_side);
   const kalshiLeg = group.legs.find((l) => l.venue_id === "kalshi" && l.is_yes_side);
 
@@ -104,16 +108,36 @@ export function OpportunityCard({
       </div>
 
       <div
-        title={marketLabel}
+        title={
+          group.start_time
+            ? new Date(group.start_time).toLocaleString()
+            : "no scheduled start reported by either venue"
+        }
         style={{
+          display: "flex",
+          alignItems: "center",
+          gap: 5,
           fontSize: 11,
-          opacity: 0.6,
+          opacity: clock.phase === "unknown" ? 0.45 : 0.75,
+          fontWeight: clock.imminent || clock.phase === "live" ? 600 : 400,
           overflow: "hidden",
           textOverflow: "ellipsis",
           whiteSpace: "nowrap",
         }}
       >
-        {marketLabel}
+        {clock.phase === "live" && (
+          <span
+            style={{
+              width: 5,
+              height: 5,
+              borderRadius: "50%",
+              background: "var(--color-accent)",
+              animation: "vt-pulse 1.2s ease-in-out infinite",
+              flex: "none",
+            }}
+          />
+        )}
+        <span className="vt-mono">{clock.text}</span>
       </div>
 
       <div style={{ display: "flex", gap: "var(--space-3)", fontSize: 11, padding: "2px 0" }}>

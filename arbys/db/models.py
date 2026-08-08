@@ -102,6 +102,11 @@ class EventGroup(Base):
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now(), nullable=False
     )
+    # Scheduled start of the underlying real-world event, UTC. Nullable:
+    # hand-registered groups and venues that report no time have none.
+    start_time: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True, index=True
+    )
 
     legs: Mapped[list[EventGroupLeg]] = relationship(back_populates="event_group")
 

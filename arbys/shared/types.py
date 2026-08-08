@@ -7,6 +7,7 @@ are safe to import from any layer, including inside pure unit tests.
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+from datetime import datetime
 from decimal import Decimal
 from enum import StrEnum
 
@@ -90,3 +91,6 @@ class EventGroup:
     title: str
     resolution_source_by_venue: dict[str, str] = field(default_factory=dict)
     legs: tuple[EventGroupLeg, ...] = ()
+    # Scheduled start of the underlying real-world event, UTC. None when the
+    # group was registered by hand or the venue reported no time.
+    start_time: datetime | None = None

@@ -70,9 +70,15 @@ async def ensure_outcome_placeholder(
 async def upsert_event_group(session: AsyncSession, group: EventGroup) -> None:
     existing = await session.get(m.EventGroup, group.id)
     if existing is None:
-        session.add(m.EventGroup(id=group.id, title=group.title))
+        session.add(
+            m.EventGroup(id=group.id, title=group.title, start_time=group.start_time)
+        )
     else:
         existing.title = group.title
+        # Don't clobber a known start time with None when a later pass, or a
+        # venue that reports no time, re-registers the same group.
+        if group.start_time is not None:
+            existing.start_time = group.start_time
     # Replace legs wholesale.
     await session.execute(
         delete(m.EventGroupLeg).where(m.EventGroupLeg.event_group_id == group.id)
@@ -113,6 +119,7 @@ async def list_event_groups(session: AsyncSession) -> list[EventGroup]:
             EventGroup(
                 id=row.id,
                 title=row.title,
+                start_time=row.start_time,
                 legs=tuple(
                     EventGroupLeg(
                         outcome_id=leg.outcome_id,

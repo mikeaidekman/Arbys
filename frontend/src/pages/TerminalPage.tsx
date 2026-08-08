@@ -14,6 +14,7 @@ import {
   isCrossVenue,
 } from "../lib/combo";
 import { usePriceMoves } from "../hooks/usePriceMoves";
+import { useNow } from "../hooks/useNow";
 
 const VENUES = ["Polymarket", "Kalshi"];
 
@@ -61,6 +62,7 @@ export function TerminalPage() {
   );
 
   const priceMoves = usePriceMoves(monitored);
+  const now = useNow();
 
   const filtered = useMemo(() => {
     let list = liveGroups;
@@ -182,6 +184,7 @@ export function TerminalPage() {
                     setFilledMap((m) => ({ ...m, [id]: combo }))
                   }
                   priceMoves={priceMoves}
+                  now={now}
                 />
               ))}
             </div>
