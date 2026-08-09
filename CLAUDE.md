@@ -190,6 +190,25 @@ second, empty database rather than failing.
 `arbys-local.db` is a ~177 MB gitignored local artifact. Don't read it wholesale
 or commit it; query it if you need to inspect state.
 
+## Only-tradeable invariants
+
+Three layers can each go stale independently, and each has bitten. A phantom
+8¢ arb on 2026-08-09 came from a delisted Polymarket token quoting forever
+against a live Kalshi leg.
+
+- **Quotes expire.** `QuoteBook` stamps arrival on a monotonic clock and
+  `get()` withholds anything older than `ARBYS_QUOTE_MAX_AGE_S` (default 600s,
+  `0` disables). Venue websockets push only on change, so a dead feed and a
+  quiet market are indistinguishable without this. `get_with_age()` still
+  returns stale entries so the UI can explain rather than blank.
+- **Groups are retired.** Discovery removes `source="discovery"` groups a
+  *complete* pass no longer finds; `source="manual"` is never touched, and
+  retirement is skipped when any sub-pass raised so a venue outage isn't read
+  as delisting.
+- **Opportunities follow the group.** Retiring must call
+  `clear_group_opportunities` — unregistering from the engine means no further
+  evaluation, so nothing else would ever empty that group's set.
+
 ## Known defects
 
 None currently tracked.
