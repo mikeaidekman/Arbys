@@ -23,8 +23,19 @@ target_metadata = Base.metadata
 
 
 def _sync_url() -> str:
+    """Alembic's runner is synchronous, so swap async drivers for sync ones.
+
+    SQLite is the documented dev default, so it has to be handled here too —
+    otherwise ``alembic upgrade`` fails on the URL in .env.example.
+    """
     url = os.environ.get("ARBYS_DB_URL", "postgresql+asyncpg://arbys:arbys@localhost:5432/arbys")
-    return url.replace("postgresql+asyncpg://", "postgresql+psycopg://")
+    for async_driver, sync_driver in (
+        ("postgresql+asyncpg://", "postgresql+psycopg://"),
+        ("sqlite+aiosqlite://", "sqlite://"),
+    ):
+        if url.startswith(async_driver):
+            return url.replace(async_driver, sync_driver, 1)
+    return url
 
 
 def run_migrations_offline() -> None:

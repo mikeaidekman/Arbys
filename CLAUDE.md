@@ -139,6 +139,17 @@ with Kalshi-NO on the same question.
 - SQLite gotcha: autoincrement PKs need
   `BigInteger().with_variant(Integer(), "sqlite")` or inserts fail on a NOT NULL
   constraint. See `Quote` and `PaperPnlSnapshot`.
+- **Migrations must never build DDL from `Base.metadata`.** Each revision
+  describes the change *it* makes, in explicit `op.*` calls, frozen at that
+  point in history. `0001_initial` originally called
+  `Base.metadata.create_all()`, which reads `models.py` as it exists *today* —
+  so once `0002` existed, `alembic upgrade head` on an empty database died with
+  `duplicate column name: venue_id`, and every later revision double-applied.
+  Dev never noticed because `bootstrap()` builds the schema with `create_all()`
+  and never runs a migration.
+  [tests/db/test_migrations_match_models.py](tests/db/test_migrations_match_models.py)
+  now replays the chain from empty and diffs it against `create_all`, so a
+  missing or wrong migration fails the suite instead of the next deploy.
 
 ### Frontend
 
