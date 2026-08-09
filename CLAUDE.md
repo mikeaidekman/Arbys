@@ -207,6 +207,25 @@ matching Polymarket exactly. `parse_ticker_start` does this. NFL tickers carry
 a date with no `HHMM`, so those fall back to date matching — safe, since NFL
 pairs never meet on consecutive days.
 
+### Gross vs net is deliberate in the UI
+
+A card's **green outline** (and the nav's "N arbs" count, and `arb_edge` in
+`/monitored`) is **gross of fees** — just `yes_ask + no_ask < 1`. The **green
+buy button** requires a live engine opportunity, which is **net of fees**. So a
+green outline with a disabled button is expected, not a bug: the two asks sum
+under a dollar but fees eat the difference.
+
+**This is intentional — do not "fix" it.** The gross edge is a divergence signal
+between the venues, which is worth seeing on its own; fee drag is roughly
+constant while divergence varies. Kalshi's fee peaks at a coin flip
+(`0.07 × p × (1-p)`, max 1.75¢/contract at p=0.50) and vanishes at the
+extremes, which is why the outline-without-button case clusters on ~50/50
+markets.
+
+Known understatement: Kalshi rounds fees **up** to the cent per contract and
+nothing in our fee path rounds, so modelled fees are slightly low and marginal
+edges look slightly better than they are.
+
 ## Only-tradeable invariants
 
 Three layers can each go stale independently, and each has bitten. A phantom
