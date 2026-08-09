@@ -143,9 +143,16 @@ Feature flags in `.env` (copy from `.env.example`; `.env` is gitignored):
   quotes must be pushed via `POST /quotes`. Tests and demos rely on this.
 - `ARBYS_ENABLE_DISCOVERY` / `ARBYS_DISCOVERY_INTERVAL_S` — auto-registration of
   cross-venue games. Needs ingest on to actually stream.
+- `ARBYS_MAX_OUTCOME_QTY` — max open units per outcome per paper account,
+  default 500, `0` disables. An edge stays published while it exists, so
+  without this repeat executions stack without bound.
 - `KALSHI_API_KEY_ID` + `KALSHI_PRIVATE_KEY_PATH` — when both set, the
   authenticated WS adapter is used instead of 5s REST polling. **Keep the .pem
   outside this repo.**
+
+Run the backend **from the repo root**: `ARBYS_DB_URL` defaults to a relative
+`./arbys-local.db`, so starting uvicorn from elsewhere silently creates a
+second, empty database rather than failing.
 
 `arbys-local.db` is a ~177 MB gitignored local artifact. Don't read it wholesale
 or commit it; query it if you need to inspect state.
