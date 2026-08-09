@@ -77,6 +77,28 @@ Layers, strictly inward-depending:
   NBA is wired but **unverified** — `KXNBAGAME` had no open events in the
   offseason, so recheck its codes and title format when the season starts.
 
+  **Market types.** A group is identified by `(sport, teams, date, market_type,
+  line)`. `market_type="moneyline"` keys `outcome_ids` by team code and the
+  canonical TRUE side is `team_a`; `market_type="total"` keys it by
+  `OVER`/`UNDER` with TRUE = OVER, and the group id carries the line
+  (`nfl-ARI-LAC-2026-09-13-total-44.5`). **The line must stay in the matcher's
+  bucket key** — without it, one venue's Over 44.5 pairs against the other's
+  Over 47.5 and invents an arb. Totals are binary, so the engine, broker and
+  UI needed no changes.
+
+  Only NFL totals are wired: Kalshi lists `KXMLBTOTAL` but Polymarket carries
+  no baseball totals (moneyline, NRFI and player props only). Kalshi puts the
+  strike in `yes_sub_title` and the team codes only in the event ticker,
+  concatenated and variable-width, so `split_team_codes` tries every split;
+  the line itself comes from the structured `floor_strike`. Polymarket encodes
+  it in the slug (`…-total-37pt5`) and is filtered on
+  `sportsMarketType == "totals"`.
+
+  Observed 2026-08-09: totals price near 50/50 with a 1–2¢ spread on both
+  venues and showed **no** arbs, while moneyline did. A totals line is set to
+  be a coin flip and both venues model it similarly; disagreement lives in who
+  wins, not in the score.
+
   **Neither venue publishes a live score or game clock** (checked 2026-08-08).
   Kalshi has no score field; its `settlement_sources` just point at ESPN.
   Polymarket's payload does contain the words `score` and `inning`, but only in
