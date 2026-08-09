@@ -51,6 +51,11 @@ class MonitoredLegOut(BaseModel):
     # which is not the same as "none available" — treat it as unknown.
     bid_size: Decimal | None = None
     ask_size: Decimal | None = None
+    # Seconds since this leg last updated, and whether that exceeds the book's
+    # staleness threshold. A stale leg reports bid/ask None — it is not
+    # tradeable — but keeps its age so the UI can say why.
+    quote_age_s: float | None = None
+    is_stale: bool = False
 
 
 class MonitoredGroupOut(BaseModel):

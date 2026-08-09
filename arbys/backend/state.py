@@ -36,6 +36,7 @@ from ..shared.fees import (
 )
 from ..shared.paper_broker import PaperExecutionAdapter
 from ..shared.persistence import AccountScopedSink, DbPaperPersistenceSink
+from ..shared.quotebook import DEFAULT_MAX_AGE_S as QUOTEBOOK_DEFAULT_MAX_AGE_S
 from ..shared.quotebook import QuoteBook
 from ..shared.types import EventGroup
 
@@ -75,6 +76,24 @@ def _discovery_interval_s() -> float:
         return max(30.0, float(raw))
     except ValueError:
         return 600.0
+
+
+def quote_max_age_s() -> float | None:
+    """How old a quote may be before it stops counting as tradeable.
+
+    ``ARBYS_QUOTE_MAX_AGE_S=0`` disables expiry. A venue that stops publishing
+    an outcome otherwise looks identical to a quiet one, and its last price
+    quotes forever — which is how a delisted Polymarket token kept showing an
+    8c arb against a live Kalshi leg.
+    """
+    raw = os.environ.get("ARBYS_QUOTE_MAX_AGE_S")
+    if raw is None:
+        return QUOTEBOOK_DEFAULT_MAX_AGE_S
+    try:
+        value = float(raw)
+    except ValueError:
+        return QUOTEBOOK_DEFAULT_MAX_AGE_S
+    return None if value <= 0 else value
 
 
 DEFAULT_MAX_OUTCOME_QTY = Decimal("500")
@@ -127,7 +146,7 @@ def _default_adapter_factories() -> dict[str, AdapterFactory]:
 
 class AppState:
     def __init__(self) -> None:
-        self.quotebook = QuoteBook()
+        self.quotebook = QuoteBook(max_age_s=quote_max_age_s())
         self.fees: FeeModelRegistry = {
             "polymarket": PolymarketFeeModel(),
             "kalshi": KalshiFeeModel(),
@@ -399,6 +418,16 @@ class AppState:
         flat = [o for opps in self._opps_by_group.values() for o in opps]
         flat.sort(key=lambda o: (o.guaranteed_profit_bps, o.guaranteed_profit), reverse=True)
         return flat
+
+    def clear_group_opportunities(self, group_id: str) -> None:
+        """Forget a group's opportunities outright.
+
+        Normally the set empties when the engine re-evaluates and finds no
+        edge, but a retired group is unregistered first, so no evaluation ever
+        comes. Without this its last opportunity would outlive the group it
+        belongs to — visible in /opportunities after the group had gone.
+        """
+        self._opps_by_group.pop(group_id, None)
 
     def live_opportunities_for(self, event_group_id: str) -> list[ArbOpportunity]:
         """Re-run detection now and return what is executable at live quotes.

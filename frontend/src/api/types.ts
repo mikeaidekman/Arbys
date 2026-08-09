@@ -19,6 +19,11 @@ export interface MonitoredLeg {
   /** Size resting at the quoted price. 0/null means the venue reported no depth. */
   bid_size: string | null;
   ask_size: string | null;
+  /** Seconds since this leg last updated. */
+  quote_age_s: number | null;
+  /** True when the last update is older than the book's threshold; bid/ask are
+   *  withheld in that case because the price is no longer tradeable. */
+  is_stale: boolean;
 }
 
 export interface MonitoredGroup {

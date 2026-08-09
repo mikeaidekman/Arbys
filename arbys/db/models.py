@@ -107,6 +107,9 @@ class EventGroup(Base):
     start_time: Mapped[datetime | None] = mapped_column(
         DateTime(timezone=True), nullable=True, index=True
     )
+    # "discovery" | "manual". Only discovery-sourced groups are retired when a
+    # pass stops finding them; hand-registered ones persist.
+    source: Mapped[str] = mapped_column(String(16), nullable=False, default="manual")
 
     legs: Mapped[list[EventGroupLeg]] = relationship(back_populates="event_group")
 

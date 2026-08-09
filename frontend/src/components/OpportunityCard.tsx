@@ -37,6 +37,18 @@ function LegPrice({
 }) {
   const move = leg ? moves.get(leg.outcome_id) : undefined;
   const depth = depthAtAsk(leg);
+
+  // A stale leg has no tradeable price, so say so rather than showing "—",
+  // which would read as "no data" when in fact the feed went quiet.
+  if (leg?.is_stale) {
+    const mins = leg.quote_age_s != null ? Math.round(leg.quote_age_s / 60) : null;
+    return (
+      <span className="vt-mono vt-stale" title={`no update for ${mins ?? "?"}m — not tradeable`}>
+        {label} stale{mins != null ? ` ${mins}m` : ""}
+      </span>
+    );
+  }
+
   return (
     <span className="vt-mono">
       {label}{" "}

@@ -169,7 +169,12 @@ def create_app() -> FastAPI:
             best_no_venue: str | None = None
             all_quoted = True
             for leg in g.legs:
+                # get() withholds stale quotes; get_with_age() still reports
+                # them so the leg can explain itself rather than just vanishing.
                 q = s.quotebook.get(leg.outcome_id)
+                aged = s.quotebook.get_with_age(leg.outcome_id)
+                age = aged[1] if aged is not None else None
+                stale = q is None and aged is not None
                 bid = q.bid if q else None
                 ask = q.ask if q else None
                 if q is None or q.ask is None:
@@ -181,6 +186,8 @@ def create_app() -> FastAPI:
                         is_yes_side=leg.is_yes_side,
                         bid=bid,
                         ask=ask,
+                        quote_age_s=round(age, 1) if age is not None else None,
+                        is_stale=stale,
                         bid_size=q.bid_size if q else None,
                         ask_size=q.ask_size if q else None,
                     )

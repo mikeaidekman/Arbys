@@ -7,6 +7,7 @@ from arbys.discovery import service as service_mod
 from arbys.discovery.kalshi_sports import VenueGame
 from arbys.discovery.service import DiscoveryService
 from arbys.discovery.teams import MLB_RESOLVER
+from arbys.shared.types import EventGroup, EventGroupLeg
 
 
 @pytest.mark.asyncio
@@ -128,3 +129,99 @@ async def test_run_once_noop_when_group_unchanged(monkeypatch):
     # Second pass — should be a no-op.
     await svc.run_once()
     state.restart_ingest.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_run_once_retires_discovered_groups_that_vanish(monkeypatch):
+    """A group the venues no longer offer must stop being tracked.
+
+    Groups used to be upserted but never removed, so one whose markets were
+    delisted (or whose venue tokens rotated) lived on through restart
+    hydration -- still displayed, still priced off its last quotes.
+    """
+    gone = EventGroup(
+        id="mlb-MIL-SD-2026-08-11",
+        title="stale",
+        source="discovery",
+        legs=(EventGroupLeg(outcome_id="x", venue_id="kalshi", is_yes_side=True),),
+    )
+    kept = EventGroup(
+        id="manual-thing",
+        title="hand registered",
+        source="manual",
+        legs=(EventGroupLeg(outcome_id="y", venue_id="kalshi", is_yes_side=True),),
+    )
+
+    async def _empty(**_):
+        return []
+
+    for name in ("fetch_kalshi_team_games", "fetch_polymarket_sports_games",
+                 "fetch_kalshi_tennis_matches", "fetch_polymarket_tennis_matches",
+                 "fetch_kalshi_totals", "fetch_polymarket_totals"):
+        monkeypatch.setattr(service_mod, name, _empty)
+
+    fake_scope = MagicMock()
+    fake_scope.__aenter__ = AsyncMock(return_value=MagicMock())
+    fake_scope.__aexit__ = AsyncMock(return_value=None)
+    monkeypatch.setattr(service_mod, "session_scope", lambda: fake_scope)
+    monkeypatch.setattr(service_mod.repo, "upsert_event_group", AsyncMock())
+    deleted = AsyncMock()
+    monkeypatch.setattr(service_mod.repo, "delete_event_group", deleted)
+
+    state = MagicMock()
+    state.event_groups = {gone.id: gone, kept.id: kept}
+    state.engine = MagicMock()
+    state.restart_ingest = AsyncMock()
+
+    svc = DiscoveryService(state)
+    await svc.run_once()
+
+    assert gone.id not in state.event_groups, "vanished discovery group was not retired"
+    assert kept.id in state.event_groups, "hand-registered group must never be retired"
+    state.engine.unregister_group.assert_called_once_with(gone.id)
+    assert deleted.await_count == 1
+    state.restart_ingest.assert_awaited()
+    # Its opportunities must go too: once unregistered the engine never
+    # re-evaluates it, so nothing else would ever empty the set.
+    state.clear_group_opportunities.assert_called_once_with(gone.id)
+
+
+@pytest.mark.asyncio
+async def test_failed_subpass_does_not_retire_anything(monkeypatch):
+    """A venue outage must not be mistaken for 'these games no longer exist'."""
+    existing = EventGroup(
+        id="mlb-AAA-BBB-2026-08-11",
+        title="still real",
+        source="discovery",
+        legs=(EventGroupLeg(outcome_id="x", venue_id="kalshi", is_yes_side=True),),
+    )
+
+    async def _empty(**_):
+        return []
+
+    async def _boom(**_):
+        raise RuntimeError("kalshi is down")
+
+    for name in ("fetch_polymarket_sports_games", "fetch_kalshi_tennis_matches",
+                 "fetch_polymarket_tennis_matches", "fetch_kalshi_totals",
+                 "fetch_polymarket_totals"):
+        monkeypatch.setattr(service_mod, name, _empty)
+    monkeypatch.setattr(service_mod, "fetch_kalshi_team_games", _boom)
+
+    fake_scope = MagicMock()
+    fake_scope.__aenter__ = AsyncMock(return_value=MagicMock())
+    fake_scope.__aexit__ = AsyncMock(return_value=None)
+    monkeypatch.setattr(service_mod, "session_scope", lambda: fake_scope)
+    monkeypatch.setattr(service_mod.repo, "upsert_event_group", AsyncMock())
+    deleted = AsyncMock()
+    monkeypatch.setattr(service_mod.repo, "delete_event_group", deleted)
+
+    state = MagicMock()
+    state.event_groups = {existing.id: existing}
+    state.engine = MagicMock()
+    state.restart_ingest = AsyncMock()
+
+    await DiscoveryService(state).run_once()
+
+    assert existing.id in state.event_groups, "retired on an incomplete pass"
+    assert deleted.await_count == 0

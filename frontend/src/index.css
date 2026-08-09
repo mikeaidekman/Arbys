@@ -74,6 +74,13 @@ a:hover { color: var(--color-accent-700); }
 }
 /* Depth at the quoted level. Deliberately quiet — it is context for the
    price, not a headline number. "×?" means the venue reported nothing. */
+/* A leg whose feed has gone quiet past the staleness threshold. Struck
+   through because the price is still *known* but no longer tradeable. */
+.vt-stale {
+  opacity: 0.4;
+  text-decoration: line-through;
+}
+
 .vt-depth {
   font-size: 9px;
   opacity: 0.5;

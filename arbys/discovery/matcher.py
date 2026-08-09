@@ -172,4 +172,5 @@ def match_to_event_group(match: CrossVenueMatch) -> EventGroup:
         title=match.event_group_title(),
         legs=tuple(legs),
         start_time=match.start_time(),
+        source="discovery",
     )

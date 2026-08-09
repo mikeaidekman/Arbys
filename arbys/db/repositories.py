@@ -71,10 +71,16 @@ async def upsert_event_group(session: AsyncSession, group: EventGroup) -> None:
     existing = await session.get(m.EventGroup, group.id)
     if existing is None:
         session.add(
-            m.EventGroup(id=group.id, title=group.title, start_time=group.start_time)
+            m.EventGroup(
+                id=group.id,
+                title=group.title,
+                start_time=group.start_time,
+                source=group.source,
+            )
         )
     else:
         existing.title = group.title
+        existing.source = group.source
         # Don't clobber a known start time with None when a later pass, or a
         # venue that reports no time, re-registers the same group.
         if group.start_time is not None:
@@ -120,6 +126,7 @@ async def list_event_groups(session: AsyncSession) -> list[EventGroup]:
                 id=row.id,
                 title=row.title,
                 start_time=row.start_time,
+                source=row.source,
                 legs=tuple(
                     EventGroupLeg(
                         outcome_id=leg.outcome_id,

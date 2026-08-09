@@ -39,7 +39,9 @@ async def run_backtest(
     account_id: str = "bt",
     target_payoff: Decimal = Decimal("1"),
 ) -> BacktestResult:
-    book = QuoteBook()
+    # Replays feed quotes as fast as the loop runs, so wall-clock staleness is
+    # meaningless here — disable it rather than expire the whole replay.
+    book = QuoteBook(max_age_s=None)
     result = BacktestResult()
     brokers: dict[str, PaperExecutionAdapter] = {}
     router: ExecutionRouter | None = None

@@ -98,8 +98,14 @@ async def discover_tennis_event_groups() -> list[EventGroup]:
     return [match_to_event_group(m) for m in matches]
 
 
-async def discover_all_event_groups() -> list[EventGroup]:
-    """Aggregate discovery across every sport we currently support."""
+async def discover_all_event_groups() -> tuple[list[EventGroup], bool]:
+    """Aggregate discovery across every sport we currently support.
+
+    Returns ``(groups, complete)``. ``complete`` is False when any sub-pass
+    raised, which matters because the caller retires groups missing from the
+    result — and a transient venue error must not be read as "these games no
+    longer exist".
+    """
     results = await asyncio.gather(
         *(discover_team_sport_event_groups(s, r) for s, r in TEAM_SPORTS),
         *(discover_totals_event_groups(s, r) for s, r in TOTALS_SPORTS),
@@ -107,12 +113,14 @@ async def discover_all_event_groups() -> list[EventGroup]:
         return_exceptions=True,
     )
     groups: list[EventGroup] = []
+    complete = True
     for r in results:
         if isinstance(r, BaseException):
             log.exception("discovery sub-pass failed", exc_info=r)
+            complete = False
             continue
         groups.extend(r)
-    return groups
+    return groups, complete
 
 
 class DiscoveryService:
@@ -155,7 +163,7 @@ class DiscoveryService:
     async def run_once(self) -> int:
         """Public: run one discovery pass. Returns count of groups registered/updated."""
         try:
-            groups = await discover_all_event_groups()
+            groups, complete = await discover_all_event_groups()
         except Exception:
             log.exception("discovery pass failed")
             return 0
@@ -174,10 +182,48 @@ class DiscoveryService:
                 self._state.engine.unregister_group(group.id)
                 self._state.engine.register_group(group)
             changed = True
+
+        if complete:
+            changed |= await self._retire_missing({g.id for g in groups})
+        else:
+            log.warning(
+                "discovery incomplete — skipping retirement so a venue error "
+                "is not mistaken for delisted games"
+            )
+
         if changed:
             await self._state.restart_ingest()
         log.info("discovery: registered/updated %d groups (changed=%s)", len(groups), changed)
         return len(groups)
+
+    async def _retire_missing(self, found_ids: set[str]) -> bool:
+        """Remove discovery-sourced groups this pass no longer found.
+
+        A game whose markets are delisted or whose venue tokens have rotated
+        stops matching, but used to linger forever through restart hydration —
+        still displayed, still priced off its last quotes, still capable of
+        showing a phantom arb against the one leg that is still live.
+
+        Only ``source="discovery"`` groups are eligible; anything registered by
+        hand is left alone.
+        """
+        stale = [
+            gid
+            for gid, g in self._state.event_groups.items()
+            if gid not in found_ids and g.source == "discovery"
+        ]
+        if not stale:
+            return False
+        for gid in stale:
+            self._state.engine.unregister_group(gid)
+            # Must come after unregistering: once unregistered the engine never
+            # re-evaluates the group, so nothing else would ever empty its set.
+            self._state.clear_group_opportunities(gid)
+            self._state.event_groups.pop(gid, None)
+            async with session_scope() as session:
+                await repo.delete_event_group(session, gid)
+        log.info("discovery: retired %d group(s) no longer offered: %s", len(stale), stale[:5])
+        return True
 
     async def _run(self) -> None:
         while not self._stop_evt.is_set():

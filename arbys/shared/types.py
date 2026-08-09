@@ -94,3 +94,7 @@ class EventGroup:
     # Scheduled start of the underlying real-world event, UTC. None when the
     # group was registered by hand or the venue reported no time.
     start_time: datetime | None = None
+    # "discovery" for auto-registered groups, "manual" for hand-registered
+    # ones. Discovery retires its own groups when they stop matching; manual
+    # groups are never touched.
+    source: str = "manual"
