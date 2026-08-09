@@ -133,6 +133,13 @@ class _MarketBook:
     def best_no_bid(self) -> Decimal | None:
         return _max_price(self.no)
 
+    def best_yes(self) -> tuple[Decimal, Decimal] | None:
+        """Best YES bid with the size resting there."""
+        return _max_price_and_size(self.yes)
+
+    def best_no(self) -> tuple[Decimal, Decimal] | None:
+        return _max_price_and_size(self.no)
+
 
 def _levels_to_dict(levels: object) -> dict[str, Decimal]:
     out: dict[str, Decimal] = {}
@@ -148,6 +155,19 @@ def _levels_to_dict(levels: object) -> dict[str, Decimal]:
         except (ValueError, TypeError):
             continue
     return out
+
+
+def _max_price_and_size(book: dict[str, Decimal]) -> tuple[Decimal, Decimal] | None:
+    """Highest price in the ladder and the size resting at it."""
+    best: tuple[Decimal, Decimal] | None = None
+    for p_str, size in book.items():
+        try:
+            p = Decimal(p_str)
+        except (ArithmeticError, ValueError, TypeError):
+            continue
+        if best is None or p > best[0]:
+            best = (p, size)
+    return best
 
 
 def _max_price(book: dict[str, Decimal]) -> Decimal | None:
@@ -277,25 +297,37 @@ class KalshiWebSocketAdapter(MarketDataAdapter):
 
     def _quotes_for(self, ticker: str) -> list[Quote]:
         book = self._books[ticker]
-        yes_side = book.best_yes_bid()  # highest YES bid
-        no_side = book.best_no_bid()    # highest NO bid
+        # Sizes travel with the price: buying YES matches the resting NO bid,
+        # so the YES ask's depth is whatever sits on that NO level.
+        yes_best = book.best_yes()  # highest YES bid + its size
+        no_best = book.best_no()    # highest NO bid + its size
+        zero = Decimal("0")
 
-        def _quote(oid: str, bid: Decimal, ask: Decimal) -> Quote | None:
+        def _quote(
+            oid: str, bid: Decimal, ask: Decimal, bid_size: Decimal, ask_size: Decimal
+        ) -> Quote | None:
             if bid > ask:
                 bid = ask
             try:
-                return Quote(outcome_id=oid, bid=bid, ask=ask)
+                return Quote(
+                    outcome_id=oid, bid=bid, ask=ask,
+                    bid_size=bid_size, ask_size=ask_size,
+                )
             except ValueError:
                 return None
 
-        yes_bid = yes_side if yes_side is not None else Decimal("0")
-        yes_ask = (ONE - no_side) if no_side is not None else ONE
-        no_bid = no_side if no_side is not None else Decimal("0")
-        no_ask = (ONE - yes_side) if yes_side is not None else ONE
+        yes_bid, yes_bid_size = yes_best if yes_best is not None else (zero, zero)
+        no_bid, no_bid_size = no_best if no_best is not None else (zero, zero)
+        yes_ask, yes_ask_size = (
+            (ONE - no_bid, no_bid_size) if no_best is not None else (ONE, zero)
+        )
+        no_ask, no_ask_size = (
+            (ONE - yes_bid, yes_bid_size) if yes_best is not None else (ONE, zero)
+        )
 
         out: list[Quote] = []
-        yes_q = _quote(f"{ticker}:YES", yes_bid, yes_ask)
-        no_q = _quote(f"{ticker}:NO", no_bid, no_ask)
+        yes_q = _quote(f"{ticker}:YES", yes_bid, yes_ask, yes_bid_size, yes_ask_size)
+        no_q = _quote(f"{ticker}:NO", no_bid, no_ask, no_bid_size, no_ask_size)
         if yes_q is not None:
             out.append(yes_q)
         if no_q is not None:

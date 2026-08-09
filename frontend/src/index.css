@@ -72,6 +72,14 @@ a:hover { color: var(--color-accent-700); }
   margin: 0 -3px;
   font-weight: 600;
 }
+/* Depth at the quoted level. Deliberately quiet — it is context for the
+   price, not a headline number. "×?" means the venue reported nothing. */
+.vt-depth {
+  font-size: 9px;
+  opacity: 0.5;
+  margin-left: 3px;
+}
+
 .vt-move-delta {
   font-size: 9px;
   opacity: 0.75;

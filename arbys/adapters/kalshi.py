@@ -22,35 +22,43 @@ from .base import MarketDataAdapter
 BASE_URL = "https://api.elections.kalshi.com/trade-api/v2"
 
 
-def _best_price_dollars(levels: object) -> Decimal | None:
-    """Return the highest bid price from a list of ``[price_str, size_str]``."""
+def _level_size(lvl: object) -> Decimal:
+    """Resting size at one book level. Unknown/malformed reads as 0."""
+    try:
+        return Decimal(str(lvl[1]))  # type: ignore[index]
+    except (ArithmeticError, ValueError, IndexError, TypeError):
+        return Decimal("0")
+
+
+def _best_price_dollars(levels: object) -> tuple[Decimal, Decimal] | None:
+    """Best (highest) bid from ``[price_str, size_str]`` levels, with its size."""
     if not isinstance(levels, list) or not levels:
         return None
-    best: Decimal | None = None
+    best: tuple[Decimal, Decimal] | None = None
     for lvl in levels:
         try:
             p = Decimal(str(lvl[0]))
-        except (ValueError, IndexError, TypeError):
+        except (ArithmeticError, ValueError, IndexError, TypeError):
             continue
-        if best is None or p > best:
-            best = p
+        if best is None or p > best[0]:
+            best = (p, _level_size(lvl))
     return best
 
 
-def _best_price_cents(levels: object) -> Decimal | None:
+def _best_price_cents(levels: object) -> tuple[Decimal, Decimal] | None:
     if not isinstance(levels, list) or not levels:
         return None
-    best_c: int | None = None
+    best: tuple[int, Decimal] | None = None
     for lvl in levels:
         try:
             c = int(lvl[0])
         except (ValueError, IndexError, TypeError):
             continue
-        if best_c is None or c > best_c:
-            best_c = c
-    if best_c is None:
+        if best is None or c > best[0]:
+            best = (c, _level_size(lvl))
+    if best is None:
         return None
-    return Decimal(best_c) / Decimal(100)
+    return Decimal(best[0]) / Decimal(100), best[1]
 
 
 class KalshiAdapter(MarketDataAdapter):
@@ -138,6 +146,11 @@ class KalshiAdapter(MarketDataAdapter):
           bid = best (highest) YES bid
           ask = 1 - best (highest) NO bid  (the price to buy YES = 1 - what someone pays for NO)
         For a NO outcome: mirror.
+
+        Sizes come off the same levels as the prices. Buying YES matches the
+        resting NO bid, so ``ask_size`` is that level's size; selling YES hits
+        the resting YES bid, so ``bid_size`` is that one. Depth is what tells
+        the caller whether the quoted price can absorb the intended size.
         """
         try:
             fp = body.get("orderbook_fp")
@@ -151,16 +164,31 @@ class KalshiAdapter(MarketDataAdapter):
         except (ValueError, TypeError, KeyError, IndexError):
             return None
 
+        zero = Decimal("0")
         if side is Side.YES:
-            bid = yes_side if yes_side is not None else Decimal("0")
-            ask = (Decimal("1") - no_side) if no_side is not None else Decimal("1")
+            bid, bid_size = yes_side if yes_side is not None else (zero, zero)
+            ask, ask_size = (
+                (Decimal("1") - no_side[0], no_side[1])
+                if no_side is not None
+                else (Decimal("1"), zero)
+            )
         else:
-            bid = no_side if no_side is not None else Decimal("0")
-            ask = (Decimal("1") - yes_side) if yes_side is not None else Decimal("1")
+            bid, bid_size = no_side if no_side is not None else (zero, zero)
+            ask, ask_size = (
+                (Decimal("1") - yes_side[0], yes_side[1])
+                if yes_side is not None
+                else (Decimal("1"), zero)
+            )
         if bid > ask:
             bid = ask
         try:
-            return Quote(outcome_id=outcome_id, bid=bid, ask=ask)
+            return Quote(
+                outcome_id=outcome_id,
+                bid=bid,
+                ask=ask,
+                bid_size=bid_size,
+                ask_size=ask_size,
+            )
         except ValueError:
             return None
 

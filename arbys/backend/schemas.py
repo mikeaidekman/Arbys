@@ -47,6 +47,10 @@ class MonitoredLegOut(BaseModel):
     is_yes_side: bool
     bid: Decimal | None
     ask: Decimal | None
+    # Size resting at the quoted price. 0 means the venue reported no depth,
+    # which is not the same as "none available" — treat it as unknown.
+    bid_size: Decimal | None = None
+    ask_size: Decimal | None = None
 
 
 class MonitoredGroupOut(BaseModel):
@@ -65,6 +69,8 @@ class MonitoredGroupOut(BaseModel):
 
 
 class QuoteIn(BaseModel):
+    bid_size: Decimal = Decimal("0")
+    ask_size: Decimal = Decimal("0")
     outcome_id: str
     bid: Decimal
     ask: Decimal

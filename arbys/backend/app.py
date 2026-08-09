@@ -105,14 +105,25 @@ def create_app() -> FastAPI:
     @app.post("/quotes", status_code=204)
     async def push_quote(body: QuoteIn) -> None:
         s = get_state()
-        q = Quote(outcome_id=body.outcome_id, bid=body.bid, ask=body.ask)
+        q = Quote(
+            outcome_id=body.outcome_id,
+            bid=body.bid,
+            ask=body.ask,
+            bid_size=body.bid_size,
+            ask_size=body.ask_size,
+        )
         s.quotebook.upsert(q)
         async with session_scope() as session:
             await repo.ensure_outcome_placeholder(
                 session, body.outcome_id, venue_id="unknown"
             )
             await repo.insert_quote(
-                session, outcome_id=body.outcome_id, bid=body.bid, ask=body.ask
+                session,
+                outcome_id=body.outcome_id,
+                bid=body.bid,
+                ask=body.ask,
+                bid_size=body.bid_size,
+                ask_size=body.ask_size,
             )
         s.engine.on_quote(q)
 
@@ -170,6 +181,8 @@ def create_app() -> FastAPI:
                         is_yes_side=leg.is_yes_side,
                         bid=bid,
                         ask=ask,
+                        bid_size=q.bid_size if q else None,
+                        ask_size=q.ask_size if q else None,
                     )
                 )
                 if ask is not None:

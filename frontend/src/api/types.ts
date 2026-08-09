@@ -16,6 +16,9 @@ export interface MonitoredLeg {
   is_yes_side: boolean;
   bid: string | null;
   ask: string | null;
+  /** Size resting at the quoted price. 0/null means the venue reported no depth. */
+  bid_size: string | null;
+  ask_size: string | null;
 }
 
 export interface MonitoredGroup {

@@ -77,6 +77,19 @@ class _BookState:
     def best_ask(self) -> Decimal | None:
         return min(self.asks) if self.asks else None
 
+    def best_bid_level(self) -> tuple[Decimal, Decimal] | None:
+        """Best bid and the size resting at it."""
+        if not self.bids:
+            return None
+        p = max(self.bids)
+        return p, self.bids[p]
+
+    def best_ask_level(self) -> tuple[Decimal, Decimal] | None:
+        if not self.asks:
+            return None
+        p = min(self.asks)
+        return p, self.asks[p]
+
     def _side(self, side: str) -> dict[Decimal, Decimal]:
         s = side.upper()
         if s == "BUY":
@@ -96,18 +109,31 @@ def _dec(v: Any) -> Decimal | None:
 
 
 def _quote_from_book(outcome_id: str, book: _BookState) -> Quote | None:
-    bid = book.best_bid()
-    ask = book.best_ask()
-    if bid is None and ask is None:
+    """Top of book plus the depth resting there.
+
+    Sizes matter because a quoted price only holds for as much as is actually
+    on that level; a one-sided book reports the size it has and 0 for the side
+    it is standing in for.
+    """
+    bid_level = book.best_bid_level()
+    ask_level = book.best_ask_level()
+    if bid_level is None and ask_level is None:
         return None
-    if bid is None:
-        bid = ask  # type: ignore[assignment]
-    if ask is None:
-        ask = bid
-    assert bid is not None and ask is not None
+
+    zero = Decimal("0")
+    if bid_level is None:
+        bid, bid_size = ask_level[0], zero  # type: ignore[index]
+    else:
+        bid, bid_size = bid_level
+    if ask_level is None:
+        ask, ask_size = bid, zero
+    else:
+        ask, ask_size = ask_level
     if bid > ask:
         bid = ask
-    return Quote(outcome_id=outcome_id, bid=bid, ask=ask)
+    return Quote(
+        outcome_id=outcome_id, bid=bid, ask=ask, bid_size=bid_size, ask_size=ask_size
+    )
 
 
 def _iter_events(payload: Any) -> list[dict[str, Any]]:

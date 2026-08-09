@@ -36,6 +36,7 @@ function LegPrice({
   moves: Map<string, PriceMove>;
 }) {
   const move = leg ? moves.get(leg.outcome_id) : undefined;
+  const depth = depthAtAsk(leg);
   return (
     <span className="vt-mono">
       {label}{" "}
@@ -48,8 +49,33 @@ function LegPrice({
           </span>
         )}
       </span>
+      {/* Depth at that price. The quote only holds for this much size. */}
+      <span
+        className="vt-depth"
+        title={
+          depth == null
+            ? "venue reported no depth for this level"
+            : `${depth} available at the quoted ask`
+        }
+      >
+        {depth == null ? "×?" : `×${formatDepth(depth)}`}
+      </span>
     </span>
   );
+}
+
+/** Size available at the ask, or null when the venue reported none. */
+function depthAtAsk(leg: MonitoredLeg | null | undefined): number | null {
+  if (!leg || leg.ask_size == null) return null;
+  const n = Number(leg.ask_size);
+  if (!Number.isFinite(n) || n <= 0) return null;
+  return n;
+}
+
+function formatDepth(n: number): string {
+  if (n >= 10_000) return `${Math.round(n / 1000)}k`;
+  if (n >= 1_000) return `${(n / 1000).toFixed(1)}k`;
+  return String(Math.round(n));
 }
 
 export function OpportunityCard({
