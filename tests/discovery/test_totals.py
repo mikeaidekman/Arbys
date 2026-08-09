@@ -142,7 +142,10 @@ async def test_fetch_kalshi_totals_one_game_per_strike():
         UNDER: "KXNFLTOTAL-26SEP13DETCIN-45:NO",
     }
     assert {t.code for t in g.teams} == {"DET", "CIN"}
-    assert g.start_time is not None
+    # NFL tickers carry a date with no HHMM, so there is no start time to
+    # parse and matching falls back to dates. That is safe for NFL: games are
+    # weekly, so a pair never appears on consecutive days the way MLB does.
+    assert g.start_time is None
 
 
 @pytest.mark.asyncio

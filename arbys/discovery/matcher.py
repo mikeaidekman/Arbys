@@ -60,6 +60,34 @@ def _fmt_line(line: Decimal | None) -> str:
     return format(line.normalize(), "f")
 
 
+# Two venues quoting the same fixture report the same scheduled start, give or
+# take rounding. Anything further apart is a different game — a doubleheader's
+# second leg is ~3h later, the next game in a series ~24h.
+START_TIME_TOLERANCE = timedelta(minutes=90)
+
+
+def _same_fixture(a: VenueGame, b: VenueGame, date_tol: timedelta) -> bool:
+    """Are these two the same real-world game?
+
+    Prefer exact start times. ``game_date`` is not comparable across venues:
+    Kalshi's ticker carries a *local trading day* while Polymarket reports UTC,
+    so a 10pm ET game is Aug 11 on one and Aug 12 on the other — and, worse,
+    Kalshi's Aug 11 night game and Polymarket's Aug 10 night game both reduce
+    to Aug 11. That collision paired Monday's game against Tuesday's and
+    invented an arb between two different fixtures.
+    """
+    if a.start_time is not None and b.start_time is not None:
+        return abs(a.start_time - b.start_time) <= START_TIME_TOLERANCE
+    return abs(a.game_date - b.game_date) <= date_tol
+
+
+def _order_key(game: VenueGame) -> tuple[int, float, str]:
+    """Sort games chronologically, preferring the exact start when known."""
+    if game.start_time is not None:
+        return (0, game.start_time.timestamp(), game.venue_id)
+    return (1, float(game.game_date.toordinal()), game.venue_id)
+
+
 def _pair_key(game: VenueGame) -> tuple[str, str, str, frozenset[str]]:
     """Bucket key. Market type and line are part of identity: an Over 44.5 and
     an Over 47.5 on the same game are different bets, not the same one."""
@@ -101,8 +129,14 @@ def match_games(
     for _key, games in buckets.items():
         if {g.venue_id for g in games} == {games[0].venue_id}:
             continue  # single venue only
-        games.sort(key=lambda g: g.game_date)
+        games.sort(key=_order_key)
         claimed = [False] * len(games)
+
+        def _distance(g: VenueGame, anchor: VenueGame) -> float:
+            """How far g sits from the anchor, in seconds where possible."""
+            if g.start_time is not None and anchor.start_time is not None:
+                return abs((g.start_time - anchor.start_time).total_seconds())
+            return abs((g.game_date - anchor.game_date).days) * 86400.0
 
         for i, anchor in enumerate(games):
             if claimed[i]:
@@ -114,12 +148,10 @@ def match_games(
                 if claimed[j]:
                     continue
                 g = games[j]
-                if abs(g.game_date - anchor.game_date) > tol:
+                if not _same_fixture(g, anchor, tol):
                     continue
                 existing = per_venue.get(g.venue_id)
-                if existing is None or abs(g.game_date - anchor.game_date) < abs(
-                    existing.game_date - anchor.game_date
-                ):
+                if existing is None or _distance(g, anchor) < _distance(existing, anchor):
                     per_venue[g.venue_id] = g
                     chosen_idx[g.venue_id] = j
             for j in chosen_idx.values():

@@ -30,7 +30,7 @@ from .kalshi_sports import (
     VenueGame,
     _get_with_retry,
     _parse_ticker_date,
-    _parse_utc,
+    parse_ticker_start,
 )
 from .matcher import OVER, UNDER
 from .teams import TeamResolver
@@ -143,7 +143,7 @@ async def _parse_totals_event(
                 ref=mkt_ticker,
                 market_type="total",
                 line=line,
-                start_time=_parse_utc(mk.get("occurrence_datetime")),
+                start_time=parse_ticker_start(ticker),
             )
         )
     return out

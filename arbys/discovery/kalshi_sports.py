@@ -8,6 +8,7 @@ from dataclasses import dataclass
 from datetime import UTC, date, datetime
 from decimal import Decimal
 from typing import Protocol
+from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 import httpx
 
@@ -134,14 +135,12 @@ async def _parse_kalshi_event(
 
     outcome_ids: dict[str, str] = {}
     teams_found: dict[str, Team] = {}
-    start_time: datetime | None = None
+    start_time = parse_ticker_start(event_ticker)
     for m in markets:
         ticker = m.get("ticker")
         yes_sub_title = m.get("yes_sub_title") or ""
         if not ticker or not yes_sub_title:
             continue
-        if start_time is None:
-            start_time = _parse_utc(m.get("occurrence_datetime"))
         team = resolver.by_kalshi_title(yes_sub_title)
         if team is None:
             continue
@@ -201,6 +200,36 @@ async def _get_with_retry(
         await asyncio.sleep(wait)
         delay = min(delay * 2, 8.0)
     return resp
+
+
+def parse_ticker_start(event_ticker: str) -> datetime | None:
+    """True first pitch from a ticker like ``KXMLBGAME-26AUG102210KCLAD``.
+
+    The trailing ``HHMM`` is **Eastern**, so Aug 10 22:10 ET is 02:10Z on the
+    11th — which is exactly what Polymarket reports for the same game.
+
+    Do NOT use the market's ``occurrence_datetime`` for this: that is the
+    expected *settlement* time, about three hours later. Matching on it made
+    every Kalshi game look three hours offset from its Polymarket counterpart,
+    and card countdowns ran three hours late.
+    """
+    try:
+        _, tail = event_ticker.split("-", 1)
+    except ValueError:
+        return None
+    if len(tail) < 11:
+        return None  # no HHMM component (e.g. NFL tickers carry date only)
+    yy, mon, dd, hh, mm = tail[0:2], tail[2:5], tail[5:7], tail[7:9], tail[9:11]
+    if mon not in _MONTHS or not (hh + mm).isdigit():
+        return None
+    try:
+        local = datetime(
+            2000 + int(yy), _MONTHS[mon], int(dd), int(hh), int(mm),
+            tzinfo=ZoneInfo("America/New_York"),
+        )
+    except (ValueError, ZoneInfoNotFoundError):
+        return None
+    return local.astimezone(UTC)
 
 
 def _parse_ticker_date(event_ticker: str) -> date | None:

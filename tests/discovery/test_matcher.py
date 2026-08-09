@@ -167,3 +167,66 @@ def test_match_to_event_group_builds_four_legs():
     assert all(leg.is_yes_side is False for leg in lad_legs)
     venues = {leg.venue_id for leg in group.legs}
     assert venues == {"kalshi", "polymarket"}
+
+
+def _dated(venue, date_str, start_iso, teams=("NYM", "ATL")):
+    a = MLB_RESOLVER.by_code(teams[0])
+    b = MLB_RESOLVER.by_code(teams[1])
+    y, m, d = map(int, date_str.split("-"))
+    return VenueGame(
+        sport="mlb",
+        venue_id=venue,
+        game_date=date(y, m, d),
+        teams=(a, b),
+        outcome_ids={teams[0]: f"{venue}-a-{start_iso}", teams[1]: f"{venue}-b-{start_iso}"},
+        ref=f"{venue}-{start_iso}",
+        start_time=datetime.fromisoformat(start_iso),
+    )
+
+
+def test_matching_venues_disagree_on_date_but_agree_on_start_time():
+    """The venues label dates differently; the start time is the truth.
+
+    Kalshi's ticker carries a local trading day, Polymarket reports UTC, so a
+    night game is Aug 11 on one and Aug 12 on the other. Same fixture.
+    """
+    k = _dated("kalshi", "2026-08-11", "2026-08-12T05:10:00+00:00")
+    p = _dated("polymarket", "2026-08-12", "2026-08-12T05:10:00+00:00")
+    matches = match_games([k], [p])
+    assert len(matches) == 1
+    assert set(matches[0].per_venue) == {"kalshi", "polymarket"}
+
+
+def test_same_date_but_different_games_must_not_match():
+    """The KC/LAD phantom: dates collide, fixtures are 27h apart.
+
+    Kalshi's Aug 11 night game (Aug 12 05:10Z) and Polymarket's Aug 10 night
+    game (Aug 11 02:10Z) both reduce to game_date 2026-08-11, so date matching
+    paired Monday's game with Tuesday's and invented an arb between them.
+    """
+    k = _dated("kalshi", "2026-08-11", "2026-08-12T05:10:00+00:00")
+    p = _dated("polymarket", "2026-08-11", "2026-08-11T02:10:00+00:00")
+    assert match_games([k], [p]) == [], "paired two different games in a series"
+
+
+def test_doubleheader_legs_are_kept_apart():
+    """Two games the same day, ~3h apart, are still different games."""
+    k1 = _dated("kalshi", "2026-08-11", "2026-08-11T17:10:00+00:00")
+    k2 = _dated("kalshi", "2026-08-11", "2026-08-11T21:40:00+00:00")
+    p1 = _dated("polymarket", "2026-08-11", "2026-08-11T17:10:00+00:00")
+    p2 = _dated("polymarket", "2026-08-11", "2026-08-11T21:40:00+00:00")
+    matches = match_games([k1, k2], [p1, p2])
+    assert len(matches) == 2
+    for m in matches:
+        k = m.per_venue["kalshi"].start_time
+        p = m.per_venue["polymarket"].start_time
+        assert k == p, f"fused different halves of a doubleheader: {k} vs {p}"
+
+
+def test_falls_back_to_dates_when_a_venue_reports_no_start_time():
+    """Tennis and hand-built groups may have no start time; still match."""
+    k = _dated("kalshi", "2026-08-11", "2026-08-11T17:10:00+00:00")
+    k = replace(k, start_time=None)
+    p = _dated("polymarket", "2026-08-11", "2026-08-11T17:10:00+00:00")
+    p = replace(p, start_time=None)
+    assert len(match_games([k], [p])) == 1
