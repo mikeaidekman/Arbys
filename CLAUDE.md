@@ -190,6 +190,23 @@ second, empty database rather than failing.
 `arbys-local.db` is a ~177 MB gitignored local artifact. Don't read it wholesale
 or commit it; query it if you need to inspect state.
 
+### Time is the matching key, not the date
+
+`game_date` is **not comparable across venues**: Kalshi's ticker carries a
+local trading day, Polymarket reports UTC. A night game is Aug 11 on one and
+Aug 12 on the other — and Kalshi's Aug 11 night game collides with
+Polymarket's Aug 10 night game on `2026-08-11`. Date tolerance cannot fix
+that, because the dates already agree wrongly; it paired Monday's game with
+Tuesday's and invented an arb between two fixtures. `match_games` now compares
+actual start times (90-minute window) whenever both venues report one.
+
+**Kalshi's `occurrence_datetime` is expected settlement, ~3h after first
+pitch — never use it as a start time.** The true start is in the ticker, in
+Eastern: `KXMLBGAME-26AUG10`**`2210`**`KCLAD` → Aug 10 22:10 ET → 02:10Z,
+matching Polymarket exactly. `parse_ticker_start` does this. NFL tickers carry
+a date with no `HHMM`, so those fall back to date matching — safe, since NFL
+pairs never meet on consecutive days.
+
 ## Only-tradeable invariants
 
 Three layers can each go stale independently, and each has bitten. A phantom
