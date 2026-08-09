@@ -186,7 +186,14 @@ def test_opportunities_are_live_not_a_log():
 
 
 def test_busy_group_does_not_evict_another_groups_opportunity():
-    """A market that re-ticks constantly must not crowd out other games."""
+    """A market that re-ticks constantly must not crowd out other games.
+
+    The root cause — re-detections accumulating instead of replacing — is
+    pinned by test_opportunities_are_live_not_a_log, which fails on the old
+    implementation after 25 re-pushes. This covers the user-visible
+    consequence: with the set keyed by group, entries are bounded by the
+    number of groups, so churn on one cannot displace another.
+    """
     with TestClient(create_app()) as client:
         _register(client, "eg-busy", "b-yes", "b-no")
         _register(client, "eg-quiet", "q-yes", "q-no")
@@ -196,13 +203,16 @@ def test_busy_group_does_not_evict_another_groups_opportunity():
 
         quote("q-yes", "0.30")
         quote("q-no", "0.40")  # quiet group has a standing edge
-        for i in range(300):
+        for i in range(40):
             # Busy group re-detects on every tick.
             quote("b-yes", "0.10")
             quote("b-no", "0.80" if i % 2 else "0.81")
 
-        groups = {o["event_group_id"] for o in client.get("/opportunities?limit=500").json()}
+        opps = client.get("/opportunities?limit=500").json()
+        groups = {o["event_group_id"] for o in opps}
         assert "eg-quiet" in groups, "quiet group was evicted by a busy one"
+        # One entry per group with an edge — never one per detection.
+        assert len(opps) == len(groups) == 2, opps
 
 
 def test_execute_prices_against_live_quotes_not_the_recorded_opportunity():
@@ -238,6 +248,51 @@ def test_execute_prices_against_live_quotes_not_the_recorded_opportunity():
         orders = client.get("/paper/default/orders").json()
         filled = {o["outcome_id"]: o for o in orders if o["status"] == "filled"}
         assert Decimal(filled["m-no"]["limit_price"]) == Decimal("0.45"), filled["m-no"]
+
+
+def test_repeat_fills_stop_at_the_position_cap(monkeypatch):
+    """The same edge stays published, so repeat clicks must not stack forever."""
+    monkeypatch.setenv("ARBYS_MAX_OUTCOME_QTY", "250")
+    with TestClient(create_app()) as client:
+        _register(client, "eg-cap", "c-yes", "c-no")
+        for oid, px in (("c-yes", "0.40"), ("c-no", "0.50")):
+            client.post("/quotes", json={"outcome_id": oid, "bid": px, "ask": px})
+
+        # Each ticket is 100 units, so the third would exceed a 250 cap.
+        assert client.post(
+            "/paper/execute",
+            json={"event_group_id": "eg-cap", "outcome_ids": ["c-yes", "c-no"]},
+        ).status_code == 200
+        assert client.post(
+            "/paper/execute",
+            json={"event_group_id": "eg-cap", "outcome_ids": ["c-yes", "c-no"]},
+        ).status_code == 200
+
+        r = client.post(
+            "/paper/execute",
+            json={"event_group_id": "eg-cap", "outcome_ids": ["c-yes", "c-no"]},
+        )
+        assert r.status_code == 409, r.text
+        assert "position cap" in r.json()["detail"]
+
+        positions = client.get("/paper/default").json()["positions"]
+        assert Decimal(positions["c-yes"]) == Decimal("200")
+        assert Decimal(positions["c-no"]) == Decimal("200")
+
+
+def test_position_cap_can_be_disabled(monkeypatch):
+    monkeypatch.setenv("ARBYS_MAX_OUTCOME_QTY", "0")
+    with TestClient(create_app()) as client:
+        _register(client, "eg-nocap", "n-yes", "n-no")
+        for oid, px in (("n-yes", "0.10"), ("n-no", "0.20")):
+            client.post("/quotes", json={"outcome_id": oid, "bid": px, "ask": px})
+        for _ in range(8):
+            assert client.post(
+                "/paper/execute",
+                json={"event_group_id": "eg-nocap", "outcome_ids": ["n-yes", "n-no"]},
+            ).status_code == 200
+        positions = client.get("/paper/default").json()["positions"]
+        assert Decimal(positions["n-yes"]) == Decimal("800")
 
 
 def test_execute_by_event_group_picks_that_group(tmp_path):

@@ -77,6 +77,28 @@ def _discovery_interval_s() -> float:
         return 600.0
 
 
+DEFAULT_MAX_OUTCOME_QTY = Decimal("500")
+
+
+def max_outcome_qty() -> Decimal | None:
+    """Cap on open units per outcome for one account. ``None`` disables it.
+
+    The engine republishes an edge for as long as it exists, and nothing
+    stopped a caller taking the same ticket over and over — five clicks put on
+    five times the intended size. Units are the natural measure here: a binary
+    ticket that buys N units pays off N, so this caps guaranteed payoff
+    exposure per outcome. Set ARBYS_MAX_OUTCOME_QTY=0 to turn it off.
+    """
+    raw = os.environ.get("ARBYS_MAX_OUTCOME_QTY")
+    if raw is None:
+        return DEFAULT_MAX_OUTCOME_QTY
+    try:
+        value = Decimal(raw)
+    except (ArithmeticError, ValueError):
+        return DEFAULT_MAX_OUTCOME_QTY
+    return None if value <= 0 else value
+
+
 # venue_id -> factory(outcome_ids) -> MarketDataAdapter
 AdapterFactory = Callable[[list[str]], MarketDataAdapter]
 

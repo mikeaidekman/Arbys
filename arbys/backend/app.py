@@ -28,7 +28,7 @@ from .schemas import (  # noqa: E402
     PaperAccountSummary,
     QuoteIn,
 )
-from .state import get_state, reset_state  # noqa: E402
+from .state import get_state, max_outcome_qty, reset_state  # noqa: E402
 
 
 def create_app() -> FastAPI:
@@ -297,6 +297,30 @@ def create_app() -> FastAPI:
                 raise HTTPException(status_code=404, detail="opportunity_index out of range")
             opp = opportunities[body.opportunity_index]
         account_id = body.account_id or s.default_account_id
+
+        # Refuse to stack beyond the per-outcome cap. The same edge stays
+        # published while it exists, so without this each repeat click adds
+        # another full ticket.
+        cap = max_outcome_qty()
+        if cap is not None:
+            for leg in opp.legs:
+                if not leg.is_buy:
+                    continue
+                broker = s.paper_brokers.get(leg.venue_id)
+                if broker is None:
+                    continue
+                _cash, positions = broker.account_snapshot(account_id)
+                held = positions.get(leg.outcome_id, (Decimal("0"),))[0]
+                if held + leg.qty > cap:
+                    raise HTTPException(
+                        status_code=409,
+                        detail=(
+                            f"position cap reached for {leg.outcome_id} on "
+                            f"{leg.venue_id}: holding {held}, ticket adds {leg.qty}, "
+                            f"cap {cap}. Raise ARBYS_MAX_OUTCOME_QTY or reset the account."
+                        ),
+                    )
+
         intent = ExecutionIntent(
             event_group_id=opp.event_group_id,
             account_id=account_id,

@@ -170,3 +170,97 @@ async def test_router_commits_all_legs_when_previews_pass():
     assert all(o.status is OrderStatus.FILLED for o in orders)
     assert (await poly.get_positions("acct"))["Y"] == Decimal("10")
     assert (await kals.get_positions("acct"))["N"] == Decimal("10")
+
+
+@pytest.mark.asyncio
+async def test_ticket_commit_is_not_interleaved_by_quote_updates():
+    """A ticket must not be split by a mid-flight price move.
+
+    The commit loop used to await between legs, so a quote update could land
+    after leg one filled and push leg two past its limit -- leaving a naked
+    position while the caller only saw an error. The sink is the hostile
+    party here: it moves the market the instant it is notified, which is the
+    worst realistic interleaving.
+    """
+    book = QuoteBook()
+    book.upsert(Quote(outcome_id="Y", bid=Decimal("0.40"), ask=Decimal("0.40")))
+    book.upsert(Quote(outcome_id="N", bid=Decimal("0.50"), ask=Decimal("0.50")))
+
+    poly = _make_broker("poly", book)
+    kals = _make_broker("kals", book)
+    poly.deposit("acct", Decimal("1000"))
+    kals.deposit("acct", Decimal("1000"))
+
+    class MarketMovingSink:
+        """Jumps the second leg's ask out of range as soon as it is told anything."""
+
+        async def on_order(self, order, *, rejection_reason=None):
+            book.upsert(Quote(outcome_id="N", bid=Decimal("0.90"), ask=Decimal("0.90")))
+
+        async def on_fill(self, order, fill):
+            book.upsert(Quote(outcome_id="N", bid=Decimal("0.90"), ask=Decimal("0.90")))
+
+        async def on_balance(self, account_id, venue_id, amount):
+            return None
+
+        async def on_position(self, account_id, outcome_id, qty, avg_price,
+                              realized_pnl, *, venue_id):
+            return None
+
+    poly.set_sink(MarketMovingSink())
+    kals.set_sink(MarketMovingSink())
+
+    router = ExecutionRouter({"poly": poly, "kals": kals})
+    intent = ExecutionIntent(
+        event_group_id="eg",
+        account_id="acct",
+        legs=(
+            IntentLeg(venue_id="poly", outcome_id="Y", is_buy=True,
+                      qty=Decimal("100"), limit_price=Decimal("0.40")),
+            IntentLeg(venue_id="kals", outcome_id="N", is_buy=True,
+                      qty=Decimal("100"), limit_price=Decimal("0.50")),
+        ),
+    )
+
+    orders = await router.submit(intent)
+    assert len(orders) == 2
+    assert all(o.status is OrderStatus.FILLED for o in orders)
+
+    # Both legs, or neither -- never one.
+    assert (await poly.get_positions("acct"))["Y"] == Decimal("100")
+    assert (await kals.get_positions("acct"))["N"] == Decimal("100")
+
+
+@pytest.mark.asyncio
+async def test_failed_ticket_leaves_no_position_and_no_orders():
+    """If a leg cannot fill, the whole ticket unwinds -- no naked leg."""
+    book = QuoteBook()
+    book.upsert(Quote(outcome_id="Y", bid=Decimal("0.40"), ask=Decimal("0.40")))
+    book.upsert(Quote(outcome_id="N", bid=Decimal("0.50"), ask=Decimal("0.50")))
+
+    poly = _make_broker("poly", book)
+    kals = _make_broker("kals", book)
+    poly.deposit("acct", Decimal("1000"))
+    kals.deposit("acct", Decimal("1000"))
+
+    poly_before = await poly.get_balances("acct")
+    kals_before = await kals.get_balances("acct")
+
+    router = ExecutionRouter({"poly": poly, "kals": kals})
+    # Second leg is unfillable: no quote for that outcome at all.
+    intent = ExecutionIntent(
+        event_group_id="eg",
+        account_id="acct",
+        legs=(
+            IntentLeg(venue_id="poly", outcome_id="Y", is_buy=True,
+                      qty=Decimal("100"), limit_price=Decimal("0.40")),
+            IntentLeg(venue_id="kals", outcome_id="MISSING", is_buy=True,
+                      qty=Decimal("100"), limit_price=Decimal("0.50")),
+        ),
+    )
+    with pytest.raises(InsufficientLegsError):
+        await router.submit(intent)
+
+    assert (await poly.get_positions("acct")).get("Y", Decimal("0")) == Decimal("0")
+    assert await poly.get_balances("acct") == poly_before
+    assert await kals.get_balances("acct") == kals_before

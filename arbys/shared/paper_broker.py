@@ -188,7 +188,7 @@ class PaperExecutionAdapter(ExecutionAdapter):
     # ExecutionAdapter implementation
     # ------------------------------------------------------------------
 
-    async def place_order(
+    def apply_fill(
         self,
         *,
         account_id: str,
@@ -196,12 +196,19 @@ class PaperExecutionAdapter(ExecutionAdapter):
         is_buy: bool,
         qty: Decimal,
         limit_price: Decimal,
-    ) -> Order:
+    ) -> tuple[Order, Fill | None, str | None]:
+        """Decide and apply one order **without awaiting**.
+
+        Returns ``(order, fill, rejection_reason)``. Every balance and position
+        mutation happens here, synchronously, so a caller filling several legs
+        back to back cannot be interleaved by a quote update — coroutines only
+        yield at ``await``. Notifications are deferred to
+        :meth:`emit_order_events`, which the caller must invoke once the whole
+        ticket is committed.
+        """
         order_id = _uid()
-        preview = self._preview_fill(
-            outcome_id=outcome_id, is_buy=is_buy, qty=qty, limit_price=limit_price
-        )
-        if isinstance(preview, str):
+
+        def _rejected(reason: str) -> tuple[Order, None, str]:
             order = Order(
                 id=order_id,
                 venue_id=self.venue_id,
@@ -212,29 +219,19 @@ class PaperExecutionAdapter(ExecutionAdapter):
                 status=OrderStatus.REJECTED,
             )
             self._orders[order_id] = order
-            if self._sink is not None:
-                await self._emit(self._sink.on_order(order, rejection_reason=preview))
-            return order
+            return order, None, reason
+
+        preview = self._preview_fill(
+            outcome_id=outcome_id, is_buy=is_buy, qty=qty, limit_price=limit_price
+        )
+        if isinstance(preview, str):
+            return _rejected(preview)
 
         px, cost = preview
         st = self._accounts[account_id]
         cash = st.balances.get(self.venue_id, Decimal("0"))
         if is_buy and cost > cash:
-            order = Order(
-                id=order_id,
-                venue_id=self.venue_id,
-                outcome_id=outcome_id,
-                is_buy=is_buy,
-                qty=qty,
-                limit_price=limit_price,
-                status=OrderStatus.REJECTED,
-            )
-            self._orders[order_id] = order
-            if self._sink is not None:
-                await self._emit(
-                    self._sink.on_order(order, rejection_reason="insufficient_funds")
-                )
-            return order
+            return _rejected("insufficient_funds")
 
         fee = self._fees.fee(price=px, qty=qty, is_buy=is_buy)
         if is_buy:
@@ -256,23 +253,82 @@ class PaperExecutionAdapter(ExecutionAdapter):
         fill = Fill(order_id=order_id, qty=qty, price=px, fee=fee)
         self._orders[order_id] = order
         self._fills[order_id].append(fill)
+        return order, fill, None
 
-        if self._sink is not None:
-            await self._emit(self._sink.on_order(order))
-            await self._emit(self._sink.on_fill(order, fill))
+    def snapshot_account(self, account_id: str) -> dict[str, object]:
+        """Copy the mutable account state, for rollback of a failed ticket."""
+        st = self._accounts[account_id]
+        return {
+            "balances": dict(st.balances),
+            "positions": dict(st.positions),
+            "avg_price": dict(st.avg_price),
+            "realized_pnl": st.realized_pnl,
+            "realized_by_outcome": dict(st.realized_by_outcome),
+        }
+
+    def restore_account(self, account_id: str, snap: dict[str, object]) -> None:
+        """Put back a :meth:`snapshot_account` copy, leaving defaultdicts intact."""
+        st = self._accounts[account_id]
+        for name in ("balances", "positions", "avg_price", "realized_by_outcome"):
+            target = getattr(st, name)
+            target.clear()
+            target.update(snap[name])  # type: ignore[arg-type]
+        st.realized_pnl = snap["realized_pnl"]  # type: ignore[assignment]
+
+    def forget_order(self, order_id: str) -> None:
+        """Drop a locally recorded order/fill that is being rolled back."""
+        self._orders.pop(order_id, None)
+        self._fills.pop(order_id, None)
+
+    async def emit_order_events(
+        self,
+        account_id: str,
+        order: Order,
+        fill: Fill | None,
+        rejection_reason: str | None,
+    ) -> None:
+        """Flush sink notifications for an order already applied by apply_fill."""
+        if self._sink is None:
+            return
+        if fill is None:
             await self._emit(
-                self._sink.on_balance(account_id, self.venue_id, st.balances[self.venue_id])
+                self._sink.on_order(order, rejection_reason=rejection_reason)
             )
-            await self._emit(
-                self._sink.on_position(
-                    account_id,
-                    outcome_id,
-                    st.positions[outcome_id],
-                    st.avg_price[outcome_id],
-                    st.realized_by_outcome[outcome_id],
-                    venue_id=self.venue_id,
-                )
+            return
+        st = self._accounts[account_id]
+        await self._emit(self._sink.on_order(order))
+        await self._emit(self._sink.on_fill(order, fill))
+        await self._emit(
+            self._sink.on_balance(account_id, self.venue_id, st.balances[self.venue_id])
+        )
+        await self._emit(
+            self._sink.on_position(
+                account_id,
+                order.outcome_id,
+                st.positions[order.outcome_id],
+                st.avg_price[order.outcome_id],
+                st.realized_by_outcome[order.outcome_id],
+                venue_id=self.venue_id,
             )
+        )
+
+    async def place_order(
+        self,
+        *,
+        account_id: str,
+        outcome_id: str,
+        is_buy: bool,
+        qty: Decimal,
+        limit_price: Decimal,
+    ) -> Order:
+        order, fill, reason = self.apply_fill(
+            account_id=account_id,
+            outcome_id=outcome_id,
+            is_buy=is_buy,
+            qty=qty,
+            limit_price=limit_price,
+        )
+        await self.emit_order_events(account_id, order, fill, reason)
         return order
 
     async def cancel_order(self, order_id: str) -> Order:
