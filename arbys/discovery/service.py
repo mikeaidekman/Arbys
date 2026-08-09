@@ -11,9 +11,11 @@ from ..db.session import session_scope
 from ..shared.types import EventGroup
 from .kalshi_sports import fetch_kalshi_team_games
 from .kalshi_tennis import fetch_kalshi_tennis_matches
+from .kalshi_totals import fetch_kalshi_totals
 from .matcher import match_games, match_to_event_group
 from .polymarket_sports import fetch_polymarket_sports_games
 from .polymarket_tennis import fetch_polymarket_tennis_matches
+from .polymarket_totals import fetch_polymarket_totals
 from .teams import MLB_RESOLVER, NBA_RESOLVER, NFL_RESOLVER, TeamResolver
 
 log = logging.getLogger(__name__)
@@ -23,6 +25,13 @@ TEAM_SPORTS: tuple[tuple[str, TeamResolver], ...] = (
     ("mlb", MLB_RESOLVER),
     ("nfl", NFL_RESOLVER),
     ("nba", NBA_RESOLVER),
+)
+
+# Sports whose over/under markets both venues quote. MLB is deliberately
+# absent: Kalshi lists KXMLBTOTAL but Polymarket carries no baseball totals
+# (only moneyline, NRFI and player props), so nothing would ever match.
+TOTALS_SPORTS: tuple[tuple[str, TeamResolver], ...] = (
+    ("nfl", NFL_RESOLVER),
 )
 
 
@@ -44,6 +53,27 @@ async def discover_team_sport_event_groups(
     matches = match_games(kalshi_games, poly_games)
     log.info(
         "discovery[%s]: kalshi=%d polymarket=%d matched=%d",
+        sport, len(kalshi_games), len(poly_games), len(matches),
+    )
+    return [match_to_event_group(m) for m in matches]
+
+
+async def discover_totals_event_groups(
+    sport: str, resolver: TeamResolver
+) -> list[EventGroup]:
+    """Discover over/under groups, one per (game, line).
+
+    Only lines quoted on *both* venues survive the match, since Over 44.5 and
+    Over 47.5 are different bets. Kalshi lists many strikes per game and
+    Polymarket a narrower set, so expect a subset of Kalshi's ladder.
+    """
+    kalshi_games, poly_games = await asyncio.gather(
+        fetch_kalshi_totals(resolver=resolver, sport=sport),
+        fetch_polymarket_totals(resolver=resolver, sport=sport),
+    )
+    matches = match_games(kalshi_games, poly_games)
+    log.info(
+        "discovery[%s totals]: kalshi=%d polymarket=%d matched=%d",
         sport, len(kalshi_games), len(poly_games), len(matches),
     )
     return [match_to_event_group(m) for m in matches]
@@ -72,6 +102,7 @@ async def discover_all_event_groups() -> list[EventGroup]:
     """Aggregate discovery across every sport we currently support."""
     results = await asyncio.gather(
         *(discover_team_sport_event_groups(s, r) for s, r in TEAM_SPORTS),
+        *(discover_totals_event_groups(s, r) for s, r in TOTALS_SPORTS),
         discover_tennis_event_groups(),
         return_exceptions=True,
     )

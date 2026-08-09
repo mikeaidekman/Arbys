@@ -6,6 +6,7 @@ import asyncio
 import logging
 from dataclasses import dataclass
 from datetime import UTC, date, datetime
+from decimal import Decimal
 from typing import Protocol
 
 import httpx
@@ -45,6 +46,11 @@ class VenueGame:
     teams: tuple[Participant, Participant]
     outcome_ids: dict[str, str]
     ref: str  # venue-specific identifier (event ticker, market slug, etc.)
+    # Which market on the game. "moneyline" keys ``outcome_ids`` by team code;
+    # "total" keys it by OVER/UNDER and carries the line those refer to. Two
+    # venues only offer the same bet when market_type *and* line agree.
+    market_type: str = "moneyline"
+    line: Decimal | None = None
     # Scheduled first pitch / kickoff in UTC, when the venue reports one.
     # Kalshi exposes it as ``occurrence_datetime`` on the market; Polymarket
     # as ``gameStartTime``. ``game_date`` remains the matching key because

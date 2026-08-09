@@ -4,9 +4,13 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from datetime import datetime, timedelta
+from decimal import Decimal
 
 from ..shared.types import EventGroup, EventGroupLeg
 from .kalshi_sports import Participant, VenueGame
+
+OVER = "OVER"
+UNDER = "UNDER"
 
 
 @dataclass(frozen=True)
@@ -16,6 +20,16 @@ class CrossVenueMatch:
     team_a: Participant  # canonical side (alphabetically first code)
     team_b: Participant
     per_venue: dict[str, VenueGame]
+    market_type: str = "moneyline"
+    line: Decimal | None = None
+
+    def yes_key(self) -> str:
+        """Which ``outcome_ids`` key represents the group's TRUE proposition.
+
+        Moneyline groups are canonically "team_a wins"; totals are "the total
+        goes over the line".
+        """
+        return OVER if self.market_type == "total" else self.team_a.code
 
     def start_time(self) -> datetime | None:
         """Earliest start time any venue reports for this game.
@@ -27,14 +41,34 @@ class CrossVenueMatch:
         return min(times) if times else None
 
     def event_group_id(self) -> str:
-        return f"{self.sport}-{self.team_a.code}-{self.team_b.code}-{self.game_date}"
+        base = f"{self.sport}-{self.team_a.code}-{self.team_b.code}-{self.game_date}"
+        if self.market_type != "moneyline":
+            return f"{base}-{self.market_type}-{_fmt_line(self.line)}"
+        return base
 
     def event_group_title(self) -> str:
-        return f"{self.team_a.full_name} vs {self.team_b.full_name} ({self.game_date})"
+        matchup = f"{self.team_a.full_name} vs {self.team_b.full_name}"
+        if self.market_type == "total":
+            return f"{matchup} — Over {_fmt_line(self.line)} ({self.game_date})"
+        return f"{matchup} ({self.game_date})"
 
 
-def _pair_key(game: VenueGame) -> tuple[str, frozenset[str]]:
-    return (game.sport, frozenset(t.code for t in game.teams))
+def _fmt_line(line: Decimal | None) -> str:
+    """Stable string for a line, so ids don't drift on 8.5 vs 8.50."""
+    if line is None:
+        return "na"
+    return format(line.normalize(), "f")
+
+
+def _pair_key(game: VenueGame) -> tuple[str, str, str, frozenset[str]]:
+    """Bucket key. Market type and line are part of identity: an Over 44.5 and
+    an Over 47.5 on the same game are different bets, not the same one."""
+    return (
+        game.sport,
+        game.market_type,
+        _fmt_line(game.line),
+        frozenset(t.code for t in game.teams),
+    )
 
 
 def match_games(
@@ -100,26 +134,37 @@ def match_games(
                     team_a=anchor_teams_sorted[0],
                     team_b=anchor_teams_sorted[1],
                     per_venue=per_venue,
+                    market_type=anchor.market_type,
+                    line=anchor.line,
                 )
             )
-    matches.sort(key=lambda m: (m.game_date, m.team_a.code, m.team_b.code))
+    matches.sort(
+        key=lambda m: (
+            m.game_date,
+            m.team_a.code,
+            m.team_b.code,
+            m.market_type,
+            _fmt_line(m.line),
+        )
+    )
     return matches
 
 
 def match_to_event_group(match: CrossVenueMatch) -> EventGroup:
     """Turn a cross-venue match into an EventGroup with 4 legs.
 
-    Convention: the group's canonical proposition is "team_a wins" (alphabetically
-    first team code). Legs where team_a wins are ``is_yes_side=True``.
+    The canonical proposition is "team_a wins" for a moneyline and "the total
+    goes over the line" for a total; legs matching it are ``is_yes_side=True``.
     """
     legs: list[EventGroupLeg] = []
+    yes_key = match.yes_key()
     for venue_id, game in sorted(match.per_venue.items()):
-        for team_code, outcome_id in game.outcome_ids.items():
+        for outcome_key, outcome_id in game.outcome_ids.items():
             legs.append(
                 EventGroupLeg(
                     outcome_id=outcome_id,
                     venue_id=venue_id,
-                    is_yes_side=(team_code == match.team_a.code),
+                    is_yes_side=(outcome_key == yes_key),
                 )
             )
     return EventGroup(

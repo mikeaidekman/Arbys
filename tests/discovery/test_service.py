@@ -46,6 +46,8 @@ async def test_run_once_registers_new_groups_and_restarts_ingest(monkeypatch):
 
     monkeypatch.setattr(service_mod, "fetch_kalshi_tennis_matches", _empty)
     monkeypatch.setattr(service_mod, "fetch_polymarket_tennis_matches", _empty)
+    monkeypatch.setattr(service_mod, "fetch_kalshi_totals", _empty)
+    monkeypatch.setattr(service_mod, "fetch_polymarket_totals", _empty)
 
     # Bypass DB.
     fake_scope = MagicMock()
@@ -106,6 +108,8 @@ async def test_run_once_noop_when_group_unchanged(monkeypatch):
 
     monkeypatch.setattr(service_mod, "fetch_kalshi_tennis_matches", _empty)
     monkeypatch.setattr(service_mod, "fetch_polymarket_tennis_matches", _empty)
+    monkeypatch.setattr(service_mod, "fetch_kalshi_totals", _empty)
+    monkeypatch.setattr(service_mod, "fetch_polymarket_totals", _empty)
     fake_scope = MagicMock()
     fake_scope.__aenter__ = AsyncMock(return_value=MagicMock())
     fake_scope.__aexit__ = AsyncMock(return_value=None)
