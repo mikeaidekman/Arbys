@@ -52,6 +52,14 @@ class VenueGame:
     # venues only offer the same bet when market_type *and* line agree.
     market_type: str = "moneyline"
     line: Decimal | None = None
+    # Which participant a signed line is stated for. None for market types
+    # whose line needs no anchor: moneyline has no line, and a total's
+    # Over/Under is symmetric between the two teams. Set for spreads, where
+    # "CLE -2.5" and "DET -2.5" are different bets that would otherwise share
+    # a bucket and invent an arb — the venues anchor differently, Kalshi
+    # naming the team in its ticker and Polymarket US anchoring to slug
+    # position. Unused in Phase 1; every market type wired today leaves it None.
+    anchor: str | None = None
     # Scheduled first pitch / kickoff in UTC, when the venue reports one.
     # Kalshi exposes it as ``occurrence_datetime`` on the market; Polymarket
     # as ``gameStartTime``. ``game_date`` remains the matching key because

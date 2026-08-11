@@ -230,3 +230,40 @@ def test_falls_back_to_dates_when_a_venue_reports_no_start_time():
     p = _dated("polymarket", "2026-08-11", "2026-08-11T17:10:00+00:00")
     p = replace(p, start_time=None)
     assert len(match_games([k], [p])) == 1
+
+
+def test_anchor_defaults_to_none_and_preserves_today_behaviour():
+    """Phase 1 ships no market type that sets an anchor, so two games that
+    matched before must still match, with anchor left None."""
+    kalshi = [_game("kalshi", ("LAD", "CHC"), "2026-08-05", {"LAD": "K1", "CHC": "K2"})]
+    poly = [_game("polymarket_us", ("LAD", "CHC"), "2026-08-05", {"LAD": "P1", "CHC": "P2"})]
+    matches = match_games(kalshi, poly)
+    assert len(matches) == 1
+    assert matches[0].anchor is None
+
+
+def _spread(venue: str, anchor: str, line: str) -> VenueGame:
+    """A spread game anchored on one team. Phase 2 shape, exercised now so
+    the bucket key is proven before anything depends on it."""
+    from decimal import Decimal
+
+    base = _game(venue, ("LAD", "CHC"), "2026-08-05", {"LAD": f"{venue}-L", "CHC": f"{venue}-C"})
+    return replace(base, market_type="spread", line=Decimal(line), anchor=anchor)
+
+
+def test_same_anchor_and_line_still_matches_across_venues():
+    matches = match_games([_spread("kalshi", "LAD", "-2.5")], [_spread("polymarket_us", "LAD", "-2.5")])
+    assert len(matches) == 1
+    assert matches[0].anchor == "LAD"
+
+
+def test_opposite_anchors_on_the_same_line_do_not_match():
+    """The guard Phase 2 depends on. LAD -2.5 and CHC -2.5 are different
+    bets; without the anchor in the bucket key they would pair and invent a
+    guaranteed profit that does not exist."""
+    assert match_games([_spread("kalshi", "LAD", "-2.5")], [_spread("polymarket_us", "CHC", "-2.5")]) == []
+
+
+def test_same_anchor_different_lines_do_not_match():
+    """Already true for totals; asserted here for spreads too."""
+    assert match_games([_spread("kalshi", "LAD", "-2.5")], [_spread("polymarket_us", "LAD", "-1.5")]) == []
