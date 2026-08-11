@@ -11,6 +11,8 @@ import {
   edgeCentsDisplay,
   eventClock,
   findOpportunity,
+  KALSHI,
+  POLY,
   type Combo,
 } from "../lib/combo";
 import { api } from "../api/client";
@@ -102,8 +104,10 @@ export function OpportunityCard({
   const [a, b] = buildCombos(group);
   const isArb = a.favorable || b.favorable;
   const clock = eventClock(group, now);
-  const polyLeg = group.legs.find((l) => l.venue_id === "polymarket" && l.is_yes_side);
-  const kalshiLeg = group.legs.find((l) => l.venue_id === "kalshi" && l.is_yes_side);
+  // Use the shared constants rather than literals — a venue rename that
+  // updated combo.ts but not this file would silently blank both legs.
+  const polyLeg = group.legs.find((l) => l.venue_id === POLY && l.is_yes_side);
+  const kalshiLeg = group.legs.find((l) => l.venue_id === KALSHI && l.is_yes_side);
 
   return (
     <div

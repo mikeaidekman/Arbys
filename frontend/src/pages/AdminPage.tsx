@@ -4,7 +4,7 @@ import { api } from "../api/client";
 import type { EventGroupLeg } from "../api/types";
 import { BlueprintCard } from "../components/BlueprintCard";
 
-const VENUES = ["polymarket", "kalshi", "draftkings"] as const;
+const VENUES = ["polymarket_us", "kalshi", "draftkings"] as const;
 const ACCOUNT = "default";
 
 export function AdminPage() {
@@ -17,7 +17,7 @@ export function AdminPage() {
   const [id, setId] = useState("");
   const [title, setTitle] = useState("");
   const [legs, setLegs] = useState<EventGroupLeg[]>([
-    { outcome_id: "", venue_id: "polymarket", is_yes_side: true },
+    { outcome_id: "", venue_id: "polymarket_us", is_yes_side: true },
     { outcome_id: "", venue_id: "kalshi", is_yes_side: false },
   ]);
 
@@ -27,7 +27,7 @@ export function AdminPage() {
       setId("");
       setTitle("");
       setLegs([
-        { outcome_id: "", venue_id: "polymarket", is_yes_side: true },
+        { outcome_id: "", venue_id: "polymarket_us", is_yes_side: true },
         { outcome_id: "", venue_id: "kalshi", is_yes_side: false },
       ]);
       qc.invalidateQueries({ queryKey: ["event-groups"] });
@@ -198,7 +198,7 @@ export function AdminPage() {
                 onClick={() =>
                   setLegs([
                     ...legs,
-                    { outcome_id: "", venue_id: "polymarket", is_yes_side: true },
+                    { outcome_id: "", venue_id: "polymarket_us", is_yes_side: true },
                   ])
                 }
               >

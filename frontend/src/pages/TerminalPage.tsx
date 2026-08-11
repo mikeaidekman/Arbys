@@ -16,7 +16,7 @@ import {
 import { usePriceMoves } from "../hooks/usePriceMoves";
 import { useNow } from "../hooks/useNow";
 
-const VENUES = ["Polymarket", "Kalshi"];
+const VENUES = ["Polymarket US", "Kalshi"];
 
 export function TerminalPage() {
   const qc = useQueryClient();
@@ -127,7 +127,7 @@ export function TerminalPage() {
         <a href="/admin" className="tag tag-outline" style={{ textDecoration: "none" }}>
           Admin
         </a>
-        <span className="tag tag-accent">Polymarket · connected</span>
+        <span className="tag tag-accent">Polymarket US · connected</span>
         <span className="tag tag-accent">Kalshi · connected</span>
       </nav>
 
