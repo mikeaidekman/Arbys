@@ -1,11 +1,30 @@
+from dataclasses import dataclass
 from decimal import Decimal
 
 from arbys.shared.arb_engine import (
     detect_complementary_set,
     detect_cross_venue_two_leg,
 )
-from arbys.shared.fees import PolymarketFeeModel, SportsbookFeeModel, ZeroFeeModel
+from arbys.shared.fees import SportsbookFeeModel, ZeroFeeModel
 from arbys.shared.types import EventGroup, EventGroupLeg, Quote
+
+
+@dataclass(frozen=True)
+class _FlatFeeModel:
+    """Test-only: a fixed cost per trade, regardless of price or size.
+
+    These are engine tests — they need *some* fee that eats a known edge, not
+    any particular venue's schedule. This used to borrow PolymarketFeeModel's
+    ``gas_flat``, which went away when Polymarket US's real percentage fee
+    replaced the old zero-fee model. Keeping a local stub means the engine
+    tests no longer move when a venue's fee schedule changes.
+    """
+
+    venue_id: str
+    amount: Decimal
+
+    def fee(self, *, price: Decimal, qty: Decimal, is_buy: bool) -> Decimal:
+        return Decimal("0") if qty <= 0 else self.amount
 
 
 def _q(oid: str, ask: str, bid: str | None = None) -> Quote:
@@ -53,10 +72,10 @@ def test_cross_venue_respects_fees_eating_edge():
             EventGroupLeg(outcome_id="kals_no", venue_id="kals", is_yes_side=False),
         ]
     )
-    # 0.48 + 0.50 = 0.98 -> 2c edge, but gas of 0.03 kills it.
+    # 0.48 + 0.50 = 0.98 -> 2c edge, but a flat cost of 0.03 kills it.
     quotes = {"poly_yes": _q("poly_yes", "0.48"), "kals_no": _q("kals_no", "0.50")}
     fees = {
-        "poly": PolymarketFeeModel(gas_flat=Decimal("0.03")),
+        "poly": _FlatFeeModel("poly", Decimal("0.03")),
         "kals": ZeroFeeModel("kals"),
     }
     assert detect_cross_venue_two_leg(eg, quotes, fees) is None

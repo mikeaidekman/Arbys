@@ -63,8 +63,8 @@ def _install_stub_factories(created: dict[str, StubAdapter]) -> None:
     def patched_init(self):
         original_init(self)
         self.adapter_factories = {
-            "polymarket": lambda oids: (
-                created.setdefault("polymarket", StubAdapter("polymarket", oids, []))
+            "polymarket_us": lambda oids: (
+                created.setdefault("polymarket_us", StubAdapter("polymarket_us", oids, []))
             ),
             "kalshi": lambda oids: (
                 created.setdefault("kalshi", StubAdapter("kalshi", oids, []))
@@ -87,7 +87,7 @@ def test_ingest_starts_and_delivers_quotes_to_engine():
                     "id": "eg-live",
                     "title": "Will Y happen?",
                     "legs": [
-                        {"outcome_id": "poly-y", "venue_id": "polymarket", "is_yes_side": True},
+                        {"outcome_id": "poly-y", "venue_id": "polymarket_us", "is_yes_side": True},
                         {"outcome_id": "kals-n", "venue_id": "kalshi", "is_yes_side": False},
                     ],
                 },
@@ -95,9 +95,9 @@ def test_ingest_starts_and_delivers_quotes_to_engine():
             assert r.status_code == 201
 
             # After event-group create, restart_ingest fired and stub adapters were built.
-            assert "polymarket" in created
+            assert "polymarket_us" in created
             assert "kalshi" in created
-            assert created["polymarket"].outcome_ids == ["poly-y"]
+            assert created["polymarket_us"].outcome_ids == ["poly-y"]
             assert created["kalshi"].outcome_ids == ["kals-n"]
 
             # Feed quotes through the actual ingest path by swapping the stub's
@@ -129,7 +129,7 @@ def test_ingest_disabled_by_default(tmp_path: Path):
                     "id": "eg-off",
                     "title": "no ingest",
                     "legs": [
-                        {"outcome_id": "poly-y", "venue_id": "polymarket", "is_yes_side": True},
+                        {"outcome_id": "poly-y", "venue_id": "polymarket_us", "is_yes_side": True},
                         {"outcome_id": "kals-n", "venue_id": "kalshi", "is_yes_side": False},
                     ],
                 },
@@ -152,8 +152,8 @@ def test_ingest_pumps_stub_quotes_into_engine():
         original_init(self)
 
         def poly_factory(oids):
-            a = StubAdapter("polymarket", oids, [q1])
-            created["polymarket"] = a
+            a = StubAdapter("polymarket_us", oids, [q1])
+            created["polymarket_us"] = a
             return a
 
         def kals_factory(oids):
@@ -161,7 +161,7 @@ def test_ingest_pumps_stub_quotes_into_engine():
             created["kalshi"] = a
             return a
 
-        self.adapter_factories = {"polymarket": poly_factory, "kalshi": kals_factory}
+        self.adapter_factories = {"polymarket_us": poly_factory, "kalshi": kals_factory}
 
     state_module.AppState.__init__ = patched_init
     try:
@@ -172,7 +172,7 @@ def test_ingest_pumps_stub_quotes_into_engine():
                     "id": "eg-live",
                     "title": "Will Y happen?",
                     "legs": [
-                        {"outcome_id": "poly-y", "venue_id": "polymarket", "is_yes_side": True},
+                        {"outcome_id": "poly-y", "venue_id": "polymarket_us", "is_yes_side": True},
                         {"outcome_id": "kals-n", "venue_id": "kalshi", "is_yes_side": False},
                     ],
                 },

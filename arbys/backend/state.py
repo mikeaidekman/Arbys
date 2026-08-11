@@ -31,7 +31,7 @@ from ..shared.execution_router import ExecutionRouter
 from ..shared.fees import (
     FeeModelRegistry,
     KalshiFeeModel,
-    PolymarketFeeModel,
+    PolymarketUsFeeModel,
     SportsbookFeeModel,
 )
 from ..shared.paper_broker import PaperExecutionAdapter
@@ -148,7 +148,7 @@ class AppState:
     def __init__(self) -> None:
         self.quotebook = QuoteBook(max_age_s=quote_max_age_s())
         self.fees: FeeModelRegistry = {
-            "polymarket": PolymarketFeeModel(),
+            "polymarket_us": PolymarketUsFeeModel(),
             "kalshi": KalshiFeeModel(),
             "draftkings": SportsbookFeeModel("draftkings"),
         }
