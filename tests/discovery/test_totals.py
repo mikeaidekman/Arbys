@@ -7,7 +7,6 @@ import pytest
 from arbys.discovery.kalshi_sports import VenueGame
 from arbys.discovery.kalshi_totals import fetch_kalshi_totals, split_team_codes
 from arbys.discovery.matcher import OVER, UNDER, match_games, match_to_event_group
-from arbys.discovery.polymarket_totals import fetch_polymarket_totals, parse_total_slug
 from arbys.discovery.teams import NFL_RESOLVER
 
 
@@ -27,21 +26,12 @@ def _total(venue, line, date_str="2026-09-13", ids=None):
     )
 
 
-# --- slug / ticker parsing -------------------------------------------------
-
-def test_parse_total_slug_fractional_and_whole():
-    assert parse_total_slug("nfl-dal-sea-2026-08-16-total-37pt5") == (
-        "DAL", "SEA", "2026-08-16", Decimal("37.5")
-    )
-    assert parse_total_slug("nfl-gb-min-2026-09-13-total-44") == (
-        "GB", "MIN", "2026-09-13", Decimal("44.0")
-    )
-
-
-def test_parse_total_slug_rejects_moneyline_and_junk():
-    assert parse_total_slug("nfl-dal-sea-2026-08-16") is None
-    assert parse_total_slug("nfl-mia-lv-2026-09-13-spread-3pt5") is None
-    assert parse_total_slug("") is None
+# --- ticker parsing --------------------------------------------------------
+#
+# Polymarket slug parsing used to live here too. Polymarket US reports `line`
+# as a structured field, so there is no slug to parse on that side any more —
+# see tests/discovery/test_polymarket_us.py for its totals coverage. Kalshi
+# still encodes the participants in the ticker, so this stays.
 
 
 def test_split_team_codes_handles_uneven_lengths():
@@ -57,13 +47,13 @@ def test_split_team_codes_handles_uneven_lengths():
 def test_different_lines_do_not_match_each_other():
     """Over 44.5 and Over 47.5 are different bets; fusing them invents an arb."""
     k = _total("kalshi", "44.5")
-    p = _total("polymarket", "47.5")
+    p = _total("polymarket_us", "47.5")
     assert match_games([k], [p]) == []
 
 
 def test_same_line_matches_across_venues():
     k = _total("kalshi", "44.5")
-    p = _total("polymarket", "44.5")
+    p = _total("polymarket_us", "44.5")
     matches = match_games([k], [p])
     assert len(matches) == 1
     assert matches[0].market_type == "total"
@@ -72,7 +62,7 @@ def test_same_line_matches_across_venues():
 
 def test_each_shared_line_becomes_its_own_group():
     kalshi = [_total("kalshi", x) for x in ("41.5", "44.5", "47.5")]
-    poly = [_total("polymarket", x) for x in ("44.5", "47.5", "50.5")]
+    poly = [_total("polymarket_us", x) for x in ("44.5", "47.5", "50.5")]
     matches = match_games(kalshi, poly)
     assert len(matches) == 2  # only 44.5 and 47.5 are on both
     ids = sorted(m.event_group_id() for m in matches)
@@ -89,20 +79,20 @@ def test_moneyline_group_id_is_unchanged():
         VenueGame(sport="nfl", venue_id=v, game_date=date(2026, 9, 13),
                   teams=(a, b), outcome_ids={"DET": f"{v}-d", "CIN": f"{v}-c"},
                   ref=v)
-        for v in ("kalshi", "polymarket")
+        for v in ("kalshi", "polymarket_us")
     ]
     m = match_games([ml[0]], [ml[1]])[0]
     assert m.event_group_id() == "nfl-CIN-DET-2026-09-13"
 
 
 def test_totals_group_marks_over_as_yes_side():
-    k, p = _total("kalshi", "44.5"), _total("polymarket", "44.5")
+    k, p = _total("kalshi", "44.5"), _total("polymarket_us", "44.5")
     group = match_to_event_group(match_games([k], [p])[0])
     assert len(group.legs) == 4
     yes = {leg.outcome_id for leg in group.legs if leg.is_yes_side}
     no = {leg.outcome_id for leg in group.legs if not leg.is_yes_side}
-    assert yes == {"kalshi-o-44.5", "polymarket-o-44.5"}
-    assert no == {"kalshi-u-44.5", "polymarket-u-44.5"}
+    assert yes == {"kalshi-o-44.5", "polymarket_us-o-44.5"}
+    assert no == {"kalshi-u-44.5", "polymarket_us-u-44.5"}
     assert "Over 44.5" in group.title
 
 
@@ -148,39 +138,6 @@ async def test_fetch_kalshi_totals_one_game_per_strike():
     assert g.start_time is None
 
 
-@pytest.mark.asyncio
-async def test_fetch_polymarket_totals_parses_over_under():
-    payload = [
-        {
-            "markets": [
-                {
-                    "sportsMarketType": "totals",
-                    "slug": "nfl-det-cin-2026-09-13-total-44pt5",
-                    "outcomes": ["Over", "Under"],
-                    "clobTokenIds": ["tok_over", "tok_under"],
-                    "gameStartTime": "2026-09-13 17:00:00+00",
-                },
-                {  # moneyline on the same game must be ignored here
-                    "sportsMarketType": "moneyline",
-                    "slug": "nfl-det-cin-2026-09-13",
-                    "outcomes": ["Lions", "Bengals"],
-                    "clobTokenIds": ["a", "b"],
-                },
-            ]
-        }
-    ]
-
-    def handler(_):
-        return httpx.Response(200, json=payload)
-
-    client = httpx.AsyncClient(transport=httpx.MockTransport(handler), timeout=5.0)
-    games = await fetch_polymarket_totals(
-        resolver=NFL_RESOLVER, sport="nfl", http_client=client
-    )
-    await client.aclose()
-
-    assert len(games) == 1
-    g = games[0]
-    assert g.market_type == "total"
-    assert g.line == Decimal("44.5")
-    assert g.outcome_ids == {OVER: "tok_over", UNDER: "tok_under"}
+# The Polymarket totals-fetch test moved to
+# tests/discovery/test_polymarket_us.py, where it exercises the structured
+# `line` field and the LONG/SHORT outcome ids the US gateway actually returns.

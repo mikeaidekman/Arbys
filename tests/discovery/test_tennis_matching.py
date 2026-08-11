@@ -25,7 +25,7 @@ def test_match_games_with_date_tolerance_matches_off_by_one_day():
         _game("kalshi", ("KECMANOVIC", "RINDERKNECH"), "2026-08-04", {"KECMANOVIC": "K1:YES", "RINDERKNECH": "K2:YES"})
     ]
     poly = [
-        _game("polymarket", ("KECMANOVIC", "RINDERKNECH"), "2026-08-05", {"KECMANOVIC": "P1", "RINDERKNECH": "P2"})
+        _game("polymarket_us", ("KECMANOVIC", "RINDERKNECH"), "2026-08-05", {"KECMANOVIC": "P1", "RINDERKNECH": "P2"})
     ]
 
     strict = match_games(kalshi, poly, date_tolerance_days=0)
@@ -34,18 +34,18 @@ def test_match_games_with_date_tolerance_matches_off_by_one_day():
     lenient = match_games(kalshi, poly, date_tolerance_days=1)
     assert len(lenient) == 1
     m = lenient[0]
-    assert set(m.per_venue.keys()) == {"kalshi", "polymarket"}
+    assert set(m.per_venue.keys()) == {"kalshi", "polymarket_us"}
 
 
 def test_match_games_tolerance_still_rejects_two_day_gap():
     kalshi = [_game("kalshi", ("KECMANOVIC", "RINDERKNECH"), "2026-08-04", {"KECMANOVIC": "K1", "RINDERKNECH": "K2"})]
-    poly = [_game("polymarket", ("KECMANOVIC", "RINDERKNECH"), "2026-08-06", {"KECMANOVIC": "P1", "RINDERKNECH": "P2"})]
+    poly = [_game("polymarket_us", ("KECMANOVIC", "RINDERKNECH"), "2026-08-06", {"KECMANOVIC": "P1", "RINDERKNECH": "P2"})]
     assert match_games(kalshi, poly, date_tolerance_days=1) == []
 
 
 def test_tennis_match_to_event_group_uses_alphabetical_canonical():
     kalshi = _game("kalshi", ("KECMANOVIC", "RINDERKNECH"), "2026-08-04", {"KECMANOVIC": "K1:YES", "RINDERKNECH": "K2:YES"})
-    poly = _game("polymarket", ("KECMANOVIC", "RINDERKNECH"), "2026-08-05", {"KECMANOVIC": "P1", "RINDERKNECH": "P2"})
+    poly = _game("polymarket_us", ("KECMANOVIC", "RINDERKNECH"), "2026-08-05", {"KECMANOVIC": "P1", "RINDERKNECH": "P2"})
     match = match_games([kalshi], [poly], date_tolerance_days=1)[0]
     group = match_to_event_group(match)
     assert group.id.startswith("atp-KECMANOVIC-RINDERKNECH-")

@@ -32,7 +32,7 @@ def test_match_games_finds_cross_venue_pair():
     ]
     poly = [
         _game(
-            "polymarket",
+            "polymarket_us",
             ("CHC", "LAD"),  # different team order — should still match
             "2026-08-05",
             {"LAD": "P-LAD", "CHC": "P-CHC"},
@@ -44,7 +44,7 @@ def test_match_games_finds_cross_venue_pair():
     # Canonical alphabetical: CHC < LAD
     assert m.team_a.code == "CHC"
     assert m.team_b.code == "LAD"
-    assert set(m.per_venue.keys()) == {"kalshi", "polymarket"}
+    assert set(m.per_venue.keys()) == {"kalshi", "polymarket_us"}
 
 
 def test_match_games_ignores_unpaired_games():
@@ -58,7 +58,7 @@ def test_match_games_ignores_unpaired_games():
     ]
     poly = [
         _game(
-            "polymarket",
+            "polymarket_us",
             ("LAD", "CHC"),
             "2026-08-05",
             {"LAD": "P1", "CHC": "P2"},
@@ -69,7 +69,7 @@ def test_match_games_ignores_unpaired_games():
 
 def test_match_games_date_mismatch_does_not_match():
     kalshi = [_game("kalshi", ("LAD", "CHC"), "2026-08-05", {"LAD": "K1", "CHC": "K2"})]
-    poly = [_game("polymarket", ("LAD", "CHC"), "2026-08-06", {"LAD": "P1", "CHC": "P2"})]
+    poly = [_game("polymarket_us", ("LAD", "CHC"), "2026-08-06", {"LAD": "P1", "CHC": "P2"})]
     assert match_games(kalshi, poly) == []
 
 
@@ -84,14 +84,14 @@ def test_match_games_matches_every_game_of_a_series():
         for d in ("2026-08-10", "2026-08-11", "2026-08-12")
     ]
     poly = [
-        _game("polymarket", ("NYM", "ATL"), d, {"NYM": f"P-NYM-{d}", "ATL": f"P-ATL-{d}"})
+        _game("polymarket_us", ("NYM", "ATL"), d, {"NYM": f"P-NYM-{d}", "ATL": f"P-ATL-{d}"})
         for d in ("2026-08-10", "2026-08-11", "2026-08-12")
     ]
     matches = match_games(kalshi, poly)
     assert len(matches) == 3
     assert [m.game_date for m in matches] == ["2026-08-10", "2026-08-11", "2026-08-12"]
     for m in matches:
-        assert set(m.per_venue.keys()) == {"kalshi", "polymarket"}
+        assert set(m.per_venue.keys()) == {"kalshi", "polymarket_us"}
         # Each match must carry that date's own outcome ids, not another game's.
         for venue, g in m.per_venue.items():
             assert all(m.game_date in oid for oid in g.outcome_ids.values()), (venue, g)
@@ -108,29 +108,29 @@ def test_match_games_tolerance_does_not_fuse_consecutive_series_games():
         for d in ("2026-08-10", "2026-08-11")
     ]
     poly = [
-        _game("polymarket", ("NYM", "ATL"), d, {"NYM": f"P-NYM-{d}", "ATL": f"P-ATL-{d}"})
+        _game("polymarket_us", ("NYM", "ATL"), d, {"NYM": f"P-NYM-{d}", "ATL": f"P-ATL-{d}"})
         for d in ("2026-08-10", "2026-08-11")
     ]
     matches = match_games(kalshi, poly, date_tolerance_days=1)
     for m in matches:
         k = m.per_venue["kalshi"].game_date.isoformat()
-        p = m.per_venue["polymarket"].game_date.isoformat()
+        p = m.per_venue["polymarket_us"].game_date.isoformat()
         assert k == p, f"fused different games: kalshi={k} polymarket={p}"
 
 
 def test_match_games_tolerance_still_bridges_offset_dates():
     """Tennis relies on tolerance: Kalshi's trading day can trail the UTC date."""
     kalshi = [_game("kalshi", ("LAD", "CHC"), "2026-08-05", {"LAD": "K1", "CHC": "K2"})]
-    poly = [_game("polymarket", ("LAD", "CHC"), "2026-08-06", {"LAD": "P1", "CHC": "P2"})]
+    poly = [_game("polymarket_us", ("LAD", "CHC"), "2026-08-06", {"LAD": "P1", "CHC": "P2"})]
     matches = match_games(kalshi, poly, date_tolerance_days=1)
     assert len(matches) == 1
-    assert set(matches[0].per_venue.keys()) == {"kalshi", "polymarket"}
+    assert set(matches[0].per_venue.keys()) == {"kalshi", "polymarket_us"}
 
 
 def test_event_group_carries_earliest_venue_start_time():
     """The group's start_time comes from the venues, deterministically."""
     k = _game("kalshi", ("LAD", "CHC"), "2026-08-05", {"LAD": "K1", "CHC": "K2"})
-    p = _game("polymarket", ("LAD", "CHC"), "2026-08-05", {"LAD": "P1", "CHC": "P2"})
+    p = _game("polymarket_us", ("LAD", "CHC"), "2026-08-05", {"LAD": "P1", "CHC": "P2"})
     k = replace(k, start_time=datetime(2026, 8, 5, 18, 20, tzinfo=UTC))
     p = replace(p, start_time=datetime(2026, 8, 5, 18, 25, tzinfo=UTC))
 
@@ -140,14 +140,14 @@ def test_event_group_carries_earliest_venue_start_time():
 
 def test_event_group_start_time_none_when_no_venue_reports_one():
     k = _game("kalshi", ("LAD", "CHC"), "2026-08-05", {"LAD": "K1", "CHC": "K2"})
-    p = _game("polymarket", ("LAD", "CHC"), "2026-08-05", {"LAD": "P1", "CHC": "P2"})
+    p = _game("polymarket_us", ("LAD", "CHC"), "2026-08-05", {"LAD": "P1", "CHC": "P2"})
     group = match_to_event_group(match_games([k], [p])[0])
     assert group.start_time is None
 
 
 def test_event_group_start_time_uses_the_venue_that_has_one():
     k = _game("kalshi", ("LAD", "CHC"), "2026-08-05", {"LAD": "K1", "CHC": "K2"})
-    p = _game("polymarket", ("LAD", "CHC"), "2026-08-05", {"LAD": "P1", "CHC": "P2"})
+    p = _game("polymarket_us", ("LAD", "CHC"), "2026-08-05", {"LAD": "P1", "CHC": "P2"})
     p = replace(p, start_time=datetime(2026, 8, 5, 23, 10, tzinfo=UTC))
     group = match_to_event_group(match_games([k], [p])[0])
     assert group.start_time == datetime(2026, 8, 5, 23, 10, tzinfo=UTC)
@@ -155,7 +155,7 @@ def test_event_group_start_time_uses_the_venue_that_has_one():
 
 def test_match_to_event_group_builds_four_legs():
     kalshi = _game("kalshi", ("LAD", "CHC"), "2026-08-05", {"LAD": "K-LAD:YES", "CHC": "K-CHC:YES"})
-    poly = _game("polymarket", ("LAD", "CHC"), "2026-08-05", {"LAD": "P-LAD", "CHC": "P-CHC"})
+    poly = _game("polymarket_us", ("LAD", "CHC"), "2026-08-05", {"LAD": "P-LAD", "CHC": "P-CHC"})
     matches = match_games([kalshi], [poly])
     group = match_to_event_group(matches[0])
     assert group.id == "mlb-CHC-LAD-2026-08-05"
@@ -166,7 +166,7 @@ def test_match_to_event_group_builds_four_legs():
     assert all(leg.is_yes_side is True for leg in chc_legs)
     assert all(leg.is_yes_side is False for leg in lad_legs)
     venues = {leg.venue_id for leg in group.legs}
-    assert venues == {"kalshi", "polymarket"}
+    assert venues == {"kalshi", "polymarket_us"}
 
 
 def _dated(venue, date_str, start_iso, teams=("NYM", "ATL")):
@@ -191,10 +191,10 @@ def test_matching_venues_disagree_on_date_but_agree_on_start_time():
     night game is Aug 11 on one and Aug 12 on the other. Same fixture.
     """
     k = _dated("kalshi", "2026-08-11", "2026-08-12T05:10:00+00:00")
-    p = _dated("polymarket", "2026-08-12", "2026-08-12T05:10:00+00:00")
+    p = _dated("polymarket_us", "2026-08-12", "2026-08-12T05:10:00+00:00")
     matches = match_games([k], [p])
     assert len(matches) == 1
-    assert set(matches[0].per_venue) == {"kalshi", "polymarket"}
+    assert set(matches[0].per_venue) == {"kalshi", "polymarket_us"}
 
 
 def test_same_date_but_different_games_must_not_match():
@@ -205,7 +205,7 @@ def test_same_date_but_different_games_must_not_match():
     paired Monday's game with Tuesday's and invented an arb between them.
     """
     k = _dated("kalshi", "2026-08-11", "2026-08-12T05:10:00+00:00")
-    p = _dated("polymarket", "2026-08-11", "2026-08-11T02:10:00+00:00")
+    p = _dated("polymarket_us", "2026-08-11", "2026-08-11T02:10:00+00:00")
     assert match_games([k], [p]) == [], "paired two different games in a series"
 
 
@@ -213,13 +213,13 @@ def test_doubleheader_legs_are_kept_apart():
     """Two games the same day, ~3h apart, are still different games."""
     k1 = _dated("kalshi", "2026-08-11", "2026-08-11T17:10:00+00:00")
     k2 = _dated("kalshi", "2026-08-11", "2026-08-11T21:40:00+00:00")
-    p1 = _dated("polymarket", "2026-08-11", "2026-08-11T17:10:00+00:00")
-    p2 = _dated("polymarket", "2026-08-11", "2026-08-11T21:40:00+00:00")
+    p1 = _dated("polymarket_us", "2026-08-11", "2026-08-11T17:10:00+00:00")
+    p2 = _dated("polymarket_us", "2026-08-11", "2026-08-11T21:40:00+00:00")
     matches = match_games([k1, k2], [p1, p2])
     assert len(matches) == 2
     for m in matches:
         k = m.per_venue["kalshi"].start_time
-        p = m.per_venue["polymarket"].start_time
+        p = m.per_venue["polymarket_us"].start_time
         assert k == p, f"fused different halves of a doubleheader: {k} vs {p}"
 
 
@@ -227,7 +227,7 @@ def test_falls_back_to_dates_when_a_venue_reports_no_start_time():
     """Tennis and hand-built groups may have no start time; still match."""
     k = _dated("kalshi", "2026-08-11", "2026-08-11T17:10:00+00:00")
     k = replace(k, start_time=None)
-    p = _dated("polymarket", "2026-08-11", "2026-08-11T17:10:00+00:00")
+    p = _dated("polymarket_us", "2026-08-11", "2026-08-11T17:10:00+00:00")
     p = replace(p, start_time=None)
     assert len(match_games([k], [p])) == 1
 

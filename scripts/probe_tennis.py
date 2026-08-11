@@ -23,32 +23,27 @@ for series in ["KXATPGAME", "KXWTAGAME"]:
                 f"    ticker={m.get('ticker')} yes_sub_title={m.get('yes_sub_title')!r}"
             )
 
-# Polymarket tennis
-print("\n=== POLYMARKET (tennis filter) ===")
-r = httpx.get(
-    "https://gamma-api.polymarket.com/markets",
-    params={
-        "closed": "false",
-        "active": "true",
-        "order": "volume24hr",
-        "ascending": "false",
-        "limit": 400,
-    },
-    timeout=20,
-)
-markets = r.json()
-tennis = [
-    m
-    for m in markets
-    if any(
-        s in (m.get("slug") or "").lower() or s in (m.get("question") or "").lower()
-        for s in ("tennis", "atp", "wta", "-us-open", "-french-open", "-wimbledon")
+# Polymarket US tennis.
+#
+# The old version scanned international's flat /markets for tennis-ish slugs,
+# because that endpoint had no league filter and capped at 100 rows by volume.
+# The US gateway is league-scoped, so ATP and WTA are just two direct calls.
+for league in ("atp", "wta"):
+    print(f"\n=== POLYMARKET US {league.upper()} ===")
+    r = httpx.get(
+        f"https://gateway.polymarket.us/v2/leagues/{league}/events",
+        params={"limit": 10},
+        timeout=20,
     )
-]
-print(f"found {len(tennis)} tennis-ish markets in top 400")
-for m in tennis[:8]:
-    print(f"  q={m.get('question')!r}")
-    print(f"    slug={m.get('slug')}  gameStartTime={m.get('gameStartTime')}")
-    print(
-        f"    outcomes={m.get('outcomes')}  tokens={m.get('clobTokenIds')}"
-    )
+    events = r.json().get("events", [])
+    print(f"{len(events)} events")
+    for e in events[:6]:
+        print(f"  {e.get('slug')}  start={e.get('startTime')}")
+        print(f"    players={[t.get('name') for t in e.get('teams') or []]}")
+        for m in e.get("markets") or []:
+            if m.get("sportsMarketType") == "tennis_match_winner":
+                sides = [
+                    (s.get("long"), (s.get("team") or {}).get("name"))
+                    for s in m.get("marketSides") or []
+                ]
+                print(f"    winner slug={m.get('slug')} sides={sides}")

@@ -19,7 +19,7 @@ from ..adapters.base import MarketDataAdapter
 from ..adapters.draftkings import DraftKingsAdapter, draftkings_enabled
 from ..adapters.kalshi import KalshiAdapter
 from ..adapters.kalshi_ws import KalshiWebSocketAdapter, kalshi_ws_creds_from_env
-from ..adapters.polymarket import PolymarketAdapter
+from ..adapters.polymarket_us import PolymarketUsAdapter
 from ..db import repositories as repo
 from ..db.session import session_scope
 from ..ingest.auto_settle_service import AutoSettleService
@@ -83,7 +83,7 @@ def quote_max_age_s() -> float | None:
 
     ``ARBYS_QUOTE_MAX_AGE_S=0`` disables expiry. A venue that stops publishing
     an outcome otherwise looks identical to a quiet one, and its last price
-    quotes forever — which is how a delisted Polymarket token kept showing an
+    quotes forever — which is how a delisted Polymarket market kept showing an
     8c arb against a live Kalshi leg.
     """
     raw = os.environ.get("ARBYS_QUOTE_MAX_AGE_S")
@@ -94,6 +94,25 @@ def quote_max_age_s() -> float | None:
     except ValueError:
         return QUOTEBOOK_DEFAULT_MAX_AGE_S
     return None if value <= 0 else value
+
+
+DEFAULT_POLYMARKET_US_POLL_S = 5.0
+
+
+def polymarket_us_poll_s() -> float:
+    """Seconds between Polymarket US ``/bbo`` sweeps.
+
+    Measured 2026-08-11: 53 concurrent ``/bbo`` calls returned in 1.46s with
+    no rate limiting, so 5s is comfortable. The 1s floor stops a typo from
+    hammering the gateway.
+    """
+    raw = os.environ.get("ARBYS_POLYMARKET_US_POLL_S")
+    if raw is None:
+        return DEFAULT_POLYMARKET_US_POLL_S
+    try:
+        return max(1.0, float(raw))
+    except ValueError:
+        return DEFAULT_POLYMARKET_US_POLL_S
 
 
 DEFAULT_MAX_OUTCOME_QTY = Decimal("500")
@@ -136,7 +155,12 @@ def _default_adapter_factories() -> dict[str, AdapterFactory]:
         return KalshiAdapter(outcome_ids=oids)
 
     factories: dict[str, AdapterFactory] = {
-        "polymarket": lambda oids: PolymarketAdapter(outcome_ids=oids),
+        # REST-poll only. The authenticated WebSocket at api.polymarket.us
+        # needs KYC plus Ed25519 keys; when it lands, gate it on credentials
+        # the way _kalshi_factory above does.
+        "polymarket_us": lambda oids: PolymarketUsAdapter(
+            outcome_ids=oids, poll_interval_s=polymarket_us_poll_s()
+        ),
         "kalshi": _kalshi_factory,
     }
     if draftkings_enabled():

@@ -25,7 +25,7 @@ async def test_run_once_registers_new_groups_and_restarts_ingest(monkeypatch):
     )
     poly_game = VenueGame(
         sport="mlb",
-        venue_id="polymarket",
+        venue_id="polymarket_us",
         game_date=date(2026, 8, 5),
         teams=(lad, chc),
         outcome_ids={"LAD": "P-LAD", "CHC": "P-CHC"},
@@ -40,15 +40,15 @@ async def test_run_once_registers_new_groups_and_restarts_ingest(monkeypatch):
         return [poly_game] if sport == "mlb" else []
 
     monkeypatch.setattr(service_mod, "fetch_kalshi_team_games", fake_kalshi)
-    monkeypatch.setattr(service_mod, "fetch_polymarket_sports_games", fake_poly)
+    monkeypatch.setattr(service_mod, "fetch_polymarket_us_games", fake_poly)
 
     async def _empty(**_):
         return []
 
     monkeypatch.setattr(service_mod, "fetch_kalshi_tennis_matches", _empty)
-    monkeypatch.setattr(service_mod, "fetch_polymarket_tennis_matches", _empty)
+    monkeypatch.setattr(service_mod, "fetch_polymarket_us_tennis", _empty)
     monkeypatch.setattr(service_mod, "fetch_kalshi_totals", _empty)
-    monkeypatch.setattr(service_mod, "fetch_polymarket_totals", _empty)
+    monkeypatch.setattr(service_mod, "fetch_polymarket_us_totals", _empty)
 
     # Bypass DB.
     fake_scope = MagicMock()
@@ -87,7 +87,7 @@ async def test_run_once_noop_when_group_unchanged(monkeypatch):
     )
     poly_game = VenueGame(
         sport="mlb",
-        venue_id="polymarket",
+        venue_id="polymarket_us",
         game_date=date(2026, 8, 5),
         teams=(lad, chc),
         outcome_ids={"LAD": "P-LAD", "CHC": "P-CHC"},
@@ -102,15 +102,15 @@ async def test_run_once_noop_when_group_unchanged(monkeypatch):
         return [poly_game] if sport == "mlb" else []
 
     monkeypatch.setattr(service_mod, "fetch_kalshi_team_games", fake_kalshi)
-    monkeypatch.setattr(service_mod, "fetch_polymarket_sports_games", fake_poly)
+    monkeypatch.setattr(service_mod, "fetch_polymarket_us_games", fake_poly)
 
     async def _empty(**_):
         return []
 
     monkeypatch.setattr(service_mod, "fetch_kalshi_tennis_matches", _empty)
-    monkeypatch.setattr(service_mod, "fetch_polymarket_tennis_matches", _empty)
+    monkeypatch.setattr(service_mod, "fetch_polymarket_us_tennis", _empty)
     monkeypatch.setattr(service_mod, "fetch_kalshi_totals", _empty)
-    monkeypatch.setattr(service_mod, "fetch_polymarket_totals", _empty)
+    monkeypatch.setattr(service_mod, "fetch_polymarket_us_totals", _empty)
     fake_scope = MagicMock()
     fake_scope.__aenter__ = AsyncMock(return_value=MagicMock())
     fake_scope.__aexit__ = AsyncMock(return_value=None)
@@ -155,9 +155,9 @@ async def test_run_once_retires_discovered_groups_that_vanish(monkeypatch):
     async def _empty(**_):
         return []
 
-    for name in ("fetch_kalshi_team_games", "fetch_polymarket_sports_games",
-                 "fetch_kalshi_tennis_matches", "fetch_polymarket_tennis_matches",
-                 "fetch_kalshi_totals", "fetch_polymarket_totals"):
+    for name in ("fetch_kalshi_team_games", "fetch_polymarket_us_games",
+                 "fetch_kalshi_tennis_matches", "fetch_polymarket_us_tennis",
+                 "fetch_kalshi_totals", "fetch_polymarket_us_totals"):
         monkeypatch.setattr(service_mod, name, _empty)
 
     fake_scope = MagicMock()
@@ -202,9 +202,9 @@ async def test_failed_subpass_does_not_retire_anything(monkeypatch):
     async def _boom(**_):
         raise RuntimeError("kalshi is down")
 
-    for name in ("fetch_polymarket_sports_games", "fetch_kalshi_tennis_matches",
-                 "fetch_polymarket_tennis_matches", "fetch_kalshi_totals",
-                 "fetch_polymarket_totals"):
+    for name in ("fetch_polymarket_us_games", "fetch_kalshi_tennis_matches",
+                 "fetch_polymarket_us_tennis", "fetch_kalshi_totals",
+                 "fetch_polymarket_us_totals"):
         monkeypatch.setattr(service_mod, name, _empty)
     monkeypatch.setattr(service_mod, "fetch_kalshi_team_games", _boom)
 
@@ -225,3 +225,46 @@ async def test_failed_subpass_does_not_retire_anything(monkeypatch):
 
     assert existing.id in state.event_groups, "retired on an incomplete pass"
     assert deleted.await_count == 0
+
+
+@pytest.mark.asyncio
+async def test_polymarket_us_outage_does_not_retire_anything(monkeypatch):
+    """Symmetric to the Kalshi case above, for the venue that just changed.
+
+    A gateway.polymarket.us outage makes every cross-venue group stop
+    matching. Retiring on that would wipe the board on a transient error.
+    """
+    existing = EventGroup(
+        id="mlb-AAA-BBB-2026-08-11",
+        title="still real",
+        source="discovery",
+        legs=(EventGroupLeg(outcome_id="x", venue_id="kalshi", is_yes_side=True),),
+    )
+
+    async def _empty(**_):
+        return []
+
+    async def _boom(**_):
+        raise RuntimeError("gateway.polymarket.us is down")
+
+    for name in ("fetch_kalshi_team_games", "fetch_kalshi_tennis_matches",
+                 "fetch_polymarket_us_tennis", "fetch_kalshi_totals",
+                 "fetch_polymarket_us_totals"):
+        monkeypatch.setattr(service_mod, name, _empty)
+    monkeypatch.setattr(service_mod, "fetch_polymarket_us_games", _boom)
+
+    fake_scope = MagicMock()
+    fake_scope.__aenter__ = AsyncMock(return_value=MagicMock())
+    fake_scope.__aexit__ = AsyncMock(return_value=None)
+    monkeypatch.setattr(service_mod, "session_scope", lambda: fake_scope)
+    monkeypatch.setattr(service_mod.repo, "upsert_event_group", AsyncMock())
+    monkeypatch.setattr(service_mod.repo, "delete_event_group", AsyncMock())
+
+    state = MagicMock()
+    state.event_groups = {existing.id: existing}
+    state.engine = MagicMock()
+    state.restart_ingest = AsyncMock()
+
+    await DiscoveryService(state).run_once()
+
+    assert existing.id in state.event_groups, "retired on a Polymarket US outage"
