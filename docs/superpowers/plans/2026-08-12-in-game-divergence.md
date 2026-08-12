@@ -1168,10 +1168,15 @@ In `arbys/ingest/engine_runtime.py`, extend `__init__`:
         max_skew_s: float = 3.0,
         now: Callable[[], datetime] | None = None,
     ) -> None:
-        ...
+        # Keep every existing assignment in this constructor unchanged
+        # (self._book, self._fees, self._on_opp, self._on_opps,
+        # self._target_payoff, self._groups, self._outcome_to_groups) and
+        # append the two below.
         self._max_skew_s = max_skew_s
         self._now = now or (lambda: datetime.now(UTC))
 ```
+
+`Callable` is already imported in this module; add `from datetime import UTC, datetime`.
 
 Imports: `from datetime import UTC, datetime` and `from ..shared.liveness import is_in_play, sport_of`.
 
