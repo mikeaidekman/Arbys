@@ -20,6 +20,8 @@ from ..adapters.draftkings import DraftKingsAdapter, draftkings_enabled
 from ..adapters.kalshi import KalshiAdapter
 from ..adapters.kalshi_ws import KalshiWebSocketAdapter, kalshi_ws_creds_from_env
 from ..adapters.polymarket_us import PolymarketUsAdapter
+from ..adapters.polymarket_us_auth import creds_from_env as polymarket_us_creds_from_env
+from ..adapters.polymarket_us_ws import PolymarketUsWebSocketAdapter
 from ..db import repositories as repo
 from ..db.session import session_scope
 from ..ingest.auto_settle_service import AutoSettleService
@@ -154,13 +156,19 @@ def _default_adapter_factories() -> dict[str, AdapterFactory]:
         log.info("using Kalshi REST poll adapter (no KALSHI_API_KEY_ID/PATH set)")
         return KalshiAdapter(outcome_ids=oids)
 
-    factories: dict[str, AdapterFactory] = {
-        # REST-poll only. The authenticated WebSocket at api.polymarket.us
-        # needs KYC plus Ed25519 keys; when it lands, gate it on credentials
-        # the way _kalshi_factory above does.
-        "polymarket_us": lambda oids: PolymarketUsAdapter(
+    def _polymarket_us_factory(oids: list[str]) -> MarketDataAdapter:
+        creds = polymarket_us_creds_from_env()
+        if creds is not None:
+            log.info("using Polymarket US WebSocket adapter (authenticated, real-time)")
+            return PolymarketUsWebSocketAdapter(outcome_ids=oids, creds=creds)
+        # The REST path is the only one that works without KYC, so it stays.
+        log.info("using Polymarket US REST poll adapter (no credentials set)")
+        return PolymarketUsAdapter(
             outcome_ids=oids, poll_interval_s=polymarket_us_poll_s()
-        ),
+        )
+
+    factories: dict[str, AdapterFactory] = {
+        "polymarket_us": _polymarket_us_factory,
         "kalshi": _kalshi_factory,
     }
     if draftkings_enabled():

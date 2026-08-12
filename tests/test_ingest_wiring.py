@@ -193,3 +193,33 @@ def test_ingest_pumps_stub_quotes_into_engine():
             assert opps[0]["event_group_id"] == "eg-live"
     finally:
         state_module.AppState.__init__ = original_init
+
+
+def test_factory_picks_websocket_when_credentials_are_present(monkeypatch, tmp_path):
+    import base64
+
+    from cryptography.hazmat.primitives.asymmetric import ed25519
+
+    from arbys.adapters.polymarket_us_ws import PolymarketUsWebSocketAdapter
+    from arbys.backend.state import _default_adapter_factories
+
+    key = ed25519.Ed25519PrivateKey.generate()
+    path = tmp_path / "pm.key"
+    path.write_text(base64.b64encode(key.private_bytes_raw()).decode(), encoding="utf-8")
+    monkeypatch.setenv("POLYMARKET_US_API_KEY_ID", "kid")
+    monkeypatch.setenv("POLYMARKET_US_PRIVATE_KEY_PATH", str(path))
+
+    adapter = _default_adapter_factories()["polymarket_us"](["s:LONG"])
+    assert isinstance(adapter, PolymarketUsWebSocketAdapter)
+
+
+def test_factory_falls_back_to_rest_without_credentials(monkeypatch):
+    """The REST path is the only one that works without KYC, so it stays."""
+    from arbys.adapters.polymarket_us import PolymarketUsAdapter
+    from arbys.backend.state import _default_adapter_factories
+
+    monkeypatch.delenv("POLYMARKET_US_API_KEY_ID", raising=False)
+    monkeypatch.delenv("POLYMARKET_US_PRIVATE_KEY_PATH", raising=False)
+
+    adapter = _default_adapter_factories()["polymarket_us"](["s:LONG"])
+    assert isinstance(adapter, PolymarketUsAdapter)

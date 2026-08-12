@@ -22,7 +22,7 @@ Run everything from the repo root with the venv Python — `venv\Scripts\python.
 — rather than a bare `python`.
 
 ```powershell
-venv\Scripts\python.exe -m pytest -q            # 179 tests, must stay green
+venv\Scripts\python.exe -m pytest -q            # 203 tests, must stay green
 venv\Scripts\python.exe -m ruff check .         # must stay clean
 venv\Scripts\python.exe -m mypy arbys           # see caveat below — NOT clean today
 ```
@@ -60,8 +60,9 @@ Layers, strictly inward-depending:
   `paper_broker`, `execution_router`. Safe to import anywhere. Keep it that way:
   no `httpx`, no SQLAlchemy, no FastAPI in here.
 - `arbys/adapters/` — venue integrations behind the `MarketDataAdapter` /
-  `ExecutionAdapter` ABCs in `base.py`. Kalshi is WS-first with REST-poll
-  fallback; Polymarket US is REST-poll only (see **Venues** below).
+  `ExecutionAdapter` ABCs in `base.py`. Both Kalshi and Polymarket US are
+  WS-first with a REST-poll fallback, each gated on credentials being present
+  (see **Venues** below).
 - `arbys/discovery/` — scans Kalshi + Polymarket US for the same real-world
   game and auto-registers cross-venue event groups. Matching is by
   `(sport, game_date, unordered team pair)`, then split into date clusters so
@@ -300,9 +301,28 @@ Two hosts, only the first of which we use:
 - **`api.polymarket.us`** — authenticated (Ed25519, needs completed identity
   verification). Orders, portfolio, and the market WebSocket. **Not wired.**
 
-So the adapter is **REST-poll only** (`ARBYS_POLYMARKET_US_POLL_S`, default
-5s). When the WS lands, follow `_kalshi_factory` in `state.py`, which already
-selects a WS adapter over a polling one when credentials are present.
+The adapter is **WebSocket-first with a REST-poll fallback**, chosen by
+`_polymarket_us_factory` on whether `POLYMARKET_US_API_KEY_ID` +
+`POLYMARKET_US_PRIVATE_KEY_PATH` are set — the same shape as
+`_kalshi_factory`. With credentials, both legs of a cross-venue group push.
+Without them the REST path still works (`ARBYS_POLYMARKET_US_POLL_S`, default
+5s); it is the only path that needs no KYC.
+
+The handshake signature must cover **`/v1/ws/markets`** — signing `/` is
+rejected with 401. Check credentials with
+`scripts/verify_polymarket_us_creds.py`, which also reports clock skew: the
+30s signing tolerance means a skewed clock fails every request in a way that
+looks exactly like a bad key.
+
+We subscribe to the **full** `SUBSCRIPTION_TYPE_MARKET_DATA`, not the lite
+variant, because `bidDepth`/`askDepth` count price **levels**, not contracts —
+measured 49 against a true best-bid size of 287,926.98 — and only the full
+ladder carries real `qty`. REST `/bbo` cannot report size at all and reports
+`None`, meaning unknown.
+
+**There is no runtime fallback from WS to REST.** A failing handshake retries
+under backoff; downgrading silently would hide a revoked credential
+indefinitely, visible only as degraded fill quality.
 
 A Polymarket US market is **one binary contract with a long and a short side**
 — structurally like a Kalshi market, not like international's two-token pair.
@@ -342,6 +362,26 @@ The venue swap was Phase 1 of three. Design and plan live in
   `KXMLBF5SPREAD`, `KXNFL1HTOTAL`, `KXNBA1QSPREAD` and friends; Polymarket US
   has the matching `sportsMarketType`s. Mechanically the same as Phase 2 once
   the taxonomy exists.
+
+### Quote sizes have three states, not two
+
+`Quote.bid_size` / `ask_size` are `Decimal | None`:
+
+| value | meaning | broker |
+| --- | --- | --- |
+| `None` | unknown — the venue did not report depth | fills |
+| `0` | **known empty** — nothing is resting there | **rejects** |
+| `> 0` | a real quantity | fills |
+
+Conflating the first two is what makes this worth stating. `POST /quotes` and
+most test fixtures omit sizes entirely, so a naive `size <= 0` guard would
+reject every hand-pushed quote while looking like a safety improvement.
+
+**One-sided books are kept**, with the missing side synthesised at the present
+side's price and size `0`, so a live ask stays tradeable — there really are
+markets with 419,882 contracts offered and no bids at all. `paper_broker`
+refuses to fill against a known-empty side; without that guard the synthesised
+bid would let it report selling into a book with no buyers.
 
 ## Only-tradeable invariants
 
