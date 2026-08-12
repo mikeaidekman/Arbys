@@ -23,8 +23,13 @@ import time
 from email.utils import parsedate_to_datetime
 
 import httpx
+from dotenv import load_dotenv
 
 from arbys.adapters.polymarket_us_auth import AUTH_BASE, auth_headers, creds_from_env
+
+# The backend loads .env at import; a bare script does not, and without this
+# the check reports "not configured" for credentials that are in fact set.
+load_dotenv()
 
 # Cheap, read-only, and requires a verified account - a good canary.
 PROBE_PATH = "/v1/portfolio/positions"
