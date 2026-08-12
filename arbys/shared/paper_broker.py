@@ -167,6 +167,16 @@ class PaperExecutionAdapter(ExecutionAdapter):
         quote = self._book.get(outcome_id)
         if quote is None:
             return "no_quote"
+        # A one-sided book keeps its live side and synthesises the missing one
+        # at size 0, so the live side stays tradeable. Filling against the
+        # synthesised side would be a trade into an empty book.
+        #
+        # Only an explicit 0 blocks. None means the venue did not report depth
+        # — most quotes, including every hand-pushed one — and must still fill,
+        # or POST /quotes stops working.
+        resting = quote.ask_size if is_buy else quote.bid_size
+        if resting is not None and resting <= 0:
+            return "no_liquidity"
         raw_px = quote.ask if is_buy else quote.bid
         px = self._apply_slippage(raw_px, is_buy)
         if is_buy and px > limit_price:

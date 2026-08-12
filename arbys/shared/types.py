@@ -58,8 +58,17 @@ class Quote:
     outcome_id: str
     bid: Decimal
     ask: Decimal
-    bid_size: Decimal = Decimal("0")
-    ask_size: Decimal = Decimal("0")
+    # Resting size at the quoted price, with three distinct states:
+    #   None -> unknown. The venue did not report depth, or the endpoint
+    #           cannot (Polymarket US /bbo reports level counts, not sizes).
+    #   0    -> known empty. Nothing is resting on that side; this is what a
+    #           synthesised side of a one-sided book carries.
+    #   > 0  -> a real quantity.
+    # The paper broker refuses to fill against a *known empty* side but will
+    # fill against an unknown one, so conflating the two either blocks real
+    # trades or invents fills into an empty book.
+    bid_size: Decimal | None = None
+    ask_size: Decimal | None = None
 
     def __post_init__(self) -> None:
         if not (Decimal("0") <= self.bid <= Decimal("1")):

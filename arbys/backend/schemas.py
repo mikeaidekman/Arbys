@@ -74,8 +74,10 @@ class MonitoredGroupOut(BaseModel):
 
 
 class QuoteIn(BaseModel):
-    bid_size: Decimal = Decimal("0")
-    ask_size: Decimal = Decimal("0")
+    # None = unknown, which is what a hand-pushed quote almost always means.
+    # 0 would assert "nothing is resting there" and block fills.
+    bid_size: Decimal | None = None
+    ask_size: Decimal | None = None
     outcome_id: str
     bid: Decimal
     ask: Decimal

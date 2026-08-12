@@ -69,8 +69,8 @@ def _pair_to_quotes(
     slug: str,
     bid: Decimal | None,
     ask: Decimal | None,
-    bid_size: Decimal,
-    ask_size: Decimal,
+    bid_size: Decimal | None,
+    ask_size: Decimal | None,
 ) -> list[Quote]:
     """Build the LONG/SHORT pair from one market's top of book.
 
@@ -86,15 +86,19 @@ def _pair_to_quotes(
     a genuinely tradeable ask - live example, 419,882 contracts offered at
     0.0050 with no bids at all.
 
-    That size 0 is load-bearing rather than cosmetic: ``paper_broker`` refuses
-    to fill against a zero-size side, which is what stops the synthesised bid
-    from becoming a sale into an empty book.
+    Size ``0`` there is load-bearing rather than cosmetic, and distinct from
+    ``None``: ``0`` asserts nothing is resting, which is what lets
+    ``paper_broker`` refuse the fill; ``None`` merely means the venue did not
+    say, and must still be fillable.
 
     Returns an empty list rather than raising when the book is empty,
     malformed, or crossed - a bad tick must not kill the feed.
     """
     if bid is None and ask is None:
         return []
+    # The missing side is *known* empty - the venue reported nothing resting
+    # there - which is different from the present side, whose size may still
+    # be unknown.
     if bid is None:
         bid, bid_size = ask, Decimal("0")
     if ask is None:
@@ -129,7 +133,7 @@ def _pair_to_quotes(
 def quotes_from_bbo(slug: str, market_data: dict[str, Any]) -> list[Quote]:
     """Top of book from a ``/bbo`` payload.
 
-    **Sizes are reported as 0, meaning unknown.** ``bidDepth``/``askDepth``
+    **Sizes are reported as ``None``, meaning unknown.** ``bidDepth``/``askDepth``
     count price *levels*, not contracts: measured on
     ``aec-mlb-tb-ath-2026-08-12``, ``bidDepth`` was 49 while ``/book`` showed
     49 levels whose best held 287,926.98 contracts. This endpoint cannot
@@ -140,8 +144,8 @@ def quotes_from_bbo(slug: str, market_data: dict[str, Any]) -> list[Quote]:
         slug,
         _price(market_data.get("bestBid")),
         _price(market_data.get("bestAsk")),
-        Decimal("0"),
-        Decimal("0"),
+        None,
+        None,
     )
 
 
@@ -155,9 +159,9 @@ def quotes_from_levels(
     buys - the lite subscription reports only depth counters.
     """
 
-    def top(levels: list[dict[str, Any]]) -> tuple[Decimal | None, Decimal]:
+    def top(levels: list[dict[str, Any]]) -> tuple[Decimal | None, Decimal | None]:
         if not levels or not isinstance(levels[0], dict):
-            return None, Decimal("0")
+            return None, None
         return _price(levels[0].get("px")), _size(levels[0].get("qty"))
 
     bid, bid_size = top(bids)

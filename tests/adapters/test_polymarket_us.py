@@ -44,8 +44,8 @@ def test_long_quote_is_the_book_as_given():
     long_q = quotes["slug1:LONG"]
     assert long_q.bid == Decimal("0.4500")
     assert long_q.ask == Decimal("0.4550")
-    assert long_q.bid_size == Decimal("0")
-    assert long_q.ask_size == Decimal("0")
+    assert long_q.bid_size is None
+    assert long_q.ask_size is None
 
 
 def test_short_quote_inverts_and_swaps_both_price_and_size():
@@ -65,8 +65,8 @@ def test_short_quote_inverts_and_swaps_both_price_and_size():
     assert short_q.ask == Decimal("0.5500")
     # /bbo carries no sizes; the size swap is asserted against a real ladder
     # in test_quotes_from_levels_uses_real_top_of_book_quantities.
-    assert short_q.bid_size == Decimal("0")
-    assert short_q.ask_size == Decimal("0")
+    assert short_q.bid_size is None
+    assert short_q.ask_size is None
 
 
 def test_long_and_short_asks_sum_to_more_than_one():
@@ -142,10 +142,11 @@ def test_bbo_reports_unknown_size_not_the_depth_counter():
     aec-mlb-tb-ath-2026-08-12: bidDepth 49 against a true best-bid size of
     287,926.98. Reporting 49 as a size is worse than reporting nothing."""
     quotes = {q.outcome_id: q for q in quotes_from_bbo("s", BBO["marketData"])}
-    assert quotes["s:LONG"].bid_size == Decimal("0")
-    assert quotes["s:LONG"].ask_size == Decimal("0")
-    assert quotes["s:SHORT"].bid_size == Decimal("0")
-    assert quotes["s:SHORT"].ask_size == Decimal("0")
+    # None, not 0: 0 would assert "nothing is resting there" and block fills.
+    assert quotes["s:LONG"].bid_size is None
+    assert quotes["s:LONG"].ask_size is None
+    assert quotes["s:SHORT"].bid_size is None
+    assert quotes["s:SHORT"].ask_size is None
 
 
 def test_one_sided_book_still_yields_a_usable_ask():

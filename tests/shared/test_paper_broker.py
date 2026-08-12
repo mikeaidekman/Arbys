@@ -264,3 +264,63 @@ async def test_failed_ticket_leaves_no_position_and_no_orders():
     assert (await poly.get_positions("acct")).get("Y", Decimal("0")) == Decimal("0")
     assert await poly.get_balances("acct") == poly_before
     assert await kals.get_balances("acct") == kals_before
+
+
+def test_sell_into_a_known_empty_bid_is_rejected():
+    """A one-sided book synthesises the missing side at size 0. Without this
+    guard the broker would report selling into a book with no buyers."""
+    book = QuoteBook()
+    book.upsert(
+        Quote(
+            outcome_id="X",
+            bid=Decimal("0.0050"),
+            ask=Decimal("0.0050"),
+            bid_size=Decimal("0"),        # known empty
+            ask_size=Decimal("419882"),
+        )
+    )
+    broker = _make_broker("poly", book)
+    broker.deposit("acct", Decimal("100"))
+    _order, fill, reason = broker.apply_fill(
+        account_id="acct", outcome_id="X", is_buy=False,
+        qty=Decimal("1"), limit_price=Decimal("0"),
+    )
+    assert fill is None
+    assert reason == "no_liquidity"
+
+
+def test_buy_against_a_live_ask_still_fills_on_a_one_sided_book():
+    """The point of keeping one-sided books at all: the ask is real."""
+    book = QuoteBook()
+    book.upsert(
+        Quote(
+            outcome_id="X",
+            bid=Decimal("0.0050"),
+            ask=Decimal("0.0050"),
+            bid_size=Decimal("0"),
+            ask_size=Decimal("419882"),
+        )
+    )
+    broker = _make_broker("poly", book)
+    broker.deposit("acct", Decimal("100"))
+    _order, fill, reason = broker.apply_fill(
+        account_id="acct", outcome_id="X", is_buy=True,
+        qty=Decimal("1"), limit_price=Decimal("1"),
+    )
+    assert reason is None
+    assert fill is not None
+
+
+def test_unknown_size_still_fills():
+    """None means the venue did not report depth - most quotes, including
+    every hand-pushed one. Blocking those would break POST /quotes."""
+    book = QuoteBook()
+    book.upsert(Quote(outcome_id="X", bid=Decimal("0.40"), ask=Decimal("0.45")))
+    broker = _make_broker("poly", book)
+    broker.deposit("acct", Decimal("100"))
+    _order, fill, reason = broker.apply_fill(
+        account_id="acct", outcome_id="X", is_buy=True,
+        qty=Decimal("1"), limit_price=Decimal("1"),
+    )
+    assert reason is None
+    assert fill is not None
