@@ -222,3 +222,44 @@ async def test_event_without_start_time_is_dropped():
     )
     assert games == []
     await client.aclose()
+
+
+@pytest.mark.asyncio
+async def test_tennis_sport_is_the_league_not_the_word_tennis():
+    """Kalshi labels tennis per-tour ("atp" / "wta") and  is part of
+    the matcher's bucket key, so labelling everything "tennis" pairs with
+    nothing. That shipped once and silently dropped 72 matching player pairs."""
+    client = _client(TENNIS_EVENTS)
+    matches = await fetch_polymarket_us_tennis(http_client=client)
+    await client.aclose()
+    assert matches
+    assert {m.sport for m in matches} <= {"atp", "wta"}
+    assert "tennis" not in {m.sport for m in matches}
+
+
+@pytest.mark.asyncio
+async def test_tennis_matches_a_kalshi_game_end_to_end():
+    """The bucket key must actually let the two venues pair up."""
+    from datetime import UTC, datetime
+
+    from arbys.discovery.kalshi_sports import VenueGame
+    from arbys.discovery.matcher import match_games
+    from arbys.discovery.players import Player
+
+    client = _client(TENNIS_EVENTS)
+    poly = await fetch_polymarket_us_tennis(http_client=client)
+    await client.aclose()
+    wta = [m for m in poly if m.sport == "wta"]
+    assert wta, "expected a wta match from the stub"
+    p = wta[0]
+
+    kalshi = VenueGame(
+        sport="wta",
+        venue_id="kalshi",
+        game_date=p.game_date,
+        teams=(Player(code="OSAKA", full_name="Osaka"),
+               Player(code="RYBAKINA", full_name="Rybakina")),
+        outcome_ids={"OSAKA": "K1:YES", "RYBAKINA": "K1:NO"},
+        ref="K1",
+    )
+    assert len(match_games([kalshi], [p], date_tolerance_days=1)) == 1

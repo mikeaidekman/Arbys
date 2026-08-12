@@ -227,6 +227,12 @@ async def fetch_polymarket_us_tennis(
 
     Players come from the market's own sides, which carry full names, so
     there is no title to split.
+
+    ``sport`` must be the league (``"atp"`` / ``"wta"``), **not** ``"tennis"``.
+    Kalshi labels its matches per-tour and ``sport`` is part of the matcher's
+    bucket key, so a single "tennis" label silently pairs with nothing — 72
+    otherwise-matching player pairs went missing that way. The UI agrees:
+    ``CATEGORY_LABELS`` in ``frontend/src/lib/combo.ts`` keys on atp/wta.
     """
     matches: list[VenueGame] = []
     for league in TENNIS_LEAGUES:
@@ -255,7 +261,7 @@ async def fetch_polymarket_us_tennis(
 
                 matches.append(
                     VenueGame(
-                        sport="tennis",
+                        sport=league,
                         venue_id="polymarket_us",
                         game_date=start_time.date(),
                         teams=(p_long, p_short),
