@@ -65,8 +65,14 @@ def _size(value: Any) -> Decimal:
         return Decimal("0")
 
 
-def quotes_from_bbo(slug: str, market_data: dict[str, Any]) -> list[Quote]:
-    """Derive both sides' top-of-book from one ``/bbo`` payload.
+def _pair_to_quotes(
+    slug: str,
+    bid: Decimal | None,
+    ask: Decimal | None,
+    bid_size: Decimal,
+    ask_size: Decimal,
+) -> list[Quote]:
+    """Build the LONG/SHORT pair from one market's top of book.
 
     The long side is the book as reported. The short side of a binary is its
     complement: buying SHORT at its ask means lifting the LONG bid, so prices
@@ -75,16 +81,27 @@ def quotes_from_bbo(slug: str, market_data: dict[str, Any]) -> list[Quote]:
         short.bid  = 1 - long.ask      short.bid_size = long.ask_size
         short.ask  = 1 - long.bid      short.ask_size = long.bid_size
 
-    Returns an empty list rather than raising when the book is one-sided,
-    malformed, or crossed - a bad tick must not kill the poll loop.
+    A **one-sided** book keeps its live side and synthesises the missing one
+    at the same price with **size 0**. Dropping the market instead would hide
+    a genuinely tradeable ask - live example, 419,882 contracts offered at
+    0.0050 with no bids at all.
+
+    That size 0 is load-bearing rather than cosmetic: ``paper_broker`` refuses
+    to fill against a zero-size side, which is what stops the synthesised bid
+    from becoming a sale into an empty book.
+
+    Returns an empty list rather than raising when the book is empty,
+    malformed, or crossed - a bad tick must not kill the feed.
     """
-    bid = _price(market_data.get("bestBid"))
-    ask = _price(market_data.get("bestAsk"))
-    if bid is None or ask is None:
+    if bid is None and ask is None:
+        return []
+    if bid is None:
+        bid, bid_size = ask, Decimal("0")
+    if ask is None:
+        ask, ask_size = bid, Decimal("0")
+    if bid is None or ask is None:  # unreachable; keeps the type checker honest
         return []
 
-    bid_size = _size(market_data.get("bidDepth"))
-    ask_size = _size(market_data.get("askDepth"))
     one = Decimal("1")
     try:
         return [
@@ -105,8 +122,47 @@ def quotes_from_bbo(slug: str, market_data: dict[str, Any]) -> list[Quote]:
         ]
     except ValueError:
         # Quote.__post_init__ rejects out-of-range or crossed books.
-        log.debug("dropping malformed bbo for %s: bid=%s ask=%s", slug, bid, ask)
+        log.debug("dropping malformed book for %s: bid=%s ask=%s", slug, bid, ask)
         return []
+
+
+def quotes_from_bbo(slug: str, market_data: dict[str, Any]) -> list[Quote]:
+    """Top of book from a ``/bbo`` payload.
+
+    **Sizes are reported as 0, meaning unknown.** ``bidDepth``/``askDepth``
+    count price *levels*, not contracts: measured on
+    ``aec-mlb-tb-ath-2026-08-12``, ``bidDepth`` was 49 while ``/book`` showed
+    49 levels whose best held 287,926.98 contracts. This endpoint cannot
+    report size at all, and a level count that reads as a size is worse than
+    an explicit unknown. The WebSocket path carries real quantities.
+    """
+    return _pair_to_quotes(
+        slug,
+        _price(market_data.get("bestBid")),
+        _price(market_data.get("bestAsk")),
+        Decimal("0"),
+        Decimal("0"),
+    )
+
+
+def quotes_from_levels(
+    slug: str, bids: list[dict[str, Any]], offers: list[dict[str, Any]]
+) -> list[Quote]:
+    """Top of book from a full ladder - ``[{"px": {"value": ...}, "qty": ...}]``.
+
+    Only level 0 is read. Carrying the whole ladder is the cost of the full
+    market-data subscription, and the ``qty`` on level 0 is what that cost
+    buys - the lite subscription reports only depth counters.
+    """
+
+    def top(levels: list[dict[str, Any]]) -> tuple[Decimal | None, Decimal]:
+        if not levels or not isinstance(levels[0], dict):
+            return None, Decimal("0")
+        return _price(levels[0].get("px")), _size(levels[0].get("qty"))
+
+    bid, bid_size = top(bids)
+    ask, ask_size = top(offers)
+    return _pair_to_quotes(slug, bid, ask, bid_size, ask_size)
 
 
 class PolymarketUsAdapter(MarketDataAdapter):
