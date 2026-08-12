@@ -240,8 +240,6 @@ async def test_tennis_sport_is_the_league_not_the_word_tennis():
 @pytest.mark.asyncio
 async def test_tennis_matches_a_kalshi_game_end_to_end():
     """The bucket key must actually let the two venues pair up."""
-    from datetime import UTC, datetime
-
     from arbys.discovery.kalshi_sports import VenueGame
     from arbys.discovery.matcher import match_games
     from arbys.discovery.players import Player
