@@ -22,14 +22,22 @@ class CrossVenueMatch:
     per_venue: dict[str, VenueGame]
     market_type: str = "moneyline"
     line: Decimal | None = None
+    anchor: str | None = None
 
     def yes_key(self) -> str:
         """Which ``outcome_ids`` key represents the group's TRUE proposition.
 
         Moneyline groups are canonically "team_a wins"; totals are "the total
-        goes over the line".
+        goes over the line"; spreads are "the anchored participant covers".
+
+        Written as a dispatch rather than a conditional so Phase 2 registers a
+        market type here instead of rewriting the method.
         """
-        return OVER if self.market_type == "total" else self.team_a.code
+        if self.market_type == "total":
+            return OVER
+        if self.market_type == "spread":
+            return self.anchor or self.team_a.code
+        return self.team_a.code
 
     def start_time(self) -> datetime | None:
         """Earliest start time any venue reports for this game.
@@ -88,13 +96,18 @@ def _order_key(game: VenueGame) -> tuple[int, float, str]:
     return (1, float(game.game_date.toordinal()), game.venue_id)
 
 
-def _pair_key(game: VenueGame) -> tuple[str, str, str, frozenset[str]]:
-    """Bucket key. Market type and line are part of identity: an Over 44.5 and
-    an Over 47.5 on the same game are different bets, not the same one."""
+def _pair_key(game: VenueGame) -> tuple[str, str, str, str, frozenset[str]]:
+    """Bucket key. Market type, line and anchor are all part of identity.
+
+    An Over 44.5 and an Over 47.5 on the same game are different bets. So are
+    ``CLE -2.5`` and ``DET -2.5`` — same line, opposite anchor — which is why
+    the anchor belongs here even though no Phase 1 market type sets one.
+    """
     return (
         game.sport,
         game.market_type,
         _fmt_line(game.line),
+        game.anchor or "",
         frozenset(t.code for t in game.teams),
     )
 
@@ -168,6 +181,9 @@ def match_games(
                     per_venue=per_venue,
                     market_type=anchor.market_type,
                     line=anchor.line,
+                    # `anchor` here is the cluster's anchor *game*; its
+                    # `.anchor` is the participant its line is stated for.
+                    anchor=anchor.anchor,
                 )
             )
     matches.sort(
@@ -177,6 +193,7 @@ def match_games(
             m.team_b.code,
             m.market_type,
             _fmt_line(m.line),
+            m.anchor or "",
         )
     )
     return matches

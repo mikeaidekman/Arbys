@@ -14,6 +14,7 @@ from alembic import context
 from sqlalchemy import engine_from_config, pool
 
 from arbys.db.models import Base
+from arbys.db.session import DEFAULT_DB_URL
 
 config = context.config
 if config.config_file_name is not None:
@@ -27,8 +28,15 @@ def _sync_url() -> str:
 
     SQLite is the documented dev default, so it has to be handled here too —
     otherwise ``alembic upgrade`` fails on the URL in .env.example.
+
+    The fallback is imported from ``arbys.db.session`` rather than repeated.
+    It used to be a hardcoded Postgres URL, which contradicted this module's
+    own docstring and the documented SQLite default: running
+    ``alembic upgrade head`` with no ARBYS_DB_URL set tried to reach
+    localhost:5432 and hung until the connection timed out, instead of
+    migrating the dev database sitting right there.
     """
-    url = os.environ.get("ARBYS_DB_URL", "postgresql+asyncpg://arbys:arbys@localhost:5432/arbys")
+    url = os.environ.get("ARBYS_DB_URL", DEFAULT_DB_URL)
     for async_driver, sync_driver in (
         ("postgresql+asyncpg://", "postgresql+psycopg://"),
         ("sqlite+aiosqlite://", "sqlite://"),

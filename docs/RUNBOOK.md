@@ -30,7 +30,7 @@ uvicorn arbys.backend.app:app --reload
 On startup `AppState.bootstrap()` will:
 
 1. Create tables if missing (`Base.metadata.create_all`).
-2. Ensure the three seed venues exist (`polymarket`, `kalshi`, `draftkings`).
+2. Ensure the three seed venues exist (`polymarket_us`, `kalshi`, `draftkings`).
 3. Ensure the `default` paper account exists.
 4. Hydrate event groups, balances, and positions from the DB.
 5. Seed `DEFAULT_STARTING_BALANCE = $1000` for any venue not previously funded.
@@ -48,9 +48,9 @@ listed on 2+ venues. All arb detection is scoped to a registered event group.
    - `ID` — a stable identifier you'll use in the DB and logs (e.g. `nfl-sb-2027-chiefs`).
    - `Title` — human-readable label.
    - Legs — one row per venue outcome. Each leg needs:
-     - `outcome_id` — the venue's native outcome identifier (e.g. Polymarket
+     - `outcome_id` — the venue's native outcome identifier (e.g. Polymarket US
        token id, Kalshi ticker + side, DraftKings selection id).
-     - `Venue` — polymarket / kalshi / draftkings.
+     - `Venue` — polymarket_us / kalshi / draftkings.
      - `Side` — YES (the outcome as-listed) or NO (the complementary side).
 3. Click **Create**.
 
@@ -63,7 +63,7 @@ curl -X POST http://localhost:8000/event-groups `
     "id": "nfl-sb-2027-chiefs",
     "title": "Chiefs win Super Bowl 2027",
     "legs": [
-      {"outcome_id": "poly-token-abc", "venue_id": "polymarket", "is_yes_side": true},
+      {"outcome_id": "aec-mlb-cle-det-2026-08-11:LONG", "venue_id": "polymarket_us", "is_yes_side": true},
       {"outcome_id": "KXSB-27-KC",     "venue_id": "kalshi",     "is_yes_side": true},
       {"outcome_id": "dk-selection-42", "venue_id": "draftkings", "is_yes_side": true}
     ]
@@ -97,7 +97,7 @@ Sum of 0.40 + (1 − 0.50) = 0.90 < 1 → an opportunity appears in the table.
 ## 2.1 Auto-discovery (cross-venue MLB)
 
 Instead of curating each event group by hand, the backend can scan Kalshi and
-Polymarket every N minutes and register any MLB games it finds on both venues.
+Polymarket US every N minutes and register any MLB games it finds on both venues.
 
 Enable in `.env`:
 
@@ -128,7 +128,7 @@ Edit `arbys/backend/state.py`:
 
 ```python
 self.fees: FeeModelRegistry = {
-    "polymarket": PolymarketFeeModel(),
+    "polymarket_us": PolymarketUsFeeModel(),
     "kalshi": KalshiFeeModel(),
     "draftkings": SportsbookFeeModel("draftkings"),
     "manifold": ManifoldFeeModel(),   # ← new
@@ -141,8 +141,9 @@ startup.
 ### 3.2 Implement a fee model
 
 Add a class in `arbys/shared/fees.py` implementing the `FeeModel` protocol.
-Look at `PolymarketFeeModel` for a percentage-of-notional example and
-`KalshiFeeModel` for a piecewise/rounded example.
+Both `PolymarketUsFeeModel` (0.06) and `KalshiFeeModel` (0.07) are
+`rate * p * (1-p) * qty`; `SportsbookFeeModel` returns zero because a
+sportsbook's vig is already inside the quoted price.
 
 **Write tests first** in `tests/shared/test_fees.py` — the fee model directly
 affects whether the engine calls something an arbitrage, so it must be
@@ -158,14 +159,28 @@ Add `arbys/adapters/<venue>.py` implementing `MarketDataAdapter` from
 - `stream_quotes(outcome_ids) -> AsyncIterator[Quote]` — optional WS stream;
   fall back to polling if the venue has no WS.
 
-Follow the Polymarket adapter as a template. `PolymarketAdapter` uses a
-WebSocket (`wss://ws-subscriptions-clob.polymarket.com/ws/market`) as its
-primary transport with automatic REST-poll fallback if the WS connection fails
-repeatedly (default: 3 failures within 60s → switches to REST until WS
-recovers). Set `use_websocket=False` on construction to force REST-only.
+Two templates, depending on what the venue offers:
+
+- **REST-poll** — `PolymarketUsAdapter` in `arbys/adapters/polymarket_us.py`.
+  Sweeps `gateway.polymarket.us/v1/markets/{slug}/bbo` every
+  `ARBYS_POLYMARKET_US_POLL_S` seconds (default 5). Polymarket US has an
+  authenticated WebSocket at `wss://api.polymarket.us/v1/ws/markets`, but it
+  needs completed KYC plus an Ed25519 key pair and is **not wired**.
+- **WS-first with REST fallback** — `KalshiWebSocketAdapter` /
+  `KalshiAdapter`, selected by `_kalshi_factory` in `state.py` based on
+  whether credentials are present. Copy that shape when adding a WS path to a
+  venue that already polls.
+
+If the venue quotes one binary contract with two sides rather than a token per
+side, derive the second side rather than fetching it — see `quotes_from_bbo`.
+**Both sides' asks must sum to more than 1**; if they don't, the inversion is
+backwards, which is otherwise silent because the prices still look plausible.
+
 Tests should use `httpx.MockTransport` for REST paths and an in-process
-`websockets.serve` server for WS paths (see `tests/adapters/test_polymarket.py`) —
-do **not** hit the real venue in tests.
+`websockets.serve` server for WS paths (see
+`tests/adapters/test_polymarket_us.py` and `tests/adapters/test_kalshi_ws.py`)
+— do **not** hit the real venue in tests. For a live check, add a script under
+`scripts/` following `smoke_polymarket_us.py`.
 
 ### 3.4 Wire the adapter into ingest
 

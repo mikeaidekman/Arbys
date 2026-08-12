@@ -54,6 +54,16 @@ def _last_name_code(full_name: str) -> str:
     return parts[-1].upper()
 
 
+def last_name_code(full_name: str) -> str:
+    """Canonical player code from a full name.
+
+    Public entry point for venues that report participants structured rather
+    than as an "A vs B" title — Polymarket US gives ``teams[].name``, so there
+    is nothing to split and only the code is needed.
+    """
+    return _last_name_code(full_name)
+
+
 def parse_vs_title(title: str) -> tuple[Player, Player] | None:
     """Parse "A vs B" or "A vs. B" into two Players.
 

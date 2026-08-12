@@ -13,9 +13,11 @@ from .kalshi_sports import fetch_kalshi_team_games
 from .kalshi_tennis import fetch_kalshi_tennis_matches
 from .kalshi_totals import fetch_kalshi_totals
 from .matcher import match_games, match_to_event_group
-from .polymarket_sports import fetch_polymarket_sports_games
-from .polymarket_tennis import fetch_polymarket_tennis_matches
-from .polymarket_totals import fetch_polymarket_totals
+from .polymarket_us import (
+    fetch_polymarket_us_games,
+    fetch_polymarket_us_tennis,
+    fetch_polymarket_us_totals,
+)
 from .teams import MLB_RESOLVER, NBA_RESOLVER, NFL_RESOLVER, TeamResolver
 
 log = logging.getLogger(__name__)
@@ -27,9 +29,12 @@ TEAM_SPORTS: tuple[tuple[str, TeamResolver], ...] = (
     ("nba", NBA_RESOLVER),
 )
 
-# Sports whose over/under markets both venues quote. MLB is deliberately
-# absent: Kalshi lists KXMLBTOTAL but Polymarket carries no baseball totals
-# (only moneyline, NRFI and player props), so nothing would ever match.
+# Sports whose over/under markets both venues quote. MLB is absent by choice,
+# not necessity: Polymarket US carries baseball_team_full_game_total and Kalshi
+# lists KXMLBTOTAL, so adding ("mlb", MLB_RESOLVER) here should work. It is
+# held back so the Polymarket US port had exactly one behavioural variable —
+# wire it once the port is proven live. (Polymarket *international* genuinely
+# carried no baseball totals, which is why this used to be impossible.)
 TOTALS_SPORTS: tuple[tuple[str, TeamResolver], ...] = (
     ("nfl", NFL_RESOLVER),
 )
@@ -48,11 +53,11 @@ async def discover_team_sport_event_groups(
     """
     kalshi_games, poly_games = await asyncio.gather(
         fetch_kalshi_team_games(resolver=resolver, sport=sport),
-        fetch_polymarket_sports_games(resolver=resolver, sport=sport),
+        fetch_polymarket_us_games(resolver=resolver, sport=sport),
     )
     matches = match_games(kalshi_games, poly_games)
     log.info(
-        "discovery[%s]: kalshi=%d polymarket=%d matched=%d",
+        "discovery[%s]: kalshi=%d polymarket_us=%d matched=%d",
         sport, len(kalshi_games), len(poly_games), len(matches),
     )
     return [match_to_event_group(m) for m in matches]
@@ -69,11 +74,11 @@ async def discover_totals_event_groups(
     """
     kalshi_games, poly_games = await asyncio.gather(
         fetch_kalshi_totals(resolver=resolver, sport=sport),
-        fetch_polymarket_totals(resolver=resolver, sport=sport),
+        fetch_polymarket_us_totals(resolver=resolver, sport=sport),
     )
     matches = match_games(kalshi_games, poly_games)
     log.info(
-        "discovery[%s totals]: kalshi=%d polymarket=%d matched=%d",
+        "discovery[%s totals]: kalshi=%d polymarket_us=%d matched=%d",
         sport, len(kalshi_games), len(poly_games), len(matches),
     )
     return [match_to_event_group(m) for m in matches]
@@ -92,7 +97,7 @@ async def discover_tennis_event_groups() -> list[EventGroup]:
     """
     kalshi_games, poly_games = await asyncio.gather(
         fetch_kalshi_tennis_matches(),
-        fetch_polymarket_tennis_matches(),
+        fetch_polymarket_us_tennis(),
     )
     matches = match_games(kalshi_games, poly_games, date_tolerance_days=1)
     return [match_to_event_group(m) for m in matches]

@@ -51,19 +51,34 @@ class KalshiFeeModel:
 
 
 @dataclass(frozen=True)
-class PolymarketFeeModel:
-    """Polymarket has no venue fee on the CLOB itself; on-chain settlement gas is
-    modeled as a flat per-trade cost (in USDC-equivalent) that the caller can
-    tune. Set gas_flat=0 for pure venue-fee analysis.
+class PolymarketUsFeeModel:
+    """Polymarket US taker fee.
+
+    Official schedule: ``fee = 0.06 * C * p * (1 - p)``, the same shape as
+    Kalshi's with a lower coefficient. Peaks at a coin flip ($1.50 per 100
+    contracts at p=0.50) and vanishes at the extremes.
+
+    This replaces a model that returned zero, which overstated every net edge
+    on a Polymarket leg by up to 1.25c/contract — larger than most edges the
+    scanner detects.
+
+    Two deliberate omissions:
+
+    * The maker rebate (-0.0125) is not modelled. The paper broker fills
+      against the ask as a taker, so a maker rebate would never apply.
+    * Polymarket US rounds to the cent per contract using banker's rounding
+      and we do not round at all, so modelled fees come out slightly low and
+      marginal edges look slightly better than they are. This matches the
+      existing understatement on the Kalshi side.
     """
 
-    venue_id: str = "polymarket"
-    gas_flat: Decimal = Decimal("0")
+    venue_id: str = "polymarket_us"
+    rate: Decimal = Decimal("0.06")
 
     def fee(self, *, price: Decimal, qty: Decimal, is_buy: bool) -> Decimal:
         if qty <= 0:
             return Decimal("0")
-        return self.gas_flat
+        return self.rate * price * (Decimal("1") - price) * qty
 
 
 @dataclass(frozen=True)

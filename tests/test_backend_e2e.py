@@ -39,7 +39,7 @@ def test_end_to_end_scan_and_paper_execute():
                 "id": "eg-1",
                 "title": "Will X happen?",
                 "legs": [
-                    {"outcome_id": "poly-yes", "venue_id": "polymarket", "is_yes_side": True},
+                    {"outcome_id": "poly-yes", "venue_id": "polymarket_us", "is_yes_side": True},
                     {"outcome_id": "kals-no", "venue_id": "kalshi", "is_yes_side": False},
                 ],
             },
@@ -75,7 +75,7 @@ def test_state_survives_restart(tmp_path):
                 "id": "eg-persist",
                 "title": "Persistence check",
                 "legs": [
-                    {"outcome_id": "p-yes", "venue_id": "polymarket", "is_yes_side": True},
+                    {"outcome_id": "p-yes", "venue_id": "polymarket_us", "is_yes_side": True},
                     {"outcome_id": "k-no", "venue_id": "kalshi", "is_yes_side": False},
                 ],
             },
@@ -105,14 +105,14 @@ async def test_event_group_start_time_round_trips_in_db():
         title="Boston vs Toronto",
         start_time=start,
         legs=(
-            EventGroupLeg(outcome_id="p-bos", venue_id="polymarket", is_yes_side=True),
+            EventGroupLeg(outcome_id="p-bos", venue_id="polymarket_us", is_yes_side=True),
             EventGroupLeg(outcome_id="k-tor", venue_id="kalshi", is_yes_side=False),
         ),
     )
 
     await create_all()
     async with session_scope() as session:
-        await repo.ensure_venue(session, "polymarket", name="Polymarket", kind="exchange")
+        await repo.ensure_venue(session, "polymarket_us", name="Polymarket US", kind="exchange")
         await repo.ensure_venue(session, "kalshi", name="Kalshi", kind="exchange")
         await repo.upsert_event_group(session, group)
 
@@ -142,7 +142,7 @@ def _register(client, group_id, poly_outcome, kalshi_outcome):
             "id": group_id,
             "title": f"Group {group_id}",
             "legs": [
-                {"outcome_id": poly_outcome, "venue_id": "polymarket", "is_yes_side": True},
+                {"outcome_id": poly_outcome, "venue_id": "polymarket_us", "is_yes_side": True},
                 {"outcome_id": kalshi_outcome, "venue_id": "kalshi", "is_yes_side": False},
             ],
         },
@@ -369,7 +369,7 @@ def test_open_positions_hydrate_once_per_venue(tmp_path):
                 "id": "eg-hydrate",
                 "title": "Hydration check",
                 "legs": [
-                    {"outcome_id": "p-yes", "venue_id": "polymarket", "is_yes_side": True},
+                    {"outcome_id": "p-yes", "venue_id": "polymarket_us", "is_yes_side": True},
                     {"outcome_id": "k-no", "venue_id": "kalshi", "is_yes_side": False},
                 ],
             },
