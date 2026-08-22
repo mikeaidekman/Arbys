@@ -1,5 +1,6 @@
 from decimal import Decimal
 
+from arbys.shared.arb_engine import leg_unit_cost, net_edge_per_contract
 from arbys.shared.fees import (
     KalshiFeeModel,
     PolymarketUsFeeModel,
@@ -62,3 +63,26 @@ def test_polymarket_us_venue_id():
 def test_sportsbook_fee_is_zero_since_vig_in_price():
     m = SportsbookFeeModel(venue_id="dks")
     assert m.fee(price=Decimal("0.55"), qty=Decimal("100"), is_buy=True) == 0
+
+
+def test_leg_unit_cost_includes_per_unit_fee():
+    # Kalshi taker fee is 0.07 * p * (1-p): 0.07 * 0.47 * 0.53 = 0.017437
+    cost = leg_unit_cost(Decimal("0.47"), KalshiFeeModel(), is_buy=True)
+    assert cost > Decimal("0.47")
+    assert cost == Decimal("0.47") + KalshiFeeModel().fee(
+        price=Decimal("0.47"), qty=Decimal("1"), is_buy=True
+    )
+
+
+def test_net_edge_per_contract_is_one_minus_total_cost():
+    k = leg_unit_cost(Decimal("0.47"), KalshiFeeModel())
+    p = leg_unit_cost(Decimal("0.525"), PolymarketUsFeeModel())
+    edge = net_edge_per_contract([k, p])
+    assert edge == Decimal("1") - (k + p)
+    # Measured 2026-08-22 on nfl-GB-MIN: gross +0.5c, net negative.
+    assert edge < Decimal("0")
+
+
+def test_net_edge_positive_when_legs_are_cheap():
+    edge = net_edge_per_contract([Decimal("0.40"), Decimal("0.50")])
+    assert edge == Decimal("0.10")

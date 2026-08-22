@@ -19,6 +19,7 @@ Two detectors are provided:
 
 from __future__ import annotations
 
+from collections.abc import Iterable
 from dataclasses import dataclass
 from decimal import Decimal
 
@@ -54,19 +55,28 @@ class ArbOpportunity:
     guaranteed_profit_bps: Decimal
 
 
-def _leg_unit_cost(
+def leg_unit_cost(
     ask: Decimal,
     fee_model: FeeModel,
-    is_buy: bool,
+    *,
+    is_buy: bool = True,
 ) -> Decimal:
-    """Cost per 1 unit of contract, including per-unit fees.
+    """Cost per 1 contract, including per-unit fees.
 
     Uses qty=1 to get an average fee-per-unit at this price. Because our fee
     models are linear in qty, this is equivalent to (fees(N) / N) for any N > 0.
     """
-    qty = Decimal("1")
-    fee = fee_model.fee(price=ask, qty=qty, is_buy=is_buy)
+    fee = fee_model.fee(price=ask, qty=Decimal("1"), is_buy=is_buy)
     return ask + fee
+
+
+def net_edge_per_contract(unit_costs: Iterable[Decimal]) -> Decimal:
+    """Guaranteed profit per contract after fees. Positive means an arb.
+
+    Size-independent: this is the whole arb test. Exactly one leg of a
+    complete ticket settles at 1, so the edge is 1 minus what the ticket costs.
+    """
+    return Decimal("1") - sum(unit_costs, Decimal("0"))
 
 
 def detect_cross_venue_two_leg(
@@ -97,7 +107,7 @@ def detect_cross_venue_two_leg(
         y_fee_model = fees.get(y.venue_id)
         if y_fee_model is None:
             continue
-        y_unit = _leg_unit_cost(yq.ask, y_fee_model, is_buy=True)
+        y_unit = leg_unit_cost(yq.ask, y_fee_model, is_buy=True)
 
         for n in no_legs:
             nq = quotes.get(n.outcome_id)
@@ -106,7 +116,7 @@ def detect_cross_venue_two_leg(
             n_fee_model = fees.get(n.venue_id)
             if n_fee_model is None:
                 continue
-            n_unit = _leg_unit_cost(nq.ask, n_fee_model, is_buy=True)
+            n_unit = leg_unit_cost(nq.ask, n_fee_model, is_buy=True)
 
             total_unit_cost = y_unit + n_unit
             if total_unit_cost >= target_payoff:
