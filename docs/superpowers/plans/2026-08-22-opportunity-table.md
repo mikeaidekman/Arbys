@@ -33,7 +33,8 @@
 | file | responsibility |
 | --- | --- |
 | `arbys/shared/arb_engine.py` | detection only; per-contract gate, delegates sizing |
-| `arbys/shared/sizing.py` | all sizing arithmetic, incl. the new `tradeable_qty` |
+| `arbys/shared/qty.py` | **new leaf module** — `tradeable_qty`, tick rounding; imports nothing from the package |
+| `arbys/shared/sizing.py` | bankroll/stake scaling; re-exports from `qty` |
 | `arbys/shared/paper_broker.py` | `_preview_fill` gains the qty-vs-resting backstop |
 | `arbys/backend/state.py` | `max_ticket_stake()` config reader |
 | `arbys/backend/schemas.py` | four new `MonitoredGroupOut` fields |
@@ -146,11 +147,7 @@ def net_edge_per_contract(unit_costs: Iterable[Decimal]) -> Decimal:
     return Decimal("1") - sum(unit_costs, Decimal("0"))
 ```
 
-Keep a module-private alias so existing internal call sites keep working until Task 4 rewrites them:
-
-```python
-_leg_unit_cost = leg_unit_cost
-```
+Then update the two existing internal call sites in `detect_cross_venue_two_leg` from `_leg_unit_cost(...)` to `leg_unit_cost(...)` — there are exactly two, both assigning `y_unit` and `n_unit`. Do **not** leave a `_leg_unit_cost = leg_unit_cost` alias behind; nothing else references it and it would be dead code by Task 4.
 
 - [ ] **Step 4: Run tests to verify they pass**
 
@@ -169,19 +166,23 @@ git commit -m "feat(shared): public per-contract cost and net-edge helpers"
 ### Task 2: `tradeable_qty` — depth ceiling and stake budget
 
 **Files:**
-- Modify: `arbys/shared/sizing.py`
-- Test: `tests/shared/test_sizing.py`
+- Create: `arbys/shared/qty.py`
+- Modify: `arbys/shared/sizing.py` (re-export only)
+- Test: `tests/shared/test_qty.py`
 
 **Interfaces:**
-- Produces: `tradeable_qty(*, unit_cost: Decimal, depths: Sequence[Decimal | None], max_stake: Decimal | None, tick: Decimal = Decimal("0")) -> Decimal`
-- Also produces: `LEGACY_UNBOUNDED_QTY: Decimal` (value `Decimal("100")`)
+- Produces, in the **new leaf module** `arbys/shared/qty.py`: `tradeable_qty(*, unit_cost: Decimal, depths: Sequence[Decimal | None], max_stake: Decimal | None, tick: Decimal = Decimal("0")) -> Decimal` and `LEGACY_UNBOUNDED_QTY: Decimal` (value `Decimal("100")`)
+- **Why a new module, not `sizing.py`:** `sizing.py` imports `ArbLeg`/`ArbOpportunity` from `arb_engine`, and Task 4 needs `arb_engine` to import `tradeable_qty`. Putting it in `sizing.py` would make that circular. `qty.py` depends on nothing in the package, so both can import it.
+- `_round_down_tick` currently lives in `sizing.py`. Move it to `qty.py` and have `sizing.py` import it back, so tick rounding has one definition.
 
 - [ ] **Step 1: Write the failing test**
 
-Append to `tests/shared/test_sizing.py`:
+Create `tests/shared/test_qty.py`:
 
 ```python
-from arbys.shared.sizing import LEGACY_UNBOUNDED_QTY, tradeable_qty
+from decimal import Decimal
+
+from arbys.shared.qty import LEGACY_UNBOUNDED_QTY, tradeable_qty
 
 
 def test_tradeable_qty_capped_by_thinnest_leg():
@@ -271,10 +272,26 @@ Expected: FAIL — `ImportError: cannot import name 'tradeable_qty'`
 
 - [ ] **Step 3: Write minimal implementation**
 
-In `arbys/shared/sizing.py`, add `Sequence` to imports and append:
+Create `arbys/shared/qty.py`. It must import nothing from the rest of the package — that is what keeps it importable from both `arb_engine` and `sizing`:
 
 ```python
+"""Contract-count arithmetic: how much of an arb is actually tradeable.
+
+A leaf module on purpose. `sizing.py` imports ArbOpportunity from
+`arb_engine`, and `arb_engine` needs `tradeable_qty`, so this cannot live in
+`sizing.py` without a cycle.
+"""
+
+from __future__ import annotations
+
 from collections.abc import Sequence
+from decimal import ROUND_DOWN, Decimal
+
+
+def _round_down_tick(value: Decimal, tick: Decimal) -> Decimal:
+    if tick <= 0:
+        return value
+    return (value / tick).quantize(Decimal("1"), rounding=ROUND_DOWN) * tick
 
 # Retained only for the case where the stake budget is disabled *and* no leg
 # reports depth. Without it there would be no ceiling at all. This is the old
@@ -323,15 +340,25 @@ def tradeable_qty(
     return qty if qty > 0 else Decimal("0")
 ```
 
-- [ ] **Step 4: Run tests to verify they pass**
+- [ ] **Step 4: Point `sizing.py` at the moved helper**
 
-Run: `venv\Scripts\python.exe -m pytest tests/shared/test_sizing.py -q`
-Expected: PASS, including the pre-existing `size_to_bankroll` / `size_to_max_stake` tests.
+In `arbys/shared/sizing.py`, delete its local `_round_down_tick` definition and import from the new module instead, re-exporting the new names so existing importers of `sizing` keep working:
 
-- [ ] **Step 5: Commit**
+```python
+from .qty import LEGACY_UNBOUNDED_QTY, _round_down_tick, tradeable_qty  # noqa: F401
+```
+
+`size_to_bankroll` already calls `_round_down_tick`, so it now uses the shared one. Nothing else in `sizing.py` changes.
+
+- [ ] **Step 5: Run tests to verify they pass**
+
+Run: `venv\Scripts\python.exe -m pytest tests/shared/test_qty.py tests/shared/test_sizing.py -q`
+Expected: PASS — the new `tradeable_qty` tests plus the pre-existing `size_to_bankroll` / `size_to_max_stake` tests, which must still pass unchanged.
+
+- [ ] **Step 6: Commit**
 
 ```bash
-git add arbys/shared/sizing.py tests/shared/test_sizing.py
+git add arbys/shared/qty.py arbys/shared/sizing.py tests/shared/test_qty.py
 git commit -m "feat(shared): tradeable_qty caps sizing by depth and stake budget"
 ```
 
@@ -658,17 +685,11 @@ def detect_cross_venue_two_leg(
     return best
 ```
 
-Add the sizing import at the top of `arb_engine.py`:
+Add the import at the top of `arb_engine.py` — from `qty`, **not** from `sizing`, which would be circular since `sizing` imports `ArbOpportunity` from here:
 
 ```python
-from .sizing import tradeable_qty
+from .qty import tradeable_qty
 ```
-
-> **Import direction check:** `sizing.py` currently imports `ArbLeg`/`ArbOpportunity` from `arb_engine`, so importing `sizing` from `arb_engine` at module level would be circular. Move `tradeable_qty` and `LEGACY_UNBOUNDED_QTY` into a new leaf module `arbys/shared/qty.py` and have **both** `arb_engine.py` and `sizing.py` import from it. Update the Task 2 test import to `from arbys.shared.qty import LEGACY_UNBOUNDED_QTY, tradeable_qty`, and re-export from `sizing` for continuity:
-> ```python
-> # arbys/shared/sizing.py
-> from .qty import LEGACY_UNBOUNDED_QTY, tradeable_qty  # noqa: F401  (re-export)
-> ```
 
 Update `arbys/ingest/engine_runtime.py`:
 
@@ -1925,6 +1946,6 @@ git commit -m "fix: address issues found verifying the table against live data"
 
 **Deviation recorded:** the spec says `ARBYS_MAX_TICKET_STAKE=0` disables the cap but does not say what bounds sizing when depth is also unknown. Task 2 keeps `LEGACY_UNBOUNDED_QTY = 100` for exactly that case, so disabling reproduces today's behaviour rather than producing an unbounded ticket.
 
-**Circular import caught:** `sizing.py` imports from `arb_engine`, so `arb_engine` cannot import `sizing`. Task 4 moves `tradeable_qty` to a leaf module `shared/qty.py` that both import.
+**Circular import caught:** `sizing.py` imports `ArbOpportunity` from `arb_engine`, so `arb_engine` cannot import `sizing`. Task 2 therefore creates `tradeable_qty` in a new leaf module `shared/qty.py` that imports nothing from the package; both `arb_engine` and `sizing` import from it, and `sizing` re-exports for continuity.
 
 **Type consistency:** `tradeable_qty(*, unit_cost, depths, max_stake, tick)` is used identically in Tasks 4, 5 and 7. `bestPair` returns `{combo, both, size}` in Task 9 and is consumed with those names in Tasks 10 and 11. `filledMap` is `Record<string, boolean>` in Tasks 11 and 12.
