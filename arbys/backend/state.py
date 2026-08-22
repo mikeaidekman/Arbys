@@ -139,6 +139,33 @@ def max_outcome_qty() -> Decimal | None:
     return None if value <= 0 else value
 
 
+DEFAULT_MAX_TICKET_STAKE = Decimal("200")
+
+
+def max_ticket_stake() -> Decimal | None:
+    """Cap on total capital in one arb ticket. ``None`` disables it.
+
+    Sizing is depth-driven, and some books are enormous — a single Polymarket
+    US level has shown 419,882 contracts resting. Without a budget cap one
+    ticket would consume the whole book. At ~$1.00 all-in per contract pair,
+    the $200 default is roughly 198 contracts.
+
+    This does **not** replace ``ARBYS_MAX_OUTCOME_QTY``: that caps cumulative
+    open units per outcome per account and is enforced at execute time in
+    ``app.py``, whereas this caps one ticket at detection time. Both apply.
+
+    Set ARBYS_MAX_TICKET_STAKE=0 to turn it off.
+    """
+    raw = os.environ.get("ARBYS_MAX_TICKET_STAKE")
+    if raw is None:
+        return DEFAULT_MAX_TICKET_STAKE
+    try:
+        value = Decimal(raw)
+    except (ArithmeticError, ValueError):
+        return DEFAULT_MAX_TICKET_STAKE
+    return None if value <= 0 else value
+
+
 # venue_id -> factory(outcome_ids) -> MarketDataAdapter
 AdapterFactory = Callable[[list[str]], MarketDataAdapter]
 
