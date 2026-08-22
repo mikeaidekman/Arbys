@@ -14,15 +14,10 @@ Everything here is pure and deterministic.
 from __future__ import annotations
 
 from dataclasses import replace
-from decimal import ROUND_DOWN, Decimal
+from decimal import Decimal
 
 from .arb_engine import ArbLeg, ArbOpportunity
-
-
-def _round_down_tick(value: Decimal, tick: Decimal) -> Decimal:
-    if tick <= 0:
-        return value
-    return (value / tick).quantize(Decimal("1"), rounding=ROUND_DOWN) * tick
+from .qty import LEGACY_UNBOUNDED_QTY, _round_down_tick, tradeable_qty  # noqa: F401
 
 
 def size_to_bankroll(
