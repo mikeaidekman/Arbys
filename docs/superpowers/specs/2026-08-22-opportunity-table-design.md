@@ -354,10 +354,14 @@ introducing a runner is its own decision.
 - Row expansion, inline detail, or a card view behind a toggle. The cards are
   deleted, not hidden; one revert away if the table disappoints.
 - Days-to-settlement and annualised-return columns. Discussed separately.
-- **Detecting the intra-venue Kalshi arb** the crossed-book finding exposed.
-  `KY 0.47 + KN 0.52 = 0.99` is a real 1¢ edge on a single venue that the
-  engine cannot see, because detection is scoped to cross-venue event groups.
-  Deserves its own spec.
+- ~~Detecting the intra-venue Kalshi arb.~~ **Struck — this was wrong.**
+  `detect_complementary_set` already runs once per venue on every group, and
+  every group carries 2 legs per venue (`:YES`/`:NO`, `:LONG`/`:SHORT`), so a
+  candidate set always exists. Intra-venue arbs **are** detected today. The
+  crossed Kalshi book at `KY 0.47 + KN 0.52 = 0.99` produced no opportunity
+  only because fees put its all-in cost at `1.0249`. That detector therefore
+  needs the same depth-aware sizing as the cross-venue one, and it is **in
+  scope** — see the plan's Task 5.
 - Walking deeper into the book for more size. Top-of-book is the correct
   ceiling for an arb; taking depth at worse prices destroys the edge being
   traded.
