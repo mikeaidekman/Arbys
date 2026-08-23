@@ -8,6 +8,7 @@ from pathlib import Path
 
 import pytest
 
+from arbys.db import models as m
 from arbys.db import repositories as repo
 from arbys.db import session as db_session
 from arbys.db.session import create_all, session_scope
@@ -60,8 +61,17 @@ async def test_ticket_and_settlement_round_trip():
         )
 
     async with session_scope() as session:
+        ticket = await session.get(m.PaperTicket, "tkt-1")
+        assert ticket.title_snapshot == "MLB: ATL @ LAD"
+        assert ticket.source == "manual"
+        assert ticket.status == "filled"
+        assert ticket.total_stake == Decimal("90.00")
+        assert ticket.expected_profit == Decimal("10.00")
+        assert ticket.expected_edge_bps == Decimal("1111")
+
         orders = await repo.list_paper_orders(session, "default")
         assert orders[0]["ticket_id"] == "tkt-1"
+
         settlements = await repo.list_paper_settlements(session)
         assert settlements[0]["outcome_id"] == "k-yes"
         assert settlements[0]["resolved_value"] == Decimal("1")
@@ -83,6 +93,11 @@ async def test_missed_ticket_has_null_economics():
             status="missed",
             rejection_reason="edge_no_longer_available",
         )
+
     async with session_scope() as session:
-        rows = await repo.list_paper_settlements(session)
-        assert rows == []
+        ticket = await session.get(m.PaperTicket, "tkt-miss")
+        assert ticket.status == "missed"
+        assert ticket.rejection_reason == "edge_no_longer_available"
+        assert ticket.total_stake is None
+        assert ticket.expected_profit is None
+        assert ticket.expected_edge_bps is None
