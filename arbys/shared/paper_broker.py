@@ -212,6 +212,7 @@ class PaperExecutionAdapter(ExecutionAdapter):
         is_buy: bool,
         qty: Decimal,
         limit_price: Decimal,
+        ticket_id: str | None = None,
     ) -> tuple[Order, Fill | None, str | None]:
         """Decide and apply one order **without awaiting**.
 
@@ -233,6 +234,7 @@ class PaperExecutionAdapter(ExecutionAdapter):
                 qty=qty,
                 limit_price=limit_price,
                 status=OrderStatus.REJECTED,
+                ticket_id=ticket_id,
             )
             self._orders[order_id] = order
             return order, None, reason
@@ -265,6 +267,7 @@ class PaperExecutionAdapter(ExecutionAdapter):
             qty=qty,
             limit_price=limit_price,
             status=OrderStatus.FILLED,
+            ticket_id=ticket_id,
         )
         fill = Fill(order_id=order_id, qty=qty, price=px, fee=fee)
         self._orders[order_id] = order
@@ -336,6 +339,7 @@ class PaperExecutionAdapter(ExecutionAdapter):
         is_buy: bool,
         qty: Decimal,
         limit_price: Decimal,
+        ticket_id: str | None = None,
     ) -> Order:
         order, fill, reason = self.apply_fill(
             account_id=account_id,
@@ -343,6 +347,7 @@ class PaperExecutionAdapter(ExecutionAdapter):
             is_buy=is_buy,
             qty=qty,
             limit_price=limit_price,
+            ticket_id=ticket_id,
         )
         await self.emit_order_events(account_id, order, fill, reason)
         return order

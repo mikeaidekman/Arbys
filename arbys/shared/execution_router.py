@@ -94,6 +94,7 @@ class ExecutionRouter:
                 is_buy=leg.is_buy,
                 qty=leg.qty,
                 limit_price=leg.limit_price,
+                ticket_id=intent.ticket_id,
             )
             if order.status != OrderStatus.FILLED:
                 adapter.forget_order(order.id)
@@ -130,6 +131,7 @@ class ExecutionRouter:
                 is_buy=leg.is_buy,
                 qty=leg.qty,
                 limit_price=leg.limit_price,
+                ticket_id=intent.ticket_id,
             )
             orders.append(order)
             if order.status != OrderStatus.FILLED:

@@ -39,6 +39,9 @@ class Order:
     qty: Decimal
     limit_price: Decimal
     status: OrderStatus
+    # Groups the legs of one arb ticket. None for orders placed outside a
+    # ticket, and for every row written before migration 0006.
+    ticket_id: str | None = None
 
 
 @dataclass(frozen=True)
@@ -56,6 +59,7 @@ class ExecutionIntent:
     event_group_id: str
     account_id: str
     legs: tuple[IntentLeg, ...]
+    ticket_id: str | None = None
 
 
 @dataclass(frozen=True)

@@ -382,3 +382,50 @@ def test_known_empty_still_reports_no_liquidity():
         qty=Decimal("1"), limit_price=Decimal("0.50"),
     )
     assert reason == "no_liquidity"
+
+
+def test_apply_fill_stamps_ticket_id_on_the_order():
+    """The sink reads ticket_id off the Order, so it must survive apply_fill."""
+    book = QuoteBook()
+    book.upsert(
+        Quote(
+            outcome_id="k-yes",
+            bid=Decimal("0.39"),
+            ask=Decimal("0.40"),
+        )
+    )
+    broker = PaperExecutionAdapter(
+        venue_id="kalshi", quotebook=book, fee_model=KalshiFeeModel()
+    )
+    broker.deposit("acct", Decimal("100"))
+    order, fill, reason = broker.apply_fill(
+        account_id="acct",
+        outcome_id="k-yes",
+        is_buy=True,
+        qty=Decimal("10"),
+        limit_price=Decimal("0.40"),
+        ticket_id="tkt-42",
+    )
+    assert reason is None
+    assert fill is not None
+    assert order.ticket_id == "tkt-42"
+
+
+def test_rejected_order_also_carries_the_ticket_id():
+    """A rejected leg must be attributable to its ticket, or the audit log
+    cannot show why a ticket failed."""
+    book = QuoteBook()
+    broker = PaperExecutionAdapter(
+        venue_id="kalshi", quotebook=book, fee_model=KalshiFeeModel()
+    )
+    order, fill, reason = broker.apply_fill(
+        account_id="acct",
+        outcome_id="missing",
+        is_buy=True,
+        qty=Decimal("10"),
+        limit_price=Decimal("0.40"),
+        ticket_id="tkt-43",
+    )
+    assert reason == "no_quote"
+    assert fill is None
+    assert order.ticket_id == "tkt-43"

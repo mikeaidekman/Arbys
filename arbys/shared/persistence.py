@@ -28,6 +28,7 @@ class DbPaperPersistenceSink:
                 limit_price=order.limit_price,
                 status=order.status.value if isinstance(order.status, OrderStatus) else str(order.status),
                 rejection_reason=rejection_reason,
+                ticket_id=order.ticket_id,
             )
 
     async def on_fill(self, order: Order, fill: Fill) -> None:
@@ -85,6 +86,7 @@ class AccountScopedSink:
                 limit_price=order.limit_price,
                 status=order.status.value if isinstance(order.status, OrderStatus) else str(order.status),
                 rejection_reason=rejection_reason,
+                ticket_id=order.ticket_id,
             )
 
     async def on_fill(self, order: Order, fill: Fill) -> None:
