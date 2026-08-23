@@ -86,7 +86,14 @@ class ExecutionAdapter(ABC):
 
     @abstractmethod
     async def place_order(
-        self, *, account_id: str, outcome_id: str, is_buy: bool, qty: Decimal, limit_price: Decimal
+        self,
+        *,
+        account_id: str,
+        outcome_id: str,
+        is_buy: bool,
+        qty: Decimal,
+        limit_price: Decimal,
+        ticket_id: str | None = None,
     ) -> Order: ...
 
     @abstractmethod
