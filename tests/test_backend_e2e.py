@@ -494,3 +494,149 @@ def test_monitored_net_fields_null_without_quotes():
         assert group["best_pair_yes_outcome_id"] is None
         assert group["best_pair_no_outcome_id"] is None
 
+
+
+def _register_four_leg_group(client, group_id: str, quotes: list[tuple[str, str, str, str]]):
+    """Register a 4-leg (Kalshi YES/NO + Polymarket US LONG/SHORT) group.
+
+    Four legs give four (yes, no) combinations, including the two same-venue
+    ones -- which is what makes the ranking in `/monitored` non-trivial.
+    """
+    prefix = group_id
+    legs = [
+        {"outcome_id": f"{prefix}:k:YES", "venue_id": "kalshi", "is_yes_side": True},
+        {"outcome_id": f"{prefix}:k:NO", "venue_id": "kalshi", "is_yes_side": False},
+        {"outcome_id": f"{prefix}:p:LONG", "venue_id": "polymarket_us", "is_yes_side": True},
+        {"outcome_id": f"{prefix}:p:SHORT", "venue_id": "polymarket_us", "is_yes_side": False},
+    ]
+    r = client.post(
+        "/event-groups",
+        json={"id": group_id, "title": "A vs B", "legs": legs},
+    )
+    assert r.status_code == 201
+    for suffix, bid, ask, size in quotes:
+        r = client.post(
+            "/quotes",
+            json={
+                "outcome_id": f"{prefix}:{suffix}",
+                "bid": bid,
+                "ask": ask,
+                "ask_size": size,
+            },
+        )
+        assert r.status_code == 204
+    r = client.get("/monitored")
+    assert r.status_code == 200
+    return next(g for g in r.json() if g["id"] == group_id)
+
+
+def test_monitored_all_negative_pairs_rank_by_price_not_thinnest_book():
+    """With every pair net-negative, the best pair is the best *priced* one.
+
+    That is the live-market regime, not an edge case: 0 of 175 monitored rows
+    were net-positive when this was measured. Ranking by net_edge * qty
+    inverts there -- the product is negative, so its maximum is the *thinnest*
+    book. Arithmetic for these four quotes (Kalshi 0.07*p*(1-p), Polymarket US
+    0.06*p*(1-p), $200 ticket cap, 0.01 tick):
+
+        k:YES + k:NO     edge -0.053292  qty   3.00  profit  -0.1599  <- old
+        k:YES + p:SHORT  edge -0.031200  qty 193.94  profit  -6.0509  <- new
+        p:LONG + p:SHORT edge -0.079250  qty   3.00  profit  -0.2378
+        p:LONG + k:NO    edge -0.101342  qty   3.00  profit  -0.3040
+
+    Maximising profit picked the 3-deep same-venue pair priced 2.2c worse.
+    """
+    with TestClient(create_app()) as client:
+        group = _register_four_leg_group(
+            client,
+            "eg-neg",
+            [
+                ("k:YES", "0.38", "0.40", "5000"),
+                ("k:NO", "0.60", "0.62", "3"),
+                ("p:LONG", "0.43", "0.45", "3"),
+                ("p:SHORT", "0.58", "0.60", "5000"),
+            ],
+        )
+
+        assert Decimal(group["net_edge"]) < 0
+        assert group["best_pair_yes_outcome_id"] == "eg-neg:k:YES"
+        assert group["best_pair_no_outcome_id"] == "eg-neg:p:SHORT"
+        # The best price of the four, not the least-negative product.
+        assert Decimal(group["net_edge"]) == Decimal("-0.031200")
+        # Depth of the pair that was chosen, capped by the $200 ticket budget
+        # -- decisively not the 3-contract book the old ranking preferred.
+        assert Decimal(group["max_tradeable_qty"]) == Decimal("193.94")
+        assert Decimal(group["net_max_profit"]) == (
+            Decimal(group["net_edge"]) * Decimal(group["max_tradeable_qty"])
+        )
+
+
+def test_monitored_known_empty_pair_never_outranks_real_depth():
+    """A qty == 0 pair must lose to any pair with real depth.
+
+    Reachable in production: a one-sided book keeps its live side and
+    synthesises the missing side at size 0 (see CLAUDE.md), so `ask_size = 0`
+    here is a real shape, not a contrivance. Under net_edge * qty such a pair
+    scores exactly 0 and therefore beats every genuinely negative pair, and
+    the row then renders "no size" while another pair has 189 contracts.
+
+    p:SHORT is deliberately the *best-priced* leg, so pure price ranking would
+    still pick it -- the known-empty demotion is what has to save this.
+
+        k:YES + p:SHORT  edge -0.021314  qty      0  profit  0.0000  <- old
+        k:YES + k:NO     edge -0.053292  qty 189.88  profit -10.119  <- new
+        p:LONG + p:SHORT edge -0.069364  qty      0  profit  0.0000
+        p:LONG + k:NO    edge -0.101342  qty 181.59  profit -18.403
+    """
+    with TestClient(create_app()) as client:
+        group = _register_four_leg_group(
+            client,
+            "eg-zero",
+            [
+                ("k:YES", "0.38", "0.40", "5000"),
+                ("k:NO", "0.60", "0.62", "5000"),
+                ("p:LONG", "0.43", "0.45", "5000"),
+                ("p:SHORT", "0.57", "0.59", "0"),
+            ],
+        )
+
+        assert group["best_pair_no_outcome_id"] != "eg-zero:p:SHORT"
+        assert group["best_pair_yes_outcome_id"] == "eg-zero:k:YES"
+        assert group["best_pair_no_outcome_id"] == "eg-zero:k:NO"
+        assert Decimal(group["max_tradeable_qty"]) > 0
+        assert Decimal(group["max_tradeable_qty"]) == Decimal("189.88")
+        assert Decimal(group["net_edge"]) == Decimal("-0.053292")
+
+
+def test_monitored_positive_pairs_still_rank_by_absolute_profit():
+    """When a pair clears fees, ranking stays net_edge * qty.
+
+    This is the invariant the fix must not break: `detect_cross_venue_two_leg`
+    is depth-scaled, so a deep 1.2c pair beats a 2-contract 12.2c pair there,
+    and the frontend joins a displayed pair to a published opportunity by leg
+    outcome_id. Naming the fatter *per-contract* edge instead would leave a
+    live arb's Fill button disabled.
+
+        k:YES + p:SHORT  edge 0.011836  qty 202.39  profit 2.3955  <- chosen
+        p:LONG + k:NO    edge 0.121950  qty   2.00  profit 0.2439  (best price)
+        k:YES + k:NO     edge 0.068500  qty   2.00  profit 0.1370
+        p:LONG + p:SHORT edge 0.065286  qty   2.00  profit 0.1306
+    """
+    with TestClient(create_app()) as client:
+        group = _register_four_leg_group(
+            client,
+            "eg-pos",
+            [
+                ("k:YES", "0.28", "0.30", "5000"),
+                ("k:NO", "0.58", "0.60", "2"),
+                ("p:LONG", "0.23", "0.25", "2"),
+                ("p:SHORT", "0.64", "0.66", "5000"),
+            ],
+        )
+
+        assert group["best_pair_yes_outcome_id"] == "eg-pos:k:YES"
+        assert group["best_pair_no_outcome_id"] == "eg-pos:p:SHORT"
+        # The thinnest edge of the four, chosen on depth.
+        assert Decimal(group["net_edge"]) == Decimal("0.011836")
+        assert Decimal(group["max_tradeable_qty"]) == Decimal("202.39")
+        assert Decimal(group["net_max_profit"]) == Decimal("2.39548804")

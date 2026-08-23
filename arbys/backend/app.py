@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from contextlib import asynccontextmanager
 from decimal import Decimal
+from typing import NamedTuple
 
 from dotenv import load_dotenv
 from fastapi import FastAPI, HTTPException, WebSocket, WebSocketDisconnect
@@ -35,6 +36,54 @@ from .schemas import (  # noqa: E402
     QuoteIn,
 )
 from .state import get_state, max_outcome_qty, max_ticket_stake, reset_state  # noqa: E402
+
+
+class _PairCandidate(NamedTuple):
+    """One (yes leg, no leg) combination of an event group, priced and sized."""
+
+    net_edge: Decimal
+    """Guaranteed profit per contract after fees. May be negative."""
+    qty: Decimal
+    """Contracts tradeable at those prices. 0 means a leg is known empty."""
+    unit_cost: Decimal
+    """All-in cost of one contract across both legs (asks plus per-unit fees)."""
+    yes_outcome_id: str
+    no_outcome_id: str
+
+
+def _rank_pairs(candidates: list[_PairCandidate]) -> _PairCandidate | None:
+    """Pick the pair /monitored should describe. None when there are no pairs.
+
+    The objective flips with the sign of the edge, so there are two regimes.
+
+    *Some pair clears fees.* Rank by ``net_edge * qty`` -- net absolute profit
+    -- among pairs that could actually be filled. That is exactly what
+    ``detect_cross_venue_two_leg`` does: it drops any pair with
+    ``net_edge <= 0`` or ``qty <= 0`` before sizing, so it only ever ranks
+    positive, tradeable pairs. Matching it is load-bearing, because the
+    frontend joins a displayed pair to a published opportunity by leg
+    outcome_id -- naming a different pair leaves a live arb's Fill button
+    disabled. A deep 1c pair beating a thin 10c pair is intended here.
+
+    *No pair clears fees.* This is the normal case near a coin flip (measured
+    2026-08-22: 0 of 175 live rows were net-positive). Maximising
+    ``net_edge * qty`` is *backwards* here -- every product is negative, so
+    the maximum is the thinnest book rather than the best price, and a pair
+    with ``qty == 0`` scores exactly 0 and so outranks every real pair. That
+    is reachable in production: a one-sided book keeps its live side with the
+    missing side synthesised at size 0, so such a pair would win outright and
+    the row would render "no size" while another pair had real depth. Rank by
+    ``net_edge`` per contract instead -- the best-priced pair -- keeping a
+    known-empty pair behind any pair with real depth. The engine publishes
+    nothing in this regime, so there is no opportunity to disagree with, and
+    the row's job is just to state its position honestly.
+    """
+    fillable = [c for c in candidates if c.net_edge > 0 and c.qty > 0]
+    if fillable:
+        return max(fillable, key=lambda c: c.net_edge * c.qty)
+    if not candidates:
+        return None
+    return max(candidates, key=lambda c: (c.qty > 0, c.net_edge))
 
 
 def create_app() -> FastAPI:
@@ -215,24 +264,11 @@ def create_app() -> FastAPI:
                 edge = Decimal("1") - (best_yes_ask + best_no_ask)
                 has_arb = edge > 0
 
-            # The best *tradeable pair*, ranked by highest net_edge * qty (net
-            # absolute profit) -- the same objective detect_cross_venue_two_leg
-            # uses to pick its winning pair, since that detector is now
-            # depth-scaled and a deep 1c pair can beat a thin 10c pair there.
-            # Ranking by cheapest unit cost instead could name a different pair
-            # for the same group, and the frontend matches a displayed pair to
-            # a published opportunity by leg outcome_id -- a mismatch leaves a
-            # live arb's Fill button disabled. best_yes_ask/best_no_ask above
-            # are independently cheapest per side and can both come from the
-            # same venue, so they cannot be reused to derive this pair; every
+            # The best *tradeable pair*. best_yes_ask/best_no_ask above are
+            # independently cheapest per side and can both come from the same
+            # venue, so they cannot be reused to derive this pair; every
             # (yes, no) combination is evaluated explicitly instead.
-            net_edge: Decimal | None = None
-            max_qty: Decimal | None = None
-            net_max_profit: Decimal | None = None
-            capital_required: Decimal | None = None
-            best_pair_yes_id: str | None = None
-            best_pair_no_id: str | None = None
-            best_net_profit: Decimal | None = None
+            candidates: list[_PairCandidate] = []
             for y in (leg for leg in g.legs if leg.is_yes_side):
                 yq = quoted.get(y.outcome_id)
                 y_fm = s.fees.get(y.venue_id)
@@ -245,26 +281,35 @@ def create_app() -> FastAPI:
                         continue
                     y_unit = leg_unit_cost(yq.ask, y_fm, is_buy=True)
                     n_unit = leg_unit_cost(nq.ask, n_fm, is_buy=True)
-                    pair_edge = net_edge_per_contract([y_unit, n_unit])
-                    qty = tradeable_qty(
-                        unit_cost=y_unit + n_unit,
-                        depths=[yq.ask_size, nq.ask_size],
-                        max_stake=max_ticket_stake(),
-                        tick=DEFAULT_QTY_TICK,
+                    candidates.append(
+                        _PairCandidate(
+                            net_edge=net_edge_per_contract([y_unit, n_unit]),
+                            qty=tradeable_qty(
+                                unit_cost=y_unit + n_unit,
+                                depths=[yq.ask_size, nq.ask_size],
+                                max_stake=max_ticket_stake(),
+                                tick=DEFAULT_QTY_TICK,
+                            ),
+                            unit_cost=y_unit + n_unit,
+                            yes_outcome_id=y.outcome_id,
+                            no_outcome_id=n.outcome_id,
+                        )
                     )
-                    profit = pair_edge * qty
-                    # Keep the best candidate even when every pair is negative
-                    # after fees -- that is the normal case near a coin flip,
-                    # and the row still needs to state its position.
-                    if best_net_profit is not None and profit <= best_net_profit:
-                        continue
-                    best_net_profit = profit
-                    net_edge = pair_edge
-                    max_qty = qty
-                    net_max_profit = profit
-                    capital_required = (y_unit + n_unit) * qty
-                    best_pair_yes_id = y.outcome_id
-                    best_pair_no_id = n.outcome_id
+
+            best = _rank_pairs(candidates)
+            net_edge: Decimal | None = None
+            max_qty: Decimal | None = None
+            net_max_profit: Decimal | None = None
+            capital_required: Decimal | None = None
+            best_pair_yes_id: str | None = None
+            best_pair_no_id: str | None = None
+            if best is not None:
+                net_edge = best.net_edge
+                max_qty = best.qty
+                net_max_profit = best.net_edge * best.qty
+                capital_required = best.unit_cost * best.qty
+                best_pair_yes_id = best.yes_outcome_id
+                best_pair_no_id = best.no_outcome_id
 
             out.append(
                 MonitoredGroupOut(
