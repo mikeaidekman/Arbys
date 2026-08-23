@@ -22,7 +22,7 @@ Run everything from the repo root with the venv Python — `venv\Scripts\python.
 — rather than a bare `python`.
 
 ```powershell
-venv\Scripts\python.exe -m pytest -q            # 203 tests, must stay green
+venv\Scripts\python.exe -m pytest -q            # 235 tests, must stay green
 venv\Scripts\python.exe -m ruff check .         # must stay clean
 venv\Scripts\python.exe -m mypy arbys           # see caveat below — NOT clean today
 ```
@@ -139,6 +139,16 @@ Layers, strictly inward-depending:
 - `arbys/ingest/` — async services: quote `worker`, `engine_runtime` (arb
   detection, triggered only on affected event groups), `pnl_service`,
   `auto_settle_service`.
+
+  `engine_runtime` runs **two** detectors per evaluation:
+  `detect_cross_venue_two_leg` across venues, and `detect_complementary_set`
+  once per venue. Every group carries 2 legs per venue (`:YES`/`:NO`,
+  `:LONG`/`:SHORT`), so the complementary detector always has a candidate set —
+  meaning **intra-venue arbs are already detected**. A Kalshi book crossed at
+  `YES 0.47 + NO 0.52 = 0.99` was observed on 2026-08-22 (1 of 245 groups); it
+  produced no opportunity only because fees put it at 1.0249. Both detectors
+  are now depth-aware and share the same tick handling (see **Sizing has a
+  tick, and it isn't 1** below).
 - `arbys/backend/` — FastAPI app + `AppState`. `state.py` is the wiring hub:
   fee registry, adapter factories, broker construction, bootstrap/hydration.
 - `arbys/db/` — SQLAlchemy models, repos, Alembic migrations.
@@ -207,6 +217,14 @@ Feature flags in `.env` (copy from `.env.example`; `.env` is gitignored):
 - `ARBYS_MAX_OUTCOME_QTY` — max open units per outcome per paper account,
   default 500, `0` disables. An edge stays published while it exists, so
   without this repeat executions stack without bound.
+- `ARBYS_MAX_TICKET_STAKE` — max total capital in one arb ticket, default 200,
+  `0` disables. Sizing is depth-driven and one Polymarket US level has shown
+  419,882 contracts resting, so without this a single ticket would consume the
+  book. **This does not replace `ARBYS_MAX_OUTCOME_QTY`** — that caps
+  cumulative open units per outcome per account at execute time, this caps one
+  ticket at detection time. At ~$1.00 all-in per contract pair, $200 is ~198
+  contracts, so roughly 2.5 tickets on one outcome before the position cap
+  binds. Both apply.
 - `ARBYS_POLYMARKET_US_POLL_S` — seconds between `/bbo` sweeps, default 5,
   clamped to a 1s floor. Polymarket US has no WS path yet (see **Venues**).
 - `KALSHI_API_KEY_ID` + `KALSHI_PRIVATE_KEY_PATH` — when both set, the
@@ -281,6 +299,47 @@ Polymarket US uses banker's rounding, and nothing in our fee path rounds at
 all — so modelled fees are slightly low and marginal edges look slightly
 better than they are. Polymarket US's maker rebate (-0.0125) is not modelled
 either, but the paper broker always takes, so it would never apply.
+
+`/monitored` gained six pair-level fields: `net_edge`, `max_tradeable_qty`,
+`net_max_profit`, `capital_required`, `best_pair_yes_outcome_id`,
+`best_pair_no_outcome_id`. `best_yes_ask`/`best_no_ask` above are each the
+cheapest ask **independently** across venues — they can both come from the
+same venue, in which case they name no single tradeable pair. The six new
+fields instead evaluate every real (yes, no) leg combination and report the
+best one, so they can actually be filled together. `net_edge` is frequently
+**negative**, and that is correct and must be displayed as such, not
+suppressed: measured 2026-08-22, 12 groups had a gross-positive pair
+(`arb_edge > 0`) and **0** had a net-positive one. A negative `net_edge` on
+the best pair is the normal state near a coin flip, not a bug in the new
+fields.
+
+**The ranking objective is shared between the engine and `/monitored` on
+purpose.** Both `detect_cross_venue_two_leg` and `/monitored`'s pair search
+rank candidate (yes, no) pairs by highest absolute net profit
+(`net_edge × qty`), which is depth-scaled — a deep 1¢ pair beats a thin 10¢
+one. They have to stay in agreement: the frontend matches the pair it
+displays to a published opportunity by leg `outcome_id`, so if the two ever
+picked different pairs for the same group, the Fill button would sit disabled
+at "waiting" on a row that has a live, executable arb underneath it.
+
+### Sizing has a tick, and it isn't 1
+
+Budget-bound sizing (`tradeable_qty` in `arbys/shared/qty.py`, called from
+both detectors and from `/monitored`) is a division: stake budget divided by
+per-contract cost. Left unrounded that produces numbers like
+`214.615302071037664985513467` — not an order size any venue would accept,
+and more decimal places than the DB `qty` column (12) can round-trip, so the
+value would not even survive a save/reload. `DEFAULT_QTY_TICK = Decimal("0.01")`
+in `arbys/shared/arb_engine.py` floors every derived quantity to that
+granularity; `tick_by_venue` overrides it per venue where a finer or coarser
+one is known.
+
+**0.01 is deliberate, not a stand-in for "whole contracts, fix later."**
+Measured 2026-08-23, 104 of 404 Kalshi legs and 225 of 336 Polymarket US legs
+report a *fractional* `ask_size` — e.g. Kalshi `1865.53`, Polymarket US
+`2616.69`. Contracts are not whole units on these venues. Rounding the tick up
+to `1` would silently discard real, currently-tradeable size, not just tidy up
+formatting.
 
 ## Venues
 
@@ -414,6 +473,29 @@ row to its owning broker only, and `test_open_positions_hydrate_once_per_venue`
 in [tests/test_backend_e2e.py](tests/test_backend_e2e.py) covers the restart
 path. **Keep `venue_id` in that key** — dropping it silently reintroduces the
 inflation, which no fresh-process test can catch.
+
+Also previously listed here and now fixed (2026-08-22/23), all three found
+while building the dense opportunity table:
+
+**Sizing ignored book depth.** `arb_engine` set `qty = target_payoff` with
+`DEFAULT_TARGET_PAYOFF = 100`, so every opportunity was sized at a flat 100
+contracts whether the book held 3 or 419,882. Sizing is now
+`min(depth, stake_budget)` via `shared/qty.py:tradeable_qty`.
+
+**The paper broker filled more than was resting.** `_preview_fill` blocked
+only an explicit size `0` and never compared `qty` to `resting`, so an order
+for 100 filled completely against a book with 3 available. It now returns
+`insufficient_liquidity`, distinct from `no_liquidity`. **Reject, not
+partial-fill** — a partial on one leg of a two-leg arb leaves an unhedged
+position, the one outcome the design exists to avoid.
+
+**The detection gate was dimensionally wrong.** `detect_cross_venue_two_leg`
+compared a per-contract cost against a total payoff
+(`total_unit_cost >= target_payoff` with `target_payoff = 100`), so it never
+fired; the downstream `profit <= 0` check happened to reduce to the correct
+test. Never a live defect, but it broke the moment `qty` stopped equalling
+payoff. The gate is now an explicit per-contract
+`net_edge_per_contract(...) <= 0`.
 
 ## Repo facts
 
