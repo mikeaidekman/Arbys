@@ -451,6 +451,116 @@ async def list_pnl_snapshots(
     ]
 
 
+async def list_paper_tickets(
+    session: AsyncSession, account_id: str, *, limit: int = 200,
+    status: str | None = None, source: str | None = None,
+) -> list[dict]:
+    """Ticket-level history, newest first, with fills joined and scoring.
+
+    `realized_profit` is computed here rather than stored, from the ticket's
+    **own** fills. Broker state cannot answer this: settlement uses an
+    `avg_price` blended across every ticket on that outcome, and
+    ARBYS_MAX_OUTCOME_QTY permits roughly 2.5 tickets on one.
+    """
+    stmt = select(m.PaperTicket).where(m.PaperTicket.account_id == account_id)
+    if status is not None:
+        stmt = stmt.where(m.PaperTicket.status == status)
+    if source is not None:
+        stmt = stmt.where(m.PaperTicket.source == source)
+    tickets = (
+        await session.execute(
+            stmt.order_by(m.PaperTicket.submitted_at.desc()).limit(limit)
+        )
+    ).scalars().all()
+    if not tickets:
+        return []
+
+    ticket_ids = [t.id for t in tickets]
+    orders = (
+        await session.execute(
+            select(m.PaperOrder).where(m.PaperOrder.ticket_id.in_(ticket_ids))
+        )
+    ).scalars().all()
+
+    fills_by_order: dict[str, tuple[Decimal, Decimal]] = {}
+    if orders:
+        fill_rows = (
+            await session.execute(
+                select(m.PaperFill).where(
+                    m.PaperFill.order_id.in_([o.id for o in orders])
+                )
+            )
+        ).scalars().all()
+        for f in fill_rows:
+            _price, fee = fills_by_order.get(f.order_id, (Decimal("0"), Decimal("0")))
+            fills_by_order[f.order_id] = (f.price, fee + f.fee)
+
+    settled = {
+        row["outcome_id"]: row["resolved_value"]
+        for row in await list_paper_settlements(session)
+    }
+
+    legs_by_ticket: dict[str, list[dict]] = {tid: [] for tid in ticket_ids}
+    for o in orders:
+        fill_price, fee = fills_by_order.get(o.id, (None, Decimal("0")))
+        legs_by_ticket[o.ticket_id].append(
+            {
+                "venue_id": o.venue_id,
+                "outcome_id": o.outcome_id,
+                "is_buy": o.is_buy,
+                "qty": o.qty,
+                "limit_price": o.limit_price,
+                "fill_price": fill_price,
+                "fee": fee,
+                "status": o.status,
+                "rejection_reason": o.rejection_reason,
+            }
+        )
+
+    out: list[dict] = []
+    for t in tickets:
+        legs = legs_by_ticket[t.id]
+        out.append(
+            {
+                "id": t.id,
+                "event_group_id": t.event_group_id,
+                "title_snapshot": t.title_snapshot,
+                "source": t.source,
+                "status": t.status,
+                "rejection_reason": t.rejection_reason,
+                "total_stake": t.total_stake,
+                "expected_profit": t.expected_profit,
+                "expected_edge_bps": t.expected_edge_bps,
+                "submitted_at": t.submitted_at,
+                "realized_profit": _score_ticket(legs, settled),
+                "legs": legs,
+            }
+        )
+    return out
+
+
+def _score_ticket(
+    legs: list[dict], settled: dict[str, Decimal]
+) -> Decimal | None:
+    """Realized profit, or None while any leg is unsettled.
+
+    A sold leg inverts: the direction factor keeps the sign right even though
+    every detector currently emits buys only.
+    """
+    if not legs:
+        return None
+    total = Decimal("0")
+    for leg in legs:
+        if leg["fill_price"] is None:
+            return None
+        resolved = settled.get(leg["outcome_id"])
+        if resolved is None:
+            return None
+        direction = Decimal("1") if leg["is_buy"] else Decimal("-1")
+        total += direction * (resolved - leg["fill_price"]) * leg["qty"] - leg["fee"]
+    return total
+
+
 __all__ = [
     "delete_event_group",
     "ensure_outcome_placeholder",
@@ -466,6 +576,7 @@ __all__ = [
     "list_event_groups",
     "list_paper_orders",
     "list_paper_settlements",
+    "list_paper_tickets",
     "list_pnl_snapshots",
     "list_recent_opportunities",
     "upsert_event_group",
