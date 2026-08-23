@@ -17,7 +17,7 @@ from dataclasses import replace
 from decimal import Decimal
 
 from .arb_engine import ArbLeg, ArbOpportunity
-from .qty import LEGACY_UNBOUNDED_QTY, _round_down_tick, tradeable_qty  # noqa: F401
+from .qty import _round_down_tick
 
 
 def size_to_bankroll(
