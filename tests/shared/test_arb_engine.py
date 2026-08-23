@@ -2,6 +2,7 @@ from dataclasses import dataclass
 from decimal import Decimal
 
 from arbys.shared.arb_engine import (
+    DEFAULT_QTY_TICK,
     detect_complementary_set,
     detect_cross_venue_two_leg,
 )
@@ -262,3 +263,42 @@ def test_no_edge_is_rejected_regardless_of_size():
     assert detect_cross_venue_two_leg(
         _two_venue_group(), quotes, _fees(), max_ticket_stake=Decimal("200")
     ) is None
+
+
+def test_budget_sized_qty_is_floored_to_the_default_tick():
+    """A division must not publish a size no venue would accept.
+
+    Both venues quote resting size to two decimals, so 0.01 is the floor
+    granularity; it also keeps the value inside the qty column's 12 decimal
+    places, so a stored ticket reloads as the same number.
+    """
+    quotes = {
+        "y": Quote(outcome_id="y", bid=Decimal("0.40"), ask=Decimal("0.45")),
+        "n": Quote(outcome_id="n", bid=Decimal("0.45"), ask=Decimal("0.50")),
+    }
+    opp = detect_cross_venue_two_leg(
+        _two_venue_group(), quotes, _fees(), max_ticket_stake=Decimal("200")
+    )
+    assert opp is not None
+    # 200 / 0.95 = 210.526315789..., floored to the 0.01 tick.
+    assert all(leg.qty == Decimal("210.52") for leg in opp.legs)
+    assert all(
+        leg.qty == leg.qty.quantize(DEFAULT_QTY_TICK) for leg in opp.legs
+    )
+
+
+def test_tick_by_venue_overrides_the_default_tick():
+    quotes = {
+        "y": Quote(outcome_id="y", bid=Decimal("0.40"), ask=Decimal("0.45")),
+        "n": Quote(outcome_id="n", bid=Decimal("0.45"), ask=Decimal("0.50")),
+    }
+    opp = detect_cross_venue_two_leg(
+        _two_venue_group(),
+        quotes,
+        _fees(),
+        max_ticket_stake=Decimal("200"),
+        tick_by_venue={"v2": Decimal("1")},
+    )
+    assert opp is not None
+    # The coarser of the pair's ticks wins: whole contracts, not 210.52.
+    assert all(leg.qty == Decimal("210") for leg in opp.legs)

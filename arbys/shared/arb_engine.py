@@ -56,6 +56,17 @@ class ArbOpportunity:
     guaranteed_profit_bps: Decimal
 
 
+# Granularity a derived ticket size is floored to when the caller supplies no
+# per-venue tick. Budget-bound sizing is a division, so without a tick it
+# yields things like 214.615302071037664985513467 contracts — an order size no
+# venue would accept, and one the `qty` column (12 decimal places) cannot
+# round-trip. Measured 2026-08-22, both venues report resting size to two
+# decimals: Kalshi 1156.25 and 412.00, Polymarket US 2616.69 and 64.71. So 0.01
+# is the observed granularity — deliberately *not* whole contracts, because the
+# venues themselves quote fractional size.
+DEFAULT_QTY_TICK = Decimal("0.01")
+
+
 def leg_unit_cost(
     ask: Decimal,
     fee_model: FeeModel,
@@ -92,7 +103,9 @@ def detect_cross_venue_two_leg(
 
     The arb test is per-contract and size-independent: if the all-in cost of
     one contract on each side is under 1, the pair is an arb. Sizing is then a
-    separate step bounded by book depth and `max_ticket_stake`.
+    separate step bounded by book depth and `max_ticket_stake`, and floored to
+    `tick_by_venue`'s granularity for the legs' venues, or `DEFAULT_QTY_TICK`
+    where that says nothing.
     """
     tick_by_venue = tick_by_venue or {}
     yes_legs = [leg for leg in event_group.legs if leg.is_yes_side]
@@ -124,9 +137,11 @@ def detect_cross_venue_two_leg(
             if net_edge_per_contract([y_unit, n_unit]) <= 0:
                 continue
 
+            # Per-venue override wins; otherwise floor to the observed
+            # granularity so the ticket is an order size a venue would take.
             tick = max(
-                tick_by_venue.get(y.venue_id, Decimal("0")),
-                tick_by_venue.get(n.venue_id, Decimal("0")),
+                tick_by_venue.get(y.venue_id, DEFAULT_QTY_TICK),
+                tick_by_venue.get(n.venue_id, DEFAULT_QTY_TICK),
             )
             qty = tradeable_qty(
                 unit_cost=unit_cost,

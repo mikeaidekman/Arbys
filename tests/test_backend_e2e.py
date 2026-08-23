@@ -385,23 +385,11 @@ def test_open_positions_hydrate_once_per_venue(tmp_path):
         )
         assert r.status_code == 201
 
-        # Explicit depth pins the ticket at a whole 100 contracts. Budget-only
-        # sizing gives 214.615302071037664985513467..., and the qty column
-        # keeps 12 decimal places, so the reloaded value would differ from the
-        # in-memory one on rounding alone.
         assert client.post(
-            "/quotes",
-            json={
-                "outcome_id": "p-yes", "bid": "0.40", "ask": "0.40",
-                "ask_size": "100",
-            },
+            "/quotes", json={"outcome_id": "p-yes", "bid": "0.40", "ask": "0.40"}
         ).status_code == 204
         assert client.post(
-            "/quotes",
-            json={
-                "outcome_id": "k-no", "bid": "0.50", "ask": "0.50",
-                "ask_size": "100",
-            },
+            "/quotes", json={"outcome_id": "k-no", "bid": "0.50", "ask": "0.50"}
         ).status_code == 204
 
         assert client.post("/paper/execute", json={"opportunity_index": 0}).status_code == 200
