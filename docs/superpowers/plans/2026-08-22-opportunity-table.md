@@ -505,10 +505,9 @@ def _group() -> EventGroup:
 
 
 def _fees() -> FeeModelRegistry:
-    reg = FeeModelRegistry()
-    reg.register("v1", ZeroFeeModel())
-    reg.register("v2", ZeroFeeModel())
-    return reg
+    # FeeModelRegistry is just dict[str, FeeModel], and every fee model is a
+    # frozen dataclass whose first field is venue_id. There is no register().
+    return {"v1": ZeroFeeModel("v1"), "v2": ZeroFeeModel("v2")}
 
 
 def test_sizes_to_the_thinnest_leg():
