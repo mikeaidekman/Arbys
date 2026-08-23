@@ -39,6 +39,19 @@ export interface MonitoredGroup {
   arb_edge: string | null;
   has_arb: boolean;
   fully_quoted: boolean;
+  /** Net profit per contract after both legs' fees. Frequently NEGATIVE, and
+   *  that is correct and must be displayed — measured 2026-08-22, 12
+   *  gross-positive pairs and 0 net-positive. */
+  net_edge: string | null;
+  /** Tradeable size for the chosen pair, already capped by the ticket budget. */
+  max_tradeable_qty: string | null;
+  /** net_edge * max_tradeable_qty. */
+  net_max_profit: string | null;
+  /** Total stake to open that position. */
+  capital_required: string | null;
+  /** The pair the backend chose, by leg outcome_id. */
+  best_pair_yes_outcome_id: string | null;
+  best_pair_no_outcome_id: string | null;
 }
 
 export interface ArbLeg {
