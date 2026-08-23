@@ -71,6 +71,23 @@ class MonitoredGroupOut(BaseModel):
     arb_edge: Decimal | None  # 1 - (best_yes_ask + best_no_ask); positive = arb
     has_arb: bool
     fully_quoted: bool  # all legs have quotes
+    # Net-of-fee figures for the best tradeable YES+NO pair, ranked by highest
+    # net_edge * qty -- the same objective detect_cross_venue_two_leg uses to
+    # pick its winning pair. NOT cheapest unit cost, and NOT derived from
+    # best_yes_ask/best_no_ask above: those two are independently cheapest per
+    # side and can both come from the same venue, corresponding to no single
+    # tradeable pair. All six fields are None when no (yes, no) combination is
+    # fully quoted with a known fee model. net_edge may be negative -- that is
+    # normal near a coin flip and the row still needs to state its position.
+    net_edge: Decimal | None  # profit per contract, after both legs' fees
+    max_tradeable_qty: Decimal | None  # thinnest leg's depth, after stake cap
+    net_max_profit: Decimal | None  # net_edge * max_tradeable_qty
+    capital_required: Decimal | None  # total stake for max_tradeable_qty
+    # Which pair the four fields above describe. The frontend has no fee model
+    # of its own and cannot re-derive the ranking, so the backend names the
+    # pair explicitly -- match on leg outcome_id against a published opportunity.
+    best_pair_yes_outcome_id: str | None
+    best_pair_no_outcome_id: str | None
 
 
 class QuoteIn(BaseModel):

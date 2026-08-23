@@ -416,3 +416,81 @@ def test_open_positions_hydrate_once_per_venue(tmp_path):
     assert as_decimals(after["positions"]) == as_decimals(before["positions"])
     assert as_decimals(after["realized_pnl"]) == as_decimals(before["realized_pnl"])
 
+
+def test_monitored_reports_net_figures():
+    """/monitored's net fields describe the best *tradeable pair*, ranked by
+    highest net_edge * qty -- not the cheapest unit cost, and not derived from
+    best_yes_ask/best_no_ask (which can both come from the same venue).
+
+    Four legs give four (yes, no) combinations. K-Yes(0.32) + P-No(0.66) is
+    the pair with the least-negative net profit once fees and the p:SHORT
+    depth of 9 are applied -- see task-7-report.md for the full arithmetic.
+    """
+    with TestClient(create_app()) as client:
+        r = client.post(
+            "/event-groups",
+            json={
+                "id": "eg-net",
+                "title": "A vs B",
+                "legs": [
+                    {"outcome_id": "k:YES", "venue_id": "kalshi", "is_yes_side": True},
+                    {"outcome_id": "k:NO", "venue_id": "kalshi", "is_yes_side": False},
+                    {"outcome_id": "p:LONG", "venue_id": "polymarket_us", "is_yes_side": True},
+                    {"outcome_id": "p:SHORT", "venue_id": "polymarket_us", "is_yes_side": False},
+                ],
+            },
+        )
+        assert r.status_code == 201
+
+        for oid, bid, ask, size in [
+            ("k:YES", "0.30", "0.32", "412"),
+            ("k:NO", "0.66", "0.69", "1156"),
+            ("p:LONG", "0.33", "0.35", "2616"),
+            ("p:SHORT", "0.62", "0.66", "9"),
+        ]:
+            assert client.post(
+                "/quotes",
+                json={"outcome_id": oid, "bid": bid, "ask": ask, "ask_size": size},
+            ).status_code == 204
+
+        r = client.get("/monitored")
+        assert r.status_code == 200
+        group = next(g for g in r.json() if g["id"] == "eg-net")
+
+        # Best pair is K-Yes 0.32 + P-No 0.66 = 0.98 gross, negative after fees.
+        assert Decimal(group["net_edge"]) < 0
+        assert group["best_pair_yes_outcome_id"] == "k:YES"
+        assert group["best_pair_no_outcome_id"] == "p:SHORT"
+        # Thinnest leg of that pair is p:SHORT at 9.
+        assert Decimal(group["max_tradeable_qty"]) == Decimal("9")
+        assert Decimal(group["net_max_profit"]) == (
+            Decimal(group["net_edge"]) * Decimal("9")
+        )
+        assert Decimal(group["capital_required"]) > 0
+
+
+def test_monitored_net_fields_null_without_quotes():
+    with TestClient(create_app()) as client:
+        r = client.post(
+            "/event-groups",
+            json={
+                "id": "eg-empty",
+                "title": "C vs D",
+                "legs": [
+                    {"outcome_id": "k2:YES", "venue_id": "kalshi", "is_yes_side": True},
+                    {"outcome_id": "p2:SHORT", "venue_id": "polymarket_us", "is_yes_side": False},
+                ],
+            },
+        )
+        assert r.status_code == 201
+
+        r = client.get("/monitored")
+        assert r.status_code == 200
+        group = next(g for g in r.json() if g["id"] == "eg-empty")
+        assert group["net_edge"] is None
+        assert group["max_tradeable_qty"] is None
+        assert group["net_max_profit"] is None
+        assert group["capital_required"] is None
+        assert group["best_pair_yes_outcome_id"] is None
+        assert group["best_pair_no_outcome_id"] is None
+

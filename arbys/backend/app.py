@@ -15,7 +15,13 @@ load_dotenv()
 from ..adapters.base import ExecutionIntent, IntentLeg  # noqa: E402
 from ..db import repositories as repo  # noqa: E402
 from ..db.session import session_scope  # noqa: E402
+from ..shared.arb_engine import (  # noqa: E402
+    DEFAULT_QTY_TICK,
+    leg_unit_cost,
+    net_edge_per_contract,
+)
 from ..shared.execution_router import InsufficientLegsError  # noqa: E402
+from ..shared.qty import tradeable_qty  # noqa: E402
 from ..shared.types import EventGroup, EventGroupLeg, Quote  # noqa: E402
 from .schemas import (  # noqa: E402
     ArbLegOut,
@@ -28,7 +34,7 @@ from .schemas import (  # noqa: E402
     PaperAccountSummary,
     QuoteIn,
 )
-from .state import get_state, max_outcome_qty, reset_state  # noqa: E402
+from .state import get_state, max_outcome_qty, max_ticket_stake, reset_state  # noqa: E402
 
 
 def create_app() -> FastAPI:
@@ -168,10 +174,12 @@ def create_app() -> FastAPI:
             best_no_ask: Decimal | None = None
             best_no_venue: str | None = None
             all_quoted = True
+            quoted: dict[str, Quote | None] = {}
             for leg in g.legs:
                 # get() withholds stale quotes; get_with_age() still reports
                 # them so the leg can explain itself rather than just vanishing.
                 q = s.quotebook.get(leg.outcome_id)
+                quoted[leg.outcome_id] = q
                 aged = s.quotebook.get_with_age(leg.outcome_id)
                 age = aged[1] if aged is not None else None
                 stale = q is None and aged is not None
@@ -206,6 +214,58 @@ def create_app() -> FastAPI:
             if best_yes_ask is not None and best_no_ask is not None:
                 edge = Decimal("1") - (best_yes_ask + best_no_ask)
                 has_arb = edge > 0
+
+            # The best *tradeable pair*, ranked by highest net_edge * qty (net
+            # absolute profit) -- the same objective detect_cross_venue_two_leg
+            # uses to pick its winning pair, since that detector is now
+            # depth-scaled and a deep 1c pair can beat a thin 10c pair there.
+            # Ranking by cheapest unit cost instead could name a different pair
+            # for the same group, and the frontend matches a displayed pair to
+            # a published opportunity by leg outcome_id -- a mismatch leaves a
+            # live arb's Fill button disabled. best_yes_ask/best_no_ask above
+            # are independently cheapest per side and can both come from the
+            # same venue, so they cannot be reused to derive this pair; every
+            # (yes, no) combination is evaluated explicitly instead.
+            net_edge: Decimal | None = None
+            max_qty: Decimal | None = None
+            net_max_profit: Decimal | None = None
+            capital_required: Decimal | None = None
+            best_pair_yes_id: str | None = None
+            best_pair_no_id: str | None = None
+            best_net_profit: Decimal | None = None
+            for y in (leg for leg in g.legs if leg.is_yes_side):
+                yq = quoted.get(y.outcome_id)
+                y_fm = s.fees.get(y.venue_id)
+                if yq is None or y_fm is None:
+                    continue
+                for n in (leg for leg in g.legs if not leg.is_yes_side):
+                    nq = quoted.get(n.outcome_id)
+                    n_fm = s.fees.get(n.venue_id)
+                    if nq is None or n_fm is None:
+                        continue
+                    y_unit = leg_unit_cost(yq.ask, y_fm, is_buy=True)
+                    n_unit = leg_unit_cost(nq.ask, n_fm, is_buy=True)
+                    pair_edge = net_edge_per_contract([y_unit, n_unit])
+                    qty = tradeable_qty(
+                        unit_cost=y_unit + n_unit,
+                        depths=[yq.ask_size, nq.ask_size],
+                        max_stake=max_ticket_stake(),
+                        tick=DEFAULT_QTY_TICK,
+                    )
+                    profit = pair_edge * qty
+                    # Keep the best candidate even when every pair is negative
+                    # after fees -- that is the normal case near a coin flip,
+                    # and the row still needs to state its position.
+                    if best_net_profit is not None and profit <= best_net_profit:
+                        continue
+                    best_net_profit = profit
+                    net_edge = pair_edge
+                    max_qty = qty
+                    net_max_profit = profit
+                    capital_required = (y_unit + n_unit) * qty
+                    best_pair_yes_id = y.outcome_id
+                    best_pair_no_id = n.outcome_id
+
             out.append(
                 MonitoredGroupOut(
                     id=g.id,
@@ -219,6 +279,12 @@ def create_app() -> FastAPI:
                     arb_edge=edge,
                     has_arb=has_arb,
                     fully_quoted=all_quoted,
+                    net_edge=net_edge,
+                    max_tradeable_qty=max_qty,
+                    net_max_profit=net_max_profit,
+                    capital_required=capital_required,
+                    best_pair_yes_outcome_id=best_pair_yes_id,
+                    best_pair_no_outcome_id=best_pair_no_id,
                 )
             )
         out.sort(key=lambda m: (not m.has_arb, m.arb_edge is None, -(float(m.arb_edge) if m.arb_edge is not None else 0)))
