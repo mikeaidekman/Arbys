@@ -37,7 +37,7 @@ async def run_backtest(
     starting_balances: dict[str, Decimal] | None = None,
     execute: bool = False,
     account_id: str = "bt",
-    target_payoff: Decimal = Decimal("1"),
+    max_ticket_stake: Decimal | None = Decimal("200"),
 ) -> BacktestResult:
     # Replays feed quotes as fast as the loop runs, so wall-clock staleness is
     # meaningless here — disable it rather than expire the whole replay.
@@ -62,7 +62,7 @@ async def run_backtest(
         quotebook=book,
         fees=fees,
         on_opportunity=on_opp,
-        target_payoff=target_payoff,
+        max_ticket_stake=max_ticket_stake,
     )
     for group in event_groups:
         engine.register_group(group)

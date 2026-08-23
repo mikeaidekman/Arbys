@@ -234,6 +234,7 @@ class AppState:
             quotebook=self.quotebook,
             fees=self.fees,
             on_opportunities=self._set_group_opportunities,
+            max_ticket_stake=max_ticket_stake(),
         )
         self.pnl_service = PnlSnapshotService(
             brokers=self.paper_brokers,

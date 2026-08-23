@@ -9,9 +9,20 @@ from arbys.shared.quotebook import QuoteBook
 from arbys.shared.types import EventGroup, EventGroupLeg, Quote
 
 
-def _q(oid, ask, bid=None):
+def _q(oid, ask, bid=None, ask_size="10"):
+    """Quotes carry an explicit depth so ticket sizing is deterministic.
+
+    Sizing is now min(depth, budget / unit_cost); leaving depth unknown would
+    make every asserted qty a function of the default stake budget and the
+    price, which is not what these tests are about.
+    """
     bid_d = Decimal(bid) if bid else Decimal(ask)
-    return Quote(outcome_id=oid, bid=bid_d, ask=Decimal(ask))
+    return Quote(
+        outcome_id=oid,
+        bid=bid_d,
+        ask=Decimal(ask),
+        ask_size=Decimal(ask_size) if ask_size is not None else None,
+    )
 
 
 @pytest.mark.asyncio
@@ -23,7 +34,7 @@ async def test_engine_emits_opportunity_on_qualifying_quote_update():
         quotebook=book,
         fees=fees,
         on_opportunity=opps.append,
-        target_payoff=Decimal("1"),
+        max_ticket_stake=Decimal("200"),
     )
 
     engine.register_group(
@@ -42,11 +53,13 @@ async def test_engine_emits_opportunity_on_qualifying_quote_update():
     engine.on_quote(book.get("Y"))
     assert opps == []
 
-    # Second quote closes the arb (0.45 + 0.50 = 0.95).
+    # Second quote closes the arb (0.45 + 0.50 = 0.95 -> 5c/contract).
     book.upsert(_q("N", "0.50"))
     engine.on_quote(book.get("N"))
     assert len(opps) == 1
-    assert opps[0].guaranteed_profit == Decimal("0.05")
+    # 10 contracts (the thinner book's depth) * 5c
+    assert all(leg.qty == Decimal("10") for leg in opps[0].legs)
+    assert opps[0].guaranteed_profit == Decimal("0.50")
 
 
 def _two_leg_group():
@@ -75,7 +88,7 @@ async def test_opportunity_set_handler_reports_empty_when_edge_disappears():
         quotebook=book,
         fees=fees,
         on_opportunities=lambda gid, opps: sets.append((gid, len(opps))),
-        target_payoff=Decimal("1"),
+        max_ticket_stake=Decimal("200"),
     )
     engine.register_group(_two_leg_group())
 
@@ -100,7 +113,7 @@ async def test_evaluate_now_is_pure_and_reflects_current_quotes():
         quotebook=book,
         fees=fees,
         on_opportunity=fired.append,
-        target_payoff=Decimal("1"),
+        max_ticket_stake=Decimal("200"),
     )
     engine.register_group(_two_leg_group())
     book.upsert(_q("Y", "0.45"))
@@ -108,7 +121,8 @@ async def test_evaluate_now_is_pure_and_reflects_current_quotes():
 
     found = engine.evaluate_now("eg")
     assert len(found) == 1
-    assert found[0].guaranteed_profit == Decimal("0.05")
+    assert all(leg.qty == Decimal("10") for leg in found[0].legs)
+    assert found[0].guaranteed_profit == Decimal("0.50")  # 10 contracts * 5c
     # Pure: querying must not emit to handlers.
     assert fired == []
 

@@ -255,8 +255,13 @@ def test_repeat_fills_stop_at_the_position_cap(monkeypatch):
     monkeypatch.setenv("ARBYS_MAX_OUTCOME_QTY", "250")
     with TestClient(create_app()) as client:
         _register(client, "eg-cap", "c-yes", "c-no")
+        # 100 contracts resting on each ask, which is thinner than the stake
+        # budget allows, so every ticket is exactly 100 units.
         for oid, px in (("c-yes", "0.40"), ("c-no", "0.50")):
-            client.post("/quotes", json={"outcome_id": oid, "bid": px, "ask": px})
+            client.post(
+                "/quotes",
+                json={"outcome_id": oid, "bid": px, "ask": px, "ask_size": "100"},
+            )
 
         # Each ticket is 100 units, so the third would exceed a 250 cap.
         assert client.post(
@@ -284,8 +289,12 @@ def test_position_cap_can_be_disabled(monkeypatch):
     monkeypatch.setenv("ARBYS_MAX_OUTCOME_QTY", "0")
     with TestClient(create_app()) as client:
         _register(client, "eg-nocap", "n-yes", "n-no")
+        # Depth of 100 on each ask pins every ticket at 100 units.
         for oid, px in (("n-yes", "0.10"), ("n-no", "0.20")):
-            client.post("/quotes", json={"outcome_id": oid, "bid": px, "ask": px})
+            client.post(
+                "/quotes",
+                json={"outcome_id": oid, "bid": px, "ask": px, "ask_size": "100"},
+            )
         for _ in range(8):
             assert client.post(
                 "/paper/execute",
@@ -376,11 +385,23 @@ def test_open_positions_hydrate_once_per_venue(tmp_path):
         )
         assert r.status_code == 201
 
+        # Explicit depth pins the ticket at a whole 100 contracts. Budget-only
+        # sizing gives 214.615302071037664985513467..., and the qty column
+        # keeps 12 decimal places, so the reloaded value would differ from the
+        # in-memory one on rounding alone.
         assert client.post(
-            "/quotes", json={"outcome_id": "p-yes", "bid": "0.40", "ask": "0.40"}
+            "/quotes",
+            json={
+                "outcome_id": "p-yes", "bid": "0.40", "ask": "0.40",
+                "ask_size": "100",
+            },
         ).status_code == 204
         assert client.post(
-            "/quotes", json={"outcome_id": "k-no", "bid": "0.50", "ask": "0.50"}
+            "/quotes",
+            json={
+                "outcome_id": "k-no", "bid": "0.50", "ask": "0.50",
+                "ask_size": "100",
+            },
         ).status_code == 204
 
         assert client.post("/paper/execute", json={"opportunity_index": 0}).status_code == 200

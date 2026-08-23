@@ -28,7 +28,9 @@ OpportunityHandler = Callable[[ArbOpportunity], None]
 # the signal a per-detection callback cannot express.
 OpportunitySetHandler = Callable[[str, list[ArbOpportunity]], None]
 
-DEFAULT_TARGET_PAYOFF = Decimal("100")
+# Cap on total capital in one arb ticket; None disables it. Sizing is now
+# depth-driven, and books can be enormous, so a ticket needs a budget.
+DEFAULT_MAX_TICKET_STAKE = Decimal("200")
 
 
 class EngineRuntime:
@@ -39,13 +41,13 @@ class EngineRuntime:
         fees: FeeModelRegistry,
         on_opportunity: OpportunityHandler | None = None,
         on_opportunities: OpportunitySetHandler | None = None,
-        target_payoff: Decimal = DEFAULT_TARGET_PAYOFF,
+        max_ticket_stake: Decimal | None = DEFAULT_MAX_TICKET_STAKE,
     ) -> None:
         self._book = quotebook
         self._fees = fees
         self._on_opp = on_opportunity or (lambda _o: None)
         self._on_opps = on_opportunities
-        self._target_payoff = target_payoff
+        self._max_ticket_stake = max_ticket_stake
         self._groups: dict[str, EventGroup] = {}
         self._outcome_to_groups: dict[str, set[str]] = defaultdict(set)
 
@@ -82,7 +84,7 @@ class EngineRuntime:
 
         found: list[ArbOpportunity] = []
         cross = detect_cross_venue_two_leg(
-            group, quotes, self._fees, target_payoff=self._target_payoff
+            group, quotes, self._fees, max_ticket_stake=self._max_ticket_stake
         )
         if cross is not None:
             found.append(cross)
@@ -99,7 +101,10 @@ class EngineRuntime:
                 legs,
                 quotes,
                 self._fees,
-                target_payoff=self._target_payoff,
+                # detect_complementary_set is still payoff-sized; 100 is
+                # what it received before, so its sizing is unchanged. The
+                # next task makes it depth-aware too.
+                target_payoff=Decimal("100"),
             )
             if comp is not None:
                 found.append(comp)

@@ -24,6 +24,7 @@ from dataclasses import dataclass
 from decimal import Decimal
 
 from .fees import FeeModel, FeeModelRegistry
+from .qty import tradeable_qty
 from .types import EventGroup, EventGroupLeg, Quote
 
 
@@ -83,17 +84,17 @@ def detect_cross_venue_two_leg(
     event_group: EventGroup,
     quotes: dict[str, Quote],
     fees: FeeModelRegistry,
-    target_payoff: Decimal = Decimal("1"),
+    *,
+    max_ticket_stake: Decimal | None = None,
+    tick_by_venue: dict[str, Decimal] | None = None,
 ) -> ArbOpportunity | None:
-    """Detect the cheapest YES-leg + NO-leg cross-venue arb for an event group.
+    """Detect the most profitable YES-leg + NO-leg cross-venue arb for a group.
 
-    Strategy: for every (yes_leg, no_leg) pair drawn from the group's legs,
-    compute the sum of unit costs (ask + per-unit fee). If < target_payoff,
-    the pair is an arb. Return the pair with the largest guaranteed profit.
-
-    Sizing is per-unit for now: buy `target_payoff` shares of each side so the
-    payoff is exactly `target_payoff` regardless of which side wins.
+    The arb test is per-contract and size-independent: if the all-in cost of
+    one contract on each side is under 1, the pair is an arb. Sizing is then a
+    separate step bounded by book depth and `max_ticket_stake`.
     """
+    tick_by_venue = tick_by_venue or {}
     yes_legs = [leg for leg in event_group.legs if leg.is_yes_side]
     no_legs = [leg for leg in event_group.legs if not leg.is_yes_side]
     if not yes_legs or not no_legs:
@@ -118,17 +119,29 @@ def detect_cross_venue_two_leg(
                 continue
             n_unit = leg_unit_cost(nq.ask, n_fee_model, is_buy=True)
 
-            total_unit_cost = y_unit + n_unit
-            if total_unit_cost >= target_payoff:
+            unit_cost = y_unit + n_unit
+            # Per contract, and nothing to do with sizing.
+            if net_edge_per_contract([y_unit, n_unit]) <= 0:
                 continue
 
-            qty = target_payoff  # shares of each side; payoff = qty * 1
-            y_cost = yq.ask * qty
-            n_cost = nq.ask * qty
+            tick = max(
+                tick_by_venue.get(y.venue_id, Decimal("0")),
+                tick_by_venue.get(n.venue_id, Decimal("0")),
+            )
+            qty = tradeable_qty(
+                unit_cost=unit_cost,
+                depths=[yq.ask_size, nq.ask_size],
+                max_stake=max_ticket_stake,
+                tick=tick,
+            )
+            if qty <= 0:
+                continue
+
             y_fee = y_fee_model.fee(price=yq.ask, qty=qty, is_buy=True)
             n_fee = n_fee_model.fee(price=nq.ask, qty=qty, is_buy=True)
-            total_stake = y_cost + n_cost + y_fee + n_fee
-            profit = target_payoff - total_stake
+            total_stake = yq.ask * qty + nq.ask * qty + y_fee + n_fee
+            # Exactly one side settles at 1 per contract, so payoff is qty.
+            profit = qty - total_stake
             if profit <= 0:
                 continue
 
