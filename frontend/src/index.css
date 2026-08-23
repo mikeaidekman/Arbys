@@ -44,6 +44,15 @@ a:hover { color: var(--color-accent-700); }
   margin: 0 -3px;
   font-weight: 600;
 }
+
+/* The ▲/▼ glyph plus the move size, riding alongside the price that moved.
+   Same 9px step .vt-cat already uses; no new scale, no new colour. */
+.vt-move-delta {
+  font-size: 9px;
+  opacity: 0.75;
+  margin-left: 2px;
+}
+
 /* A leg whose feed has gone quiet past the staleness threshold. Struck
    through because the price is still *known* but no longer tradeable. */
 .vt-stale {

@@ -144,30 +144,29 @@ export function buyOutcomeIds(opp: ArbOpportunity): string[] {
 
 export type ComboState = "ready" | "no-quotes" | "no-edge" | "waiting";
 
-/** Why a combo can or cannot be filled — drives the button's visible label. */
+/**
+ * Why a combo can or cannot be filled — drives the button's visible label.
+ *
+ * `netEdge` is the group's net-of-fees edge per contract, and it is what
+ * separates "no edge" from "waiting". Gross favourability cannot: both venues
+ * charge a fee peaking at a coin flip (up to 3.25¢/contract combined), so a
+ * pair whose asks sum under $1 is routinely still net-negative — and the
+ * engine only ever publishes a net-positive pair. Deciding on gross would
+ * label those rows "waiting", promising a publication that will never come.
+ *
+ * Gross is still the fallback when the backend reported no net figure for the
+ * group (no fee model for a venue, or no priced pair at all).
+ */
 export function comboState(
   combo: Combo,
   opportunity: ArbOpportunity | null,
+  netEdge: number | null,
 ): ComboState {
   if (combo.total == null) return "no-quotes";
-  if (!combo.favorable) return "no-edge";
+  if (netEdge != null ? netEdge <= 0 : !combo.favorable) return "no-edge";
   if (opportunity == null) return "waiting";
   return "ready";
 }
-
-export const COMBO_STATE_LABEL: Record<ComboState, string> = {
-  ready: "execute both legs as a paper order",
-  "no-quotes": "no quotes yet on one or both legs",
-  "no-edge": "both legs cost more than $1 together — no edge",
-  waiting: "edge seen, waiting for the engine to publish it",
-};
-
-export const COMBO_STATE_BADGE: Record<ComboState, string> = {
-  ready: "",
-  "no-quotes": "no quotes",
-  "no-edge": "no edge",
-  waiting: "waiting",
-};
 
 /**
  * Best available start instant for a group, as epoch ms.
@@ -260,12 +259,6 @@ export function askToCents(ask: string | null | undefined): string {
   return String(Math.round(n * 100));
 }
 
-export function edgeCentsDisplay(edge: number | null): string {
-  if (edge == null) return "—";
-  const cents = edge * 100;
-  return `${cents >= 0 ? "+" : ""}${cents.toFixed(1)}¢`;
-}
-
 export interface BestPair {
   /** The pair the backend chose, shaped as a Combo so findOpportunity() and
    *  comboState() work unchanged. Null when the backend reported no pair. */
@@ -281,8 +274,9 @@ export interface BestPair {
 /**
  * The pair the backend chose, looked up by leg outcome_id.
  *
- * The backend ranks candidate (yes, no) pairs by net absolute profit, which
- * needs fee models this frontend does not have -- and it searches *all*
+ * The backend ranks candidate (yes, no) pairs by net absolute profit when any
+ * pair clears fees and by net edge per contract when none does -- either way
+ * it needs fee models this frontend does not have, and it searches *all*
  * combinations, including same-venue pairs like Kalshi-YES + Kalshi-NO, which
  * buildCombos() never constructs. So the pair cannot be re-derived here; it
  * has to be assembled from the outcome_ids the backend already named.

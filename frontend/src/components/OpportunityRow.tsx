@@ -1,5 +1,5 @@
 import { useMutation, useQueryClient } from "@tanstack/react-query";
-import type { ArbOpportunity, MonitoredGroup } from "../api/types";
+import type { ArbOpportunity, MonitoredGroup, MonitoredLeg } from "../api/types";
 import type { PriceMove } from "../hooks/usePriceMoves";
 import { api } from "../api/client";
 import {
@@ -44,6 +44,51 @@ function fmtUsd(v: string | null): string {
   return `${n < 0 ? "−" : ""}$${Math.abs(n).toFixed(2)}`;
 }
 
+function numOrNull(v: string | null | undefined): number | null {
+  if (v == null) return null;
+  const n = Number(v);
+  return Number.isFinite(n) ? n : null;
+}
+
+/**
+ * One leg of the best pair: its tag, its ask in cents, and — only if that
+ * particular ask just moved — a ▲/▼ glyph with the size of the move.
+ *
+ * The highlight belongs on the price that moved, not on the whole cell: a cell
+ * holds two independent asks and marking both misattributes the move. Direction
+ * is readable from the glyph alone, so no red/green pair is needed and the
+ * existing --color-accent token carries the flash.
+ */
+function PairLegPrice({
+  tag,
+  leg,
+  move,
+}: {
+  tag: string;
+  leg: MonitoredLeg | null;
+  move: PriceMove | undefined;
+}) {
+  return (
+    <>
+      {tag}{" "}
+      <span className={move ? "vt-move" : undefined}>
+        {askToCents(leg?.ask ?? null)}
+        {move && (
+          <span
+            className="vt-move-delta"
+            title={`ask moved ${move.dir === "up" ? "up" : "down"} ${Math.abs(
+              move.delta * 100,
+            ).toFixed(1)}¢`}
+          >
+            {move.dir === "up" ? "▲" : "▼"}
+            {Math.abs(move.delta * 100).toFixed(0)}
+          </span>
+        )}
+      </span>
+    </>
+  );
+}
+
 export function OpportunityRow({
   group,
   opportunities,
@@ -70,7 +115,12 @@ export function OpportunityRow({
     pair.combo && !stale && !noSize
       ? findOpportunity(opportunities, group, pair.combo)
       : null;
-  const state = pair.combo ? comboState(pair.combo, opportunity) : "no-quotes";
+  // Net, not gross: a gross-favorable row whose fees eat the edge is
+  // permanently "no edge", never "waiting" for a publication that cannot come.
+  const netEdge = numOrNull(group.net_edge);
+  const state = pair.combo
+    ? comboState(pair.combo, opportunity, netEdge)
+    : "no-quotes";
 
   const exec = useMutation({
     mutationFn: () => {
@@ -84,18 +134,14 @@ export function OpportunityRow({
     },
   });
 
-  const pairLabel = (() => {
-    if (!pair.combo) return "—";
-    const yesTag = pair.combo.yesVenue === KALSHI ? "K-Yes" : "P-Yes";
-    const noTag = pair.combo.noVenue === KALSHI ? "K-No" : "P-No";
-    return `${yesTag} ${askToCents(pair.combo.yesLeg?.ask ?? null)} + ${noTag} ${askToCents(
-      pair.combo.noLeg?.ask ?? null,
-    )}`;
-  })();
-
-  const moved =
-    (pair.combo?.yesLeg && priceMoves.get(pair.combo.yesLeg.outcome_id)) ||
-    (pair.combo?.noLeg && priceMoves.get(pair.combo.noLeg.outcome_id));
+  const yesTag = pair.combo?.yesVenue === KALSHI ? "K-Yes" : "P-Yes";
+  const noTag = pair.combo?.noVenue === KALSHI ? "K-No" : "P-No";
+  const yesMove = pair.combo?.yesLeg
+    ? priceMoves.get(pair.combo.yesLeg.outcome_id)
+    : undefined;
+  const noMove = pair.combo?.noLeg
+    ? priceMoves.get(pair.combo.noLeg.outcome_id)
+    : undefined;
 
   return (
     <tr className={grossArb ? "vt-row-arb" : undefined}>
@@ -126,8 +172,16 @@ export function OpportunityRow({
       >
         {clock.text}
       </td>
-      <td className={`vt-mono ${stale ? "vt-stale" : ""} ${moved ? "vt-move" : ""}`}>
-        {pairLabel}
+      <td className={`vt-mono ${stale ? "vt-stale" : ""}`}>
+        {pair.combo ? (
+          <>
+            <PairLegPrice tag={yesTag} leg={pair.combo.yesLeg} move={yesMove} />
+            {" + "}
+            <PairLegPrice tag={noTag} leg={pair.combo.noLeg} move={noMove} />
+          </>
+        ) : (
+          "—"
+        )}
       </td>
       <td className={`vt-mono vt-num ${noSize ? "vt-size-zero" : ""}`}>
         {fmtQty(pair.size)}
