@@ -224,10 +224,74 @@ class PaperOrder(Base):
         DateTime(timezone=True), server_default=func.now(), nullable=False
     )
     arb_opportunity_id: Mapped[str | None] = mapped_column(ForeignKey("arb_opportunity.id"))
+    ticket_id: Mapped[str | None] = mapped_column(ForeignKey("paper_ticket.id"))
     rejection_reason: Mapped[str | None] = mapped_column(String(256))
 
     __table_args__ = (
         Index("ix_paper_order_account", "account_id", "submitted_at"),
+    )
+
+
+class PaperTicket(Base):
+    """One submitted arb ticket: filled, rejected, or missed.
+
+    `event_group_id` is deliberately **not** a ForeignKey. Discovery retires
+    groups when they stop matching and `delete_event_group` takes the legs with
+    it, so a live join would blank the name of every finished game — exactly
+    the rows worth auditing. `title_snapshot` is frozen at submit time for the
+    same reason and is the only naming the UI renders.
+
+    The three economic columns are nullable because a `missed` ticket has no
+    economics: a manual click passes only an event group and outcome ids, so if
+    the re-detect comes up empty there is no stake or expected profit to write.
+    Zero would read as a free ticket that made nothing.
+    """
+
+    __tablename__ = "paper_ticket"
+
+    id: Mapped[str] = mapped_column(String(64), primary_key=True, default=_uuid)
+    account_id: Mapped[str] = mapped_column(ForeignKey("paper_account.id"), nullable=False)
+    event_group_id: Mapped[str] = mapped_column(String(64), nullable=False)
+    title_snapshot: Mapped[str] = mapped_column(String(512), nullable=False)
+    source: Mapped[str] = mapped_column(String(16), nullable=False, default="manual")
+    status: Mapped[str] = mapped_column(String(16), nullable=False)
+    rejection_reason: Mapped[str | None] = mapped_column(String(256))
+    total_stake: Mapped[Decimal | None] = mapped_column(NUM)
+    expected_profit: Mapped[Decimal | None] = mapped_column(NUM)
+    expected_edge_bps: Mapped[Decimal | None] = mapped_column(NUM)
+    submitted_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.now()
+    )
+
+    __table_args__ = (
+        Index("ix_paper_ticket_account_ts", "account_id", "submitted_at"),
+    )
+
+
+class PaperSettlement(Base):
+    """A resolution event for one outcome.
+
+    Settlement previously left no trace: `settle_outcome_async` zeroed the
+    position and credited cash, making a settled winner indistinguishable from
+    a position sold out at market. Without this row a ticket cannot be scored.
+    """
+
+    __tablename__ = "paper_settlement"
+
+    id: Mapped[int] = mapped_column(
+        BigInteger().with_variant(Integer(), "sqlite"),
+        primary_key=True,
+        autoincrement=True,
+    )
+    outcome_id: Mapped[str] = mapped_column(ForeignKey("outcome.id"), nullable=False)
+    resolved_value: Mapped[Decimal] = mapped_column(NUM, nullable=False)
+    ts: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.now()
+    )
+    source: Mapped[str] = mapped_column(String(16), nullable=False, default="heuristic")
+
+    __table_args__ = (
+        Index("ix_paper_settlement_outcome_ts", "outcome_id", "ts"),
     )
 
 
