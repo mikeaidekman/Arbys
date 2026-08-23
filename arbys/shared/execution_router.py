@@ -6,6 +6,7 @@ and only commits every leg if all previews succeed.
 
 from __future__ import annotations
 
+from dataclasses import dataclass
 from decimal import Decimal
 
 from ..adapters.base import (
@@ -18,8 +19,29 @@ from ..adapters.base import (
 from .paper_broker import PaperExecutionAdapter
 
 
+@dataclass(frozen=True)
+class LegRejection:
+    venue_id: str
+    outcome_id: str
+    reason: str
+
+
 class InsufficientLegsError(RuntimeError):
-    pass
+    """A ticket that could not be submitted, with the failing legs named.
+
+    `str(...)` keeps the joined `venue:reason` form the API already returns as
+    a 409 detail; `rejections` is what the ticket log records per leg.
+    """
+
+    def __init__(self, rejections: tuple[LegRejection, ...] | str) -> None:
+        if isinstance(rejections, str):
+            self.rejections: tuple[LegRejection, ...] = ()
+            super().__init__(rejections)
+            return
+        self.rejections = rejections
+        super().__init__(
+            ", ".join(f"{r.venue_id}:{r.reason}" for r in rejections)
+        )
 
 
 class ExecutionRouter:
@@ -29,11 +51,13 @@ class ExecutionRouter:
     async def submit(self, intent: ExecutionIntent) -> list[Order]:
         # Preview phase (paper broker only): only the paper adapter exposes
         # `_preview_fill`. If any leg would be rejected, refuse the whole ticket.
-        rejections: list[str] = []
+        rejections: list[LegRejection] = []
         for leg in intent.legs:
             adapter = self._adapters.get(leg.venue_id)
             if adapter is None:
-                rejections.append(f"{leg.venue_id}:no_adapter")
+                rejections.append(
+                    LegRejection(leg.venue_id, leg.outcome_id, "no_adapter")
+                )
                 continue
             if isinstance(adapter, PaperExecutionAdapter):
                 preview = adapter._preview_fill(
@@ -43,16 +67,22 @@ class ExecutionRouter:
                     limit_price=leg.limit_price,
                 )
                 if isinstance(preview, str):
-                    rejections.append(f"{leg.venue_id}:{preview}")
+                    rejections.append(
+                        LegRejection(leg.venue_id, leg.outcome_id, preview)
+                    )
                     continue
                 # Also require sufficient cash if buying.
                 if leg.is_buy:
                     _px, cost = preview
                     balances = await adapter.get_balances(intent.account_id)
                     if cost > balances.get(leg.venue_id, Decimal("0")):
-                        rejections.append(f"{leg.venue_id}:insufficient_funds")
+                        rejections.append(
+                            LegRejection(
+                                leg.venue_id, leg.outcome_id, "insufficient_funds"
+                            )
+                        )
         if rejections:
-            raise InsufficientLegsError(", ".join(rejections))
+            raise InsufficientLegsError(tuple(rejections))
 
         # Commit phase.
         adapters = [self._adapters[leg.venue_id] for leg in intent.legs]

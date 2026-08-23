@@ -429,3 +429,43 @@ def test_rejected_order_also_carries_the_ticket_id():
     assert reason == "no_quote"
     assert fill is None
     assert order.ticket_id == "tkt-43"
+
+
+@pytest.mark.asyncio
+async def test_router_rejection_names_the_failing_leg():
+    """The audit log needs the leg, not just a joined message string."""
+    book = QuoteBook()
+    book.upsert(
+        Quote(
+            outcome_id="k-yes",
+            bid=Decimal("0.39"),
+            ask=Decimal("0.40"),
+            ask_size=Decimal("5"),
+        )
+    )
+    broker = PaperExecutionAdapter(
+        venue_id="kalshi", quotebook=book, fee_model=KalshiFeeModel()
+    )
+    broker.deposit("acct", Decimal("1000"))
+    router = ExecutionRouter({"kalshi": broker})
+    intent = ExecutionIntent(
+        event_group_id="eg-1",
+        account_id="acct",
+        legs=(
+            IntentLeg(
+                venue_id="kalshi",
+                outcome_id="k-yes",
+                is_buy=True,
+                qty=Decimal("100"),
+                limit_price=Decimal("0.40"),
+            ),
+        ),
+        ticket_id="tkt-1",
+    )
+    with pytest.raises(InsufficientLegsError) as excinfo:
+        await router.submit(intent)
+    rejections = excinfo.value.rejections
+    assert len(rejections) == 1
+    assert rejections[0].outcome_id == "k-yes"
+    assert rejections[0].reason == "insufficient_liquidity"
+    assert "kalshi:insufficient_liquidity" in str(excinfo.value)
