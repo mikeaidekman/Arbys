@@ -1636,12 +1636,18 @@ function num(v: string | null): number | null {
 }
 
 /** Nulls always sort last, whichever direction is active — otherwise an
- *  unquoted row would jump to the top the moment you sort by edge. */
-function cmpNullable(a: number | null, b: number | null): number {
+ *  unquoted row would jump to the top the moment you sort descending by edge.
+ *
+ *  `dir` is applied HERE, to the real numeric difference only, never to the
+ *  null sentinels. Multiplying the whole comparison by `dir` at the call site
+ *  would invert `return 1` / `return -1` too and float nulls to the top on
+ *  every descending sort.
+ */
+function cmpNullable(a: number | null, b: number | null, dir: number): number {
   if (a == null && b == null) return 0;
   if (a == null) return 1;
   if (b == null) return -1;
-  return a - b;
+  return (a - b) * dir;
 }
 
 export function OpportunityTable({
@@ -1659,20 +1665,26 @@ export function OpportunityTable({
 
   const sorted = useMemo(() => {
     const dir = sort.dir === "asc" ? 1 : -1;
+    // `dir` is applied inside each branch — directly for the localeCompare
+    // cases, via cmpNullable's dir parameter for the nullable numeric ones.
+    // Never multiply the branch result by dir at the call site: that would
+    // also invert cmpNullable's null sentinels.
     const primary = (a: MonitoredGroup, b: MonitoredGroup): number => {
       switch (sort.key) {
         case "start":
-          return cmpNullable(groupStartDate(a), groupStartDate(b));
+          return cmpNullable(groupStartDate(a), groupStartDate(b), dir);
         case "cat":
-          return categoryOf(a).label.localeCompare(categoryOf(b).label);
+          return categoryOf(a).label.localeCompare(categoryOf(b).label) * dir;
         case "matchup":
-          return splitTitle(a.title).matchup.localeCompare(splitTitle(b.title).matchup);
+          return (
+            splitTitle(a.title).matchup.localeCompare(splitTitle(b.title).matchup) * dir
+          );
         case "size":
-          return cmpNullable(bestPair(a).size, bestPair(b).size);
+          return cmpNullable(bestPair(a).size, bestPair(b).size, dir);
         case "edge":
-          return cmpNullable(num(a.net_edge), num(b.net_edge));
+          return cmpNullable(num(a.net_edge), num(b.net_edge), dir);
         case "profit":
-          return cmpNullable(num(a.net_max_profit), num(b.net_max_profit));
+          return cmpNullable(num(a.net_max_profit), num(b.net_max_profit), dir);
       }
     };
     return groups.slice().sort((a, b) => {
@@ -1681,7 +1693,7 @@ export function OpportunityTable({
       // /monitored's dict-insertion order, which shifts as discovery registers
       // games — rows would reshuffle between polls and a click could land on
       // the wrong event.
-      return p !== 0 ? p * dir : compareGroups(a, b);
+      return p !== 0 ? p : compareGroups(a, b);
     });
   }, [groups, sort]);
 
