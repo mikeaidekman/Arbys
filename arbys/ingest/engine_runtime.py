@@ -101,10 +101,7 @@ class EngineRuntime:
                 legs,
                 quotes,
                 self._fees,
-                # detect_complementary_set is still payoff-sized; 100 is
-                # what it received before, so its sizing is unchanged. The
-                # next task makes it depth-aware too.
-                target_payoff=Decimal("100"),
+                max_ticket_stake=self._max_ticket_stake,
             )
             if comp is not None:
                 found.append(comp)

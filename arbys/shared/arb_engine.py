@@ -195,19 +195,23 @@ def detect_complementary_set(
     legs: list[EventGroupLeg],
     quotes: dict[str, Quote],
     fees: FeeModelRegistry,
-    target_payoff: Decimal = Decimal("1"),
+    *,
+    max_ticket_stake: Decimal | None = None,
+    tick_by_venue: dict[str, Decimal] | None = None,
 ) -> ArbOpportunity | None:
     """Single-venue multi-outcome arb: buy every outcome so exactly one pays 1.
 
-    Every leg must resolve to a mutually-exclusive outcome of the same event.
-    Buying `target_payoff` of every outcome guarantees a payoff of
-    `target_payoff` (because exactly one leg wins).
+    Every leg must be a mutually-exclusive outcome of the same event. Sizing
+    is bounded by the thinnest leg's depth and by `max_ticket_stake`, same as
+    the cross-venue detector.
     """
+    tick_by_venue = tick_by_venue or {}
     if len(legs) < 2:
         return None
 
-    total_stake = Decimal("0")
-    arb_legs: list[ArbLeg] = []
+    unit_costs: list[Decimal] = []
+    depths: list[Decimal | None] = []
+    resolved: list[tuple[EventGroupLeg, Quote, FeeModel]] = []
     for leg in legs:
         q = quotes.get(leg.outcome_id)
         if q is None:
@@ -215,21 +219,45 @@ def detect_complementary_set(
         fee_model = fees.get(leg.venue_id)
         if fee_model is None:
             return None
-        cost = q.ask * target_payoff
-        fee = fee_model.fee(price=q.ask, qty=target_payoff, is_buy=True)
-        total_stake += cost + fee
+        unit_costs.append(leg_unit_cost(q.ask, fee_model, is_buy=True))
+        depths.append(q.ask_size)
+        resolved.append((leg, q, fee_model))
+
+    if net_edge_per_contract(unit_costs) <= 0:
+        return None
+
+    # Per-venue override wins; otherwise floor to the observed granularity,
+    # same fallback `detect_cross_venue_two_leg` uses.
+    tick = max(
+        (tick_by_venue.get(leg.venue_id, DEFAULT_QTY_TICK) for leg, _, _ in resolved),
+        default=DEFAULT_QTY_TICK,
+    )
+    qty = tradeable_qty(
+        unit_cost=sum(unit_costs, Decimal("0")),
+        depths=depths,
+        max_stake=max_ticket_stake,
+        tick=tick,
+    )
+    if qty <= 0:
+        return None
+
+    total_stake = Decimal("0")
+    arb_legs: list[ArbLeg] = []
+    for leg, q, fee_model in resolved:
+        fee = fee_model.fee(price=q.ask, qty=qty, is_buy=True)
+        total_stake += q.ask * qty + fee
         arb_legs.append(
             ArbLeg(
                 outcome_id=leg.outcome_id,
                 venue_id=leg.venue_id,
                 is_buy=True,
                 price=q.ask,
-                qty=target_payoff,
+                qty=qty,
                 fee=fee,
             )
         )
 
-    profit = target_payoff - total_stake
+    profit = qty - total_stake
     if profit <= 0:
         return None
 

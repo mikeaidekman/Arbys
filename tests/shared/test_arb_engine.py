@@ -144,21 +144,24 @@ def test_cross_venue_returns_none_if_no_no_side_leg():
 
 
 def test_complementary_set_arb():
+    # Sizing is now depth-derived rather than a flat payoff, so each quote
+    # states an explicit ask_size (5) to keep the resulting qty deterministic.
     legs = [
         EventGroupLeg(outcome_id="a", venue_id="poly", is_yes_side=True),
         EventGroupLeg(outcome_id="b", venue_id="poly", is_yes_side=True),
         EventGroupLeg(outcome_id="c", venue_id="poly", is_yes_side=True),
     ]
     quotes = {
-        "a": _q("a", "0.30"),
-        "b": _q("b", "0.30"),
-        "c": _q("c", "0.30"),
+        "a": _q("a", "0.30", ask_size="5"),
+        "b": _q("b", "0.30", ask_size="5"),
+        "c": _q("c", "0.30", ask_size="5"),
     }
     fees = {"poly": ZeroFeeModel("poly")}
     opp = detect_complementary_set("egc", legs, quotes, fees)
     assert opp is not None
-    assert opp.total_stake == Decimal("0.90")
-    assert opp.guaranteed_profit == Decimal("0.10")
+    assert all(leg.qty == Decimal("5") for leg in opp.legs)
+    assert opp.total_stake == Decimal("4.50")  # 5 contracts * 3 legs * 0.30
+    assert opp.guaranteed_profit == Decimal("0.50")  # 5 contracts * 10c edge
 
 
 def test_complementary_set_no_arb_when_sum_exceeds_one():
@@ -302,3 +305,37 @@ def test_tick_by_venue_overrides_the_default_tick():
     assert opp is not None
     # The coarser of the pair's ticks wins: whole contracts, not 210.52.
     assert all(leg.qty == Decimal("210") for leg in opp.legs)
+
+
+def test_complementary_set_sizes_to_thinnest_leg():
+    legs = [
+        EventGroupLeg(outcome_id="a", venue_id="v1", is_yes_side=True),
+        EventGroupLeg(outcome_id="b", venue_id="v1", is_yes_side=False),
+    ]
+    quotes = {
+        "a": Quote(outcome_id="a", bid=Decimal("0.40"), ask=Decimal("0.45"),
+                   ask_size=Decimal("900")),
+        "b": Quote(outcome_id="b", bid=Decimal("0.45"), ask=Decimal("0.50"),
+                   ask_size=Decimal("11")),
+    }
+    opp = detect_complementary_set(
+        "eg:v1", legs, quotes, _fees(), max_ticket_stake=Decimal("200")
+    )
+    assert opp is not None
+    assert all(leg.qty == Decimal("11") for leg in opp.legs)
+
+
+def test_complementary_set_blocked_by_known_empty_leg():
+    legs = [
+        EventGroupLeg(outcome_id="a", venue_id="v1", is_yes_side=True),
+        EventGroupLeg(outcome_id="b", venue_id="v1", is_yes_side=False),
+    ]
+    quotes = {
+        "a": Quote(outcome_id="a", bid=Decimal("0.40"), ask=Decimal("0.45"),
+                   ask_size=Decimal("900")),
+        "b": Quote(outcome_id="b", bid=Decimal("0.45"), ask=Decimal("0.50"),
+                   ask_size=Decimal("0")),
+    }
+    assert detect_complementary_set(
+        "eg:v1", legs, quotes, _fees(), max_ticket_stake=Decimal("200")
+    ) is None
