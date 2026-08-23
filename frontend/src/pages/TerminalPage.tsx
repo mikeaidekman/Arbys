@@ -4,7 +4,7 @@ import { api } from "../api/client";
 import type { ArbOpportunity, MonitoredGroup } from "../api/types";
 import { useOpportunityStream } from "../hooks/useOpportunityStream";
 import { CategoryRail } from "../components/CategoryRail";
-import { OpportunityCard } from "../components/OpportunityCard";
+import { OpportunityTable } from "../components/OpportunityTable";
 import { AccountPanel } from "../components/AccountPanel";
 import {
   buildCombos,
@@ -46,7 +46,7 @@ export function TerminalPage() {
 
   const [sportFilter, setSportFilter] = useState("All");
   const [arbOnly, setArbOnly] = useState(false);
-  const [filledMap, setFilledMap] = useState<Record<string, "comboA" | "comboB">>({});
+  const [filledMap, setFilledMap] = useState<Record<string, boolean>>({});
 
   // Sorted here so every downstream list keeps a stable order. /monitored
   // returns dict-insertion order, which shifts as discovery registers games —
@@ -152,41 +152,22 @@ export function TerminalPage() {
 
         <section
           className="vt-scroll"
-          style={{
-            minHeight: 0,
-            overflowY: "auto",
-            overflowX: "hidden",
-            padding: "var(--space-4)",
-          }}
+          style={{ minHeight: 0, overflow: "auto", padding: 0 }}
         >
           {filtered.length === 0 ? (
-            <div style={{ opacity: 0.6, fontSize: 13 }}>
+            <div style={{ opacity: 0.6, fontSize: 13, padding: "var(--space-4)" }}>
               No cross-venue matchups yet — register event groups in Admin and push
               quotes.
             </div>
           ) : (
-            <div
-              style={{
-                display: "grid",
-                gridTemplateColumns: "repeat(auto-fill, minmax(216px, 1fr))",
-                gap: "var(--space-4)",
-              }}
-            >
-              {filtered.map((g) => (
-                <OpportunityCard
-                  key={g.id}
-                  group={g}
-                  categoryLabel={categoryOf(g).label}
-                  opportunities={opportunities}
-                  filledCombo={filledMap[g.id] ?? null}
-                  onFilled={(id, combo) =>
-                    setFilledMap((m) => ({ ...m, [id]: combo }))
-                  }
-                  priceMoves={priceMoves}
-                  now={now}
-                />
-              ))}
-            </div>
+            <OpportunityTable
+              groups={filtered}
+              opportunities={opportunities}
+              filledMap={filledMap}
+              onFilled={(id) => setFilledMap((m) => ({ ...m, [id]: true }))}
+              priceMoves={priceMoves}
+              now={now}
+            />
           )}
         </section>
 

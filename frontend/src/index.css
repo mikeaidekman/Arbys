@@ -26,36 +26,8 @@ a:hover { color: var(--color-accent-700); }
   --vt-green-tint: #e7f6ec;
 }
 
-.vt-card {
-  transition: border-color 120ms, box-shadow 120ms;
-  background: var(--color-bg);
-}
-.vt-card.vt-arb {
-  border-color: var(--vt-green);
-  box-shadow: 0 0 0 1px var(--vt-green), var(--shadow-sm);
-}
-
 .vt-scroll::-webkit-scrollbar { width: 8px; }
 .vt-scroll::-webkit-scrollbar-thumb { background: var(--color-divider); }
-
-.vt-combo {
-  flex: 1;
-  display: flex;
-  flex-direction: column;
-  align-items: flex-start;
-  gap: 1px;
-  padding: 5px 7px;
-  font-size: 11px;
-  line-height: 1.25;
-}
-.vt-combo:disabled { cursor: not-allowed; }
-.vt-combo-active {
-  background: var(--vt-green) !important;
-  color: #fff !important;
-  border-color: var(--vt-green) !important;
-  box-shadow: 0 0 0 1px var(--vt-green);
-}
-.vt-combo-active:hover { background: var(--vt-green-dark) !important; }
 
 /* Large ask move. Colour comes from --color-accent (a design-system token);
    direction is carried by the ▲/▼ glyph rather than a red/green pair, so no
@@ -72,8 +44,6 @@ a:hover { color: var(--color-accent-700); }
   margin: 0 -3px;
   font-weight: 600;
 }
-/* Depth at the quoted level. Deliberately quiet — it is context for the
-   price, not a headline number. "×?" means the venue reported nothing. */
 /* A leg whose feed has gone quiet past the staleness threshold. Struck
    through because the price is still *known* but no longer tradeable. */
 .vt-stale {
@@ -81,23 +51,60 @@ a:hover { color: var(--color-accent-700); }
   text-decoration: line-through;
 }
 
-.vt-depth {
-  font-size: 9px;
-  opacity: 0.5;
-  margin-left: 3px;
+/* — compact table density —
+   The .table primitive from the industry design system supplies borders,
+   header treatment and hover. This overrides padding and font-size only; no
+   new colors, radii or type scales. */
+.vt-table { font-size: 12px; }
+.vt-table th {
+  padding: 5px 8px;
+  position: sticky;
+  top: 0;
+  background: var(--color-bg);
+  z-index: 1;
+  white-space: nowrap;
+}
+.vt-table td {
+  padding: 5px 8px;
+  white-space: nowrap;
+}
+.vt-num { text-align: right; }
+.vt-muted { color: color-mix(in srgb, var(--color-text) 45%, transparent); }
+.vt-ellipsis {
+  max-width: 22ch;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.vt-cat { font-size: 9px; padding: 1px 4px; }
+
+.vt-dot {
+  display: inline-block;
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: var(--color-accent);
 }
 
-.vt-move-delta {
-  font-size: 9px;
-  opacity: 0.75;
-  margin-left: 2px;
+/* Gross-of-fees divergence, same signal the card's green outline carried.
+   Deliberately NOT the same test as whether Fill is enabled. */
+.vt-row-arb {
+  box-shadow: inset 2px 0 0 var(--vt-green);
+  background: color-mix(in srgb, var(--vt-green) 5%, transparent);
 }
+.vt-edge-pos { color: var(--vt-green-dark); font-weight: 600; }
+.vt-size-zero { color: var(--vt-green-dark); text-decoration: line-through; opacity: 0.6; }
+.vt-both { font-weight: 700; margin-left: 2px; }
 
-.vt-filled {
-  padding: 6px 8px;
-  font-size: 11px;
-  text-align: center;
-  border: 1px solid var(--vt-green);
-  color: var(--vt-green-dark);
-  background: var(--vt-green-tint);
+.vt-fill {
+  font-size: 10px;
+  padding: 2px 7px;
+  line-height: 1.3;
 }
+.vt-fill:disabled { cursor: not-allowed; }
+.vt-fill-active {
+  background: var(--vt-green) !important;
+  color: #fff !important;
+  border-color: var(--vt-green) !important;
+}
+.vt-fill-active:hover { background: var(--vt-green-dark) !important; }
+.vt-filled-inline { font-size: 10px; color: var(--vt-green-dark); }
