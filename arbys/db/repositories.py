@@ -221,6 +221,7 @@ async def insert_paper_order(
     session: AsyncSession, *, order_id: str, account_id: str, venue_id: str,
     outcome_id: str, is_buy: bool, qty: Decimal, limit_price: Decimal, status: str,
     arb_opportunity_id: str | None = None, rejection_reason: str | None = None,
+    ticket_id: str | None = None,
 ) -> None:
     await ensure_outcome_placeholder(session, outcome_id, venue_id=venue_id)
     session.add(
@@ -235,6 +236,7 @@ async def insert_paper_order(
             status=status,
             arb_opportunity_id=arb_opportunity_id,
             rejection_reason=rejection_reason,
+            ticket_id=ticket_id,
         )
     )
 
@@ -243,6 +245,64 @@ async def insert_paper_fill(
     session: AsyncSession, *, order_id: str, qty: Decimal, price: Decimal, fee: Decimal
 ) -> None:
     session.add(m.PaperFill(order_id=order_id, qty=qty, price=price, fee=fee))
+
+
+async def insert_paper_ticket(
+    session: AsyncSession, *, ticket_id: str, account_id: str, event_group_id: str,
+    title_snapshot: str, source: str, status: str,
+    rejection_reason: str | None = None, total_stake: Decimal | None = None,
+    expected_profit: Decimal | None = None, expected_edge_bps: Decimal | None = None,
+) -> None:
+    session.add(
+        m.PaperTicket(
+            id=ticket_id,
+            account_id=account_id,
+            event_group_id=event_group_id,
+            title_snapshot=title_snapshot,
+            source=source,
+            status=status,
+            rejection_reason=rejection_reason,
+            total_stake=total_stake,
+            expected_profit=expected_profit,
+            expected_edge_bps=expected_edge_bps,
+        )
+    )
+
+
+async def insert_paper_settlement(
+    session: AsyncSession, *, outcome_id: str, venue_id: str,
+    resolved_value: Decimal, source: str = "heuristic",
+) -> None:
+    await ensure_outcome_placeholder(session, outcome_id, venue_id=venue_id)
+    session.add(
+        m.PaperSettlement(
+            outcome_id=outcome_id, resolved_value=resolved_value, source=source
+        )
+    )
+
+
+async def list_paper_settlements(session: AsyncSession) -> list[dict]:
+    """Latest settlement per outcome, newest first."""
+    rows = (
+        await session.execute(
+            select(m.PaperSettlement).order_by(m.PaperSettlement.ts.desc())
+        )
+    ).scalars().all()
+    seen: set[str] = set()
+    out: list[dict] = []
+    for r in rows:
+        if r.outcome_id in seen:
+            continue
+        seen.add(r.outcome_id)
+        out.append(
+            {
+                "outcome_id": r.outcome_id,
+                "resolved_value": r.resolved_value,
+                "ts": r.ts,
+                "source": r.source,
+            }
+        )
+    return out
 
 
 async def upsert_paper_position(
@@ -355,12 +415,14 @@ async def list_paper_orders(session: AsyncSession, account_id: str) -> list[dict
     return [
         {
             "id": r.id,
+            "ticket_id": r.ticket_id,
             "venue_id": r.venue_id,
             "outcome_id": r.outcome_id,
             "is_buy": r.is_buy,
             "qty": r.qty,
             "limit_price": r.limit_price,
             "status": r.status,
+            "rejection_reason": r.rejection_reason,
             "submitted_at": r.submitted_at,
         }
         for r in rows
@@ -398,9 +460,12 @@ __all__ = [
     "insert_paper_fill",
     "insert_paper_order",
     "insert_paper_pnl_snapshot",
+    "insert_paper_settlement",
+    "insert_paper_ticket",
     "insert_quote",
     "list_event_groups",
     "list_paper_orders",
+    "list_paper_settlements",
     "list_pnl_snapshots",
     "list_recent_opportunities",
     "upsert_event_group",
