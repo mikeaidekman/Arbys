@@ -324,3 +324,61 @@ def test_unknown_size_still_fills():
     )
     assert reason is None
     assert fill is not None
+
+
+def test_order_larger_than_resting_size_is_rejected():
+    """The book moved between detection and execution: reject rather than
+    partial-fill, since a partial leg of a two-leg arb leaves it unhedged."""
+    book = QuoteBook()
+    book.upsert(Quote(outcome_id="o1", bid=Decimal("0.40"), ask=Decimal("0.45"),
+                       ask_size=Decimal("3")))
+    broker = _make_broker("poly", book)
+    broker.deposit("acct", Decimal("100"))
+    _order, fill, reason = broker.apply_fill(
+        account_id="acct", outcome_id="o1", is_buy=True,
+        qty=Decimal("100"), limit_price=Decimal("0.50"),
+    )
+    assert fill is None
+    assert reason == "insufficient_liquidity"
+
+
+def test_order_within_resting_size_fills():
+    book = QuoteBook()
+    book.upsert(Quote(outcome_id="o1", bid=Decimal("0.40"), ask=Decimal("0.45"),
+                       ask_size=Decimal("3")))
+    broker = _make_broker("poly", book)
+    broker.deposit("acct", Decimal("100"))
+    _order, fill, reason = broker.apply_fill(
+        account_id="acct", outcome_id="o1", is_buy=True,
+        qty=Decimal("3"), limit_price=Decimal("0.50"),
+    )
+    assert reason is None
+    assert fill is not None and fill.qty == Decimal("3")
+
+
+def test_unknown_size_still_fills_any_qty():
+    """None = unknown. POST /quotes omits sizes, and those must keep working."""
+    book = QuoteBook()
+    book.upsert(Quote(outcome_id="o1", bid=Decimal("0.40"), ask=Decimal("0.45")))
+    broker = _make_broker("poly", book)
+    broker.deposit("acct", Decimal("100"))
+    _order, fill, reason = broker.apply_fill(
+        account_id="acct", outcome_id="o1", is_buy=True,
+        qty=Decimal("100"), limit_price=Decimal("0.50"),
+    )
+    assert reason is None
+    assert fill is not None
+
+
+def test_known_empty_still_reports_no_liquidity():
+    """0 and "too small" are different failures and must stay distinguishable."""
+    book = QuoteBook()
+    book.upsert(Quote(outcome_id="o1", bid=Decimal("0.40"), ask=Decimal("0.45"),
+                       ask_size=Decimal("0")))
+    broker = _make_broker("poly", book)
+    broker.deposit("acct", Decimal("100"))
+    _order, _fill, reason = broker.apply_fill(
+        account_id="acct", outcome_id="o1", is_buy=True,
+        qty=Decimal("1"), limit_price=Decimal("0.50"),
+    )
+    assert reason == "no_liquidity"

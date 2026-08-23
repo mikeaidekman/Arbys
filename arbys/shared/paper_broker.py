@@ -171,12 +171,18 @@ class PaperExecutionAdapter(ExecutionAdapter):
         # at size 0, so the live side stays tradeable. Filling against the
         # synthesised side would be a trade into an empty book.
         #
-        # Only an explicit 0 blocks. None means the venue did not report depth
-        # — most quotes, including every hand-pushed one — and must still fill,
-        # or POST /quotes stops working.
+        # None means the venue did not report depth — most quotes, including
+        # every hand-pushed one — and must still fill, or POST /quotes stops
+        # working. A known size smaller than the order is a different failure:
+        # the engine sizes to depth, so this fires when the book moved between
+        # detection and execution. Reject rather than partial-fill, because a
+        # partial on one leg of a two-leg arb leaves an unhedged position.
         resting = quote.ask_size if is_buy else quote.bid_size
-        if resting is not None and resting <= 0:
-            return "no_liquidity"
+        if resting is not None:
+            if resting <= 0:
+                return "no_liquidity"
+            if qty > resting:
+                return "insufficient_liquidity"
         raw_px = quote.ask if is_buy else quote.bid
         px = self._apply_slippage(raw_px, is_buy)
         if is_buy and px > limit_price:
