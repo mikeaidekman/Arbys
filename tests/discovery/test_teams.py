@@ -86,3 +86,70 @@ def test_parse_vs_question_unknown_team_returns_none():
 
 def test_parse_vs_question_no_separator_returns_none():
     assert MLB_RESOLVER.parse_vs_question("Los Angeles Dodgers") is None
+
+
+# ---------------------------------------------------------------------------
+# Polymarket US name resolution: the field's contents vary by league
+# ---------------------------------------------------------------------------
+
+def test_polymarket_name_resolves_a_bare_city():
+    """Polymarket US sends a bare city for WNBA ("Golden State"), not the full
+    name it sends for NFL and MLB. Without this every WNBA game failed to
+    resolve and the league discovered zero groups while both venues quoted it.
+    """
+    from arbys.discovery.teams import WNBA_RESOLVER
+
+    team = WNBA_RESOLVER.by_polymarket_name("Golden State")
+    assert team is not None
+    assert team.code == "GS"
+    assert WNBA_RESOLVER.by_polymarket_name("Minnesota").code == "MIN"
+
+
+def test_polymarket_name_still_resolves_a_full_name():
+    """The NFL/MLB shape must keep working — full name takes precedence."""
+    from arbys.discovery.teams import NFL_RESOLVER
+
+    assert NFL_RESOLVER.by_polymarket_name("Arizona Cardinals").code == "ARI"
+
+
+def test_polymarket_name_refuses_a_shared_city():
+    """The bare-city fallback reuses by_kalshi_title's uniqueness rule, so a
+    city fielding two teams stays unresolved rather than collapsing into one.
+    NFL has two Los Angeles teams and MLB two in Chicago."""
+    from arbys.discovery.teams import MLB_RESOLVER, NFL_RESOLVER
+
+    assert NFL_RESOLVER.by_polymarket_name("Los Angeles") is None
+    assert MLB_RESOLVER.by_polymarket_name("Chicago") is None
+
+
+def test_ambiguous_nickname_is_not_an_identity():
+    """A bare nickname only identifies a team where it is unique in the league.
+
+    Pro nicknames are distinct, but college mascots are not: 28 repeat across
+    the 88 Polymarket US CFB games observed on 2026-08-24. Indexing them
+    unconditionally let the last-inserted school win, which resolves one
+    school's market to another's code and invents an arb between two
+    different fixtures.
+    """
+    from arbys.discovery.teams import Team, TeamResolver
+
+    resolver = TeamResolver(
+        (
+            Team("MEM", "Memphis Tigers", "Memphis", "Tigers"),
+            Team("AUB", "Auburn Tigers", "Auburn", "Tigers"),
+            Team("UNC", "North Carolina Tar Heels", "North Carolina", "Tar Heels"),
+        )
+    )
+    # Shared mascot: unresolvable rather than an arbitrary winner.
+    assert resolver.by_polymarket_name("Tigers") is None
+    # A unique mascot still resolves.
+    assert resolver.by_polymarket_name("Tar Heels").code == "UNC"
+    # Qualified forms stay available for the ambiguous ones.
+    assert resolver.by_polymarket_name("Memphis Tigers").code == "MEM"
+    assert resolver.by_polymarket_name("Auburn Tigers").code == "AUB"
+
+
+def test_unique_nickname_still_resolves_for_pro_leagues():
+    from arbys.discovery.teams import MLB_RESOLVER
+
+    assert MLB_RESOLVER.by_polymarket_name("Dodgers").code == "LAD"

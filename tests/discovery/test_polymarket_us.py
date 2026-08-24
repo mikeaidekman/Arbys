@@ -261,3 +261,40 @@ async def test_tennis_matches_a_kalshi_game_end_to_end():
         ref="K1",
     )
     assert len(match_games([kalshi], [p], date_tolerance_days=1)) == 1
+
+
+# ---------------------------------------------------------------------------
+# game_date must be Eastern, because Kalshi's is
+# ---------------------------------------------------------------------------
+
+def test_eastern_date_moves_an_evening_game_back_a_day():
+    """An evening kickoff is the previous day in Eastern time.
+
+    `game_date` is only ever compared against Kalshi's, which comes from its
+    event ticker and carries a local *Eastern trading day*. A WNBA tip at
+    00:00Z is 8pm ET the day before, so Kalshi says Aug 24 while a naive UTC
+    read says Aug 25 — and `_same_fixture` falls back to comparing dates for
+    every sport whose Kalshi ticker omits HHMM (WNBA, NFL, CFB). Reading UTC
+    there silently dropped every evening fixture in those leagues: WNBA
+    discovered zero groups, and NFL discovered 151 totals groups where the
+    Eastern read finds 252.
+    """
+    from datetime import UTC, date, datetime
+
+    from arbys.discovery.polymarket_us import _eastern_date
+
+    # 2026-08-25 00:00Z == 2026-08-24 20:00 EDT
+    assert _eastern_date(datetime(2026, 8, 25, 0, 0, tzinfo=UTC)) == date(2026, 8, 24)
+    # 2026-09-11 00:35Z == 2026-09-10 20:35 EDT (an NFL primetime kickoff)
+    assert _eastern_date(datetime(2026, 9, 11, 0, 35, tzinfo=UTC)) == date(2026, 9, 10)
+
+
+def test_eastern_date_leaves_an_afternoon_game_alone():
+    """A 1pm ET kickoff is the same calendar day in both zones, which is why
+    the bug hid: NFL Sunday afternoon games matched fine all along."""
+    from datetime import UTC, date, datetime
+
+    from arbys.discovery.polymarket_us import _eastern_date
+
+    # 2026-09-13 17:00Z == 2026-09-13 13:00 EDT
+    assert _eastern_date(datetime(2026, 9, 13, 17, 0, tzinfo=UTC)) == date(2026, 9, 13)

@@ -18,7 +18,13 @@ from .polymarket_us import (
     fetch_polymarket_us_tennis,
     fetch_polymarket_us_totals,
 )
-from .teams import MLB_RESOLVER, NBA_RESOLVER, NFL_RESOLVER, TeamResolver
+from .teams import (
+    MLB_RESOLVER,
+    NBA_RESOLVER,
+    NFL_RESOLVER,
+    WNBA_RESOLVER,
+    TeamResolver,
+)
 
 log = logging.getLogger(__name__)
 
@@ -27,16 +33,18 @@ TEAM_SPORTS: tuple[tuple[str, TeamResolver], ...] = (
     ("mlb", MLB_RESOLVER),
     ("nfl", NFL_RESOLVER),
     ("nba", NBA_RESOLVER),
+    ("wnba", WNBA_RESOLVER),
 )
 
-# Sports whose over/under markets both venues quote. MLB is absent by choice,
-# not necessity: Polymarket US carries baseball_team_full_game_total and Kalshi
-# lists KXMLBTOTAL, so adding ("mlb", MLB_RESOLVER) here should work. It is
-# held back so the Polymarket US port had exactly one behavioural variable —
-# wire it once the port is proven live. (Polymarket *international* genuinely
-# carried no baseball totals, which is why this used to be impossible.)
+# Sports whose over/under markets both venues quote. MLB and WNBA were wired on
+# 2026-08-24, once the Polymarket US port had been proven live — the reason they
+# were previously held back was to keep the port to exactly one behavioural
+# variable, not any absence of markets. NBA stays out until its season opens,
+# for the same reason its moneyline is unverified.
 TOTALS_SPORTS: tuple[tuple[str, TeamResolver], ...] = (
     ("nfl", NFL_RESOLVER),
+    ("mlb", MLB_RESOLVER),
+    ("wnba", WNBA_RESOLVER),
 )
 
 

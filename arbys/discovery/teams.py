@@ -83,9 +83,21 @@ class TeamResolver:
             self._by_city_and_prefix[key] = t
         # Full name lower -> team, plus common alias forms.
         self._by_full: dict[str, Team] = {t.full_name.lower(): t for t in teams}
+        # A bare nickname is only an identity where it is unique in the league.
+        # Pro leagues have distinct nicknames, but college does not: across the
+        # 88 Polymarket US CFB games observed on 2026-08-24, 28 mascots repeat —
+        # "Tigers" seven times, "Wildcats" six, "Bulldogs" five. Indexing those
+        # unconditionally made the last-inserted school win, silently resolving
+        # one school's market to another's code, which is how a matcher invents
+        # an arb between two different fixtures.
+        nickname_counts: dict[str, int] = {}
+        for t in teams:
+            key = t.nickname.lower()
+            nickname_counts[key] = nickname_counts.get(key, 0) + 1
         for t in teams:
             self._by_full[f"{t.city} {t.nickname}".lower()] = t
-            self._by_full[t.nickname.lower()] = t
+            if nickname_counts[t.nickname.lower()] == 1:
+                self._by_full[t.nickname.lower()] = t
         # Bare city -> team, but only where the city fields exactly one team.
         # Shared cities are deliberately absent so they resolve to None.
         city_counts: dict[str, int] = {}
@@ -123,10 +135,30 @@ class TeamResolver:
         return self._by_city_unique.get(t.lower())
 
     def by_polymarket_name(self, name: str) -> Team | None:
-        """Resolve a Polymarket outcome or question fragment like
-        "Los Angeles Dodgers" or "Chicago Cubs"."""
+        """Resolve a Polymarket ``teams[].name`` like "Los Angeles Dodgers",
+        "Chicago Cubs", or a bare city.
+
+        What that field holds varies by league, which is not obvious from the
+        NFL and MLB cases the first port was built against. Verified live on
+        2026-08-24 against Polymarket US:
+
+        * NFL / MLB -> full name, "Arizona Cardinals"
+        * WNBA      -> bare city, "Golden State"
+        * CFB       -> mascot only, "Tar Heels"
+
+        Without the bare-city fallback below, every WNBA game failed to
+        resolve and the league discovered zero groups while both venues were
+        quoting it.
+
+        The fallback reuses the same uniqueness rule as ``by_kalshi_title``: a
+        shared city stays unresolved, so NFL's two "Los Angeles" teams cannot
+        be silently collapsed into one.
+        """
         n = name.strip().lower()
-        return self._by_full.get(n)
+        team = self._by_full.get(n)
+        if team is not None:
+            return team
+        return self._by_city_unique.get(n)
 
     def parse_vs_question(self, question: str) -> tuple[Team, Team] | None:
         """Parse a question like "Los Angeles Dodgers vs. Chicago Cubs"."""
@@ -191,6 +223,36 @@ NFL_TEAMS: tuple[Team, ...] = (
 )
 
 NFL_RESOLVER = TeamResolver(NFL_TEAMS)
+
+
+# Kalshi WNBA codes and Polymarket US names, verified against KXWNBAGAME
+# events and /v2/leagues/wnba/events on 2026-08-24. Unusually easy: both
+# venues send the bare city and the two strings are byte-identical for every
+# team observed, so nothing here needs an alias. No city fields two WNBA
+# teams, so no "Los Angeles C" style disambiguation arises either.
+#
+# Indiana and Las Vegas had no open game in the observed window and are
+# included from the league roster rather than from venue data; their city
+# strings follow the same bare-city convention as the twelve confirmed.
+WNBA_TEAMS: tuple[Team, ...] = (
+    Team("ATL", "Atlanta Dream", "Atlanta", "Dream"),
+    Team("CHI", "Chicago Sky", "Chicago", "Sky"),
+    Team("CONN", "Connecticut Sun", "Connecticut", "Sun"),
+    Team("DAL", "Dallas Wings", "Dallas", "Wings"),
+    Team("GS", "Golden State Valkyries", "Golden State", "Valkyries"),
+    Team("IND", "Indiana Fever", "Indiana", "Fever"),
+    Team("LA", "Los Angeles Sparks", "Los Angeles", "Sparks"),
+    Team("LV", "Las Vegas Aces", "Las Vegas", "Aces"),
+    Team("MIN", "Minnesota Lynx", "Minnesota", "Lynx"),
+    Team("NY", "New York Liberty", "New York", "Liberty"),
+    Team("PDX", "Portland Fire", "Portland", "Fire"),
+    Team("PHX", "Phoenix Mercury", "Phoenix", "Mercury"),
+    Team("SEA", "Seattle Storm", "Seattle", "Storm"),
+    Team("TOR", "Toronto Tempo", "Toronto", "Tempo"),
+    Team("WSH", "Washington Mystics", "Washington", "Mystics"),
+)
+
+WNBA_RESOLVER = TeamResolver(WNBA_TEAMS)
 
 
 # NBA. Codes follow Kalshi's documented convention, but KXNBAGAME had no open

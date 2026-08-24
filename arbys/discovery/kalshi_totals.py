@@ -42,6 +42,8 @@ TOTALS_SERIES = {
     "mlb": "KXMLBTOTAL",
     "nfl": "KXNFLTOTAL",
     "nba": "KXNBATOTAL",
+    # Verified live 2026-08-24: "Over 149.5 points scored", floor_strike 149.5.
+    "wnba": "KXWNBATOTAL",
 }
 
 # "KXNFLTOTAL-26AUG13DETCIN" -> ("26AUG13", "DETCIN"); the time, when present,

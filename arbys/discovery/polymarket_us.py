@@ -20,8 +20,10 @@ side at all - the matcher's start-time comparison works directly.
 from __future__ import annotations
 
 import logging
+from datetime import date, datetime
 from decimal import Decimal, InvalidOperation
 from typing import Any
+from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 import httpx
 
@@ -39,6 +41,7 @@ LEAGUE_SLUGS = {
     "mlb": "mlb",
     "nfl": "nfl",
     "nba": "nba",
+    "wnba": "wnba",
 }
 
 TENNIS_LEAGUES = ("atp", "wta")
@@ -56,9 +59,18 @@ MONEYLINE_TYPES = frozenset(
 )
 TENNIS_WINNER_TYPES = frozenset({"tennis_match_winner"})
 
-# NFL only in Phase 1. Polymarket US also carries MLB and NBA totals; those
-# are held back so the venue port has exactly one behavioural variable.
-TOTAL_TYPES = frozenset({"football_team_full_game_total"})
+# One shared set, like MONEYLINE_TYPES above: `_fetch_events` is league-scoped,
+# so a baseball type can never surface in the nfl league response and there is
+# nothing to key per sport. MLB and WNBA totals were wired on 2026-08-24 once
+# the Polymarket US port was proven live; NBA stays out until its season opens,
+# for the same reason its moneyline is unverified.
+TOTAL_TYPES = frozenset(
+    {
+        "football_team_full_game_total",
+        "baseball_team_full_game_total",
+        "basketball_team_full_game_total",
+    }
+)
 
 
 async def _fetch_events(
@@ -107,6 +119,31 @@ def _team_name(side: dict[str, Any]) -> str | None:
     return name if isinstance(name, str) else None
 
 
+def _eastern_date(start: datetime) -> date:
+    """The game's date **in Eastern time**, not UTC.
+
+    `game_date` is only ever compared against Kalshi's, and Kalshi's comes
+    from its event ticker, which carries a local *Eastern trading day*. An
+    evening game therefore lands on different calendar dates on the two
+    venues: a WNBA tip at 00:00Z is 8pm ET the previous day, so Kalshi says
+    Aug 24 while a naive UTC read says Aug 25. `_same_fixture` falls back to
+    comparing dates whenever either side has no exact start — which is every
+    sport whose Kalshi ticker omits HHMM (WNBA, NFL, CFB) — so a UTC date
+    silently dropped every evening fixture in those leagues.
+
+    Converting here rather than widening the date tolerance is deliberate:
+    tolerance would also fuse Monday's game with Tuesday's and invent an arb
+    between two different fixtures.
+
+    Falls back to the UTC date if the tz database is unavailable, which is the
+    behaviour this replaced — wrong for evening games, but not a crash.
+    """
+    try:
+        return start.astimezone(ZoneInfo("America/New_York")).date()
+    except (ValueError, ZoneInfoNotFoundError):  # pragma: no cover - no tzdata
+        return start.date()
+
+
 async def fetch_polymarket_us_games(
     *,
     resolver: TeamResolver,
@@ -146,7 +183,7 @@ async def fetch_polymarket_us_games(
                 VenueGame(
                     sport=sport,
                     venue_id="polymarket_us",
-                    game_date=start_time.date(),
+                    game_date=_eastern_date(start_time),
                     teams=(team_long, team_short),
                     outcome_ids={
                         team_long.code: f"{slug}:LONG",
@@ -203,7 +240,7 @@ async def fetch_polymarket_us_totals(
                 VenueGame(
                     sport=sport,
                     venue_id="polymarket_us",
-                    game_date=start_time.date(),
+                    game_date=_eastern_date(start_time),
                     teams=(team_a, team_b),
                     outcome_ids={
                         OVER: f"{slug}:LONG",
@@ -263,7 +300,7 @@ async def fetch_polymarket_us_tennis(
                     VenueGame(
                         sport=league,
                         venue_id="polymarket_us",
-                        game_date=start_time.date(),
+                        game_date=_eastern_date(start_time),
                         teams=(p_long, p_short),
                         outcome_ids={
                             p_long.code: f"{slug}:LONG",

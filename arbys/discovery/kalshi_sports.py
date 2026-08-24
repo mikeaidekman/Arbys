@@ -74,6 +74,9 @@ SERIES_TICKERS = {
     "mlb": "KXMLBGAME",
     "nfl": "KXNFLGAME",
     "nba": "KXNBAGAME",
+    # Verified live 2026-08-24: KXWNBAGAME returns two markets per event
+    # keyed by team code, identical in shape to the NBA/NFL/MLB series.
+    "wnba": "KXWNBAGAME",
 }
 
 
