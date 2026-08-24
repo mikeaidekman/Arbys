@@ -699,3 +699,61 @@ def test_positions_endpoint_returns_readable_titles():
         assert len(positions) == 2
         assert all(p["title"] for p in positions)
         assert all(p["mark"] is not None for p in positions)
+
+
+def test_positions_endpoint_survives_event_group_retirement():
+    """Discovery retires event groups routinely, deleting their legs -- which
+    would blank the live join's title for exactly the outcomes worth
+    auditing (finished games). The ticket's title_snapshot must survive it.
+    """
+    with TestClient(create_app()) as client:
+        _register(client, "eg-retire", "p-yes-ret", "k-no-ret")
+        client.post("/quotes", json={"outcome_id": "p-yes-ret", "bid": "0.40", "ask": "0.40"})
+        client.post("/quotes", json={"outcome_id": "k-no-ret", "bid": "0.50", "ask": "0.50"})
+        client.post(
+            "/paper/execute",
+            json={"event_group_id": "eg-retire", "outcome_ids": ["p-yes-ret", "k-no-ret"]},
+        )
+        assert client.delete("/event-groups/eg-retire").status_code == 204
+
+        positions = client.get("/paper/default/positions").json()
+        assert len(positions) == 2
+        for p in positions:
+            assert p["title"] == "Group eg-retire"
+
+
+def test_positions_endpoint_prefers_ticket_snapshot_over_the_live_join():
+    """The two title sources can disagree even before a group is retired: a
+    later re-registration can rename the live event_group while an
+    already-filled ticket's title_snapshot stays frozen at submit time. The
+    snapshot must win -- it's what the ticket actually traded under.
+
+    Unlike the retirement test above, both sources have a row for these
+    outcome_ids here, so this is the one that actually exercises which
+    `setdefault` loop runs first in `paper_position_titles`.
+    """
+    with TestClient(create_app()) as client:
+        _register(client, "eg-rename", "p-yes-rn", "k-no-rn")
+        client.post("/quotes", json={"outcome_id": "p-yes-rn", "bid": "0.40", "ask": "0.40"})
+        client.post("/quotes", json={"outcome_id": "k-no-rn", "bid": "0.50", "ask": "0.50"})
+        client.post(
+            "/paper/execute",
+            json={"event_group_id": "eg-rename", "outcome_ids": ["p-yes-rn", "k-no-rn"]},
+        )
+        r = client.post(
+            "/event-groups",
+            json={
+                "id": "eg-rename",
+                "title": "Renamed after the fact",
+                "legs": [
+                    {"outcome_id": "p-yes-rn", "venue_id": "polymarket_us", "is_yes_side": True},
+                    {"outcome_id": "k-no-rn", "venue_id": "kalshi", "is_yes_side": False},
+                ],
+            },
+        )
+        assert r.status_code == 201
+
+        positions = client.get("/paper/default/positions").json()
+        assert len(positions) == 2
+        for p in positions:
+            assert p["title"] == "Group eg-rename"

@@ -375,11 +375,12 @@ def create_app() -> FastAPI:
             realized[venue_id] = broker.realized_pnl(account_id)
         eq = account_equity(s.paper_brokers, s.quotebook, account_id)
         async with session_scope() as session:
-            open_tickets = [
-                t
-                for t in await repo.list_paper_tickets(session, account_id)
-                if t["status"] == "filled" and t["realized_profit"] is None
-            ]
+            # Counted in SQL, not by hydrating list_paper_tickets: that call
+            # defaults to limit=200 newest-first across every status, so an
+            # active account (small tickets, plus missed/rejected noise)
+            # would silently undercount past the 200th row -- on a field this
+            # endpoint is polled for every few seconds.
+            open_count = await repo.count_open_paper_tickets(session, account_id)
         return PaperAccountSummary(
             account_id=account_id,
             balances=balances,
@@ -389,7 +390,7 @@ def create_app() -> FastAPI:
             position_value=eq.position_value,
             equity=eq.equity,
             unrealized_pnl=eq.unrealized,
-            open_ticket_count=len(open_tickets),
+            open_ticket_count=open_count,
         )
 
     @app.get("/paper/{account_id}/tickets", response_model=list[TicketOut])

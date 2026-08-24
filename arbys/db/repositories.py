@@ -561,6 +561,44 @@ def _score_ticket(
     return total
 
 
+async def count_open_paper_tickets(session: AsyncSession, account_id: str) -> int:
+    """Filled tickets with at least one leg still unsettled.
+
+    Counted in SQL rather than by hydrating `list_paper_tickets`, which is
+    capped at 200 rows and would silently undercount an active account — and
+    which the summary endpoint polls every few seconds. Mirrors
+    `_score_ticket`'s open/settled semantics exactly (no fill yet, or the
+    leg's outcome carries no settlement row, means open) via a two-query
+    approach rather than one gnarly SQL boolean, so the two can never
+    disagree and neither is bounded by a row limit.
+    """
+    rows = (
+        await session.execute(
+            select(m.PaperTicket.id, m.PaperOrder.outcome_id, m.PaperFill.price)
+            .select_from(m.PaperTicket)
+            .outerjoin(m.PaperOrder, m.PaperOrder.ticket_id == m.PaperTicket.id)
+            .outerjoin(m.PaperFill, m.PaperFill.order_id == m.PaperOrder.id)
+            .where(
+                m.PaperTicket.account_id == account_id,
+                m.PaperTicket.status == "filled",
+            )
+        )
+    ).all()
+    if not rows:
+        return 0
+    settled_outcomes = {
+        row[0]
+        for row in (
+            await session.execute(select(m.PaperSettlement.outcome_id).distinct())
+        ).all()
+    }
+    open_ids: set[str] = set()
+    for ticket_id, outcome_id, fill_price in rows:
+        if outcome_id is None or fill_price is None or outcome_id not in settled_outcomes:
+            open_ids.add(ticket_id)
+    return len(open_ids)
+
+
 async def paper_position_titles(
     session: AsyncSession, account_id: str
 ) -> dict[str, str]:
@@ -606,6 +644,7 @@ async def update_paper_ticket_status(
 
 
 __all__ = [
+    "count_open_paper_tickets",
     "delete_event_group",
     "ensure_outcome_placeholder",
     "ensure_paper_account",

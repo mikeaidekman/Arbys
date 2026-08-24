@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import os
+from datetime import UTC, datetime
 from decimal import Decimal
 from pathlib import Path
 
@@ -245,3 +246,48 @@ async def test_tickets_filter_by_status_and_source():
         only_auto = await repo.list_paper_tickets(session, "default", source="auto")
         assert [t["id"] for t in only_auto] == ["tkt-missed"]
         assert only_missed[0]["legs"] == []
+
+
+async def test_open_ticket_count_is_not_truncated_by_the_200_row_default():
+    """`list_paper_tickets` defaults to `limit=200`, newest-first, across every
+    status. A naive open-count built by hydrating it and filtering in Python
+    would silently drop an older filled-but-unsettled ticket once 200 newer
+    tickets of *any* status -- missed, rejected, or just other fills -- sit
+    ahead of it. `count_open_paper_tickets` must not go through that limit.
+    """
+    await create_all()
+    async with session_scope() as session:
+        await repo.ensure_paper_account(session, "default")
+        # The one ticket that must be counted: filled, no settlement.
+        await _two_leg_filled_ticket(session, ticket_id="tkt-old-open")
+        # Force it strictly older than the 200 rows below, regardless of
+        # sqlite's CURRENT_TIMESTAMP second-level resolution -- otherwise a
+        # timestamp tie could leave it inside the top-200 window by luck and
+        # the test would not actually reproduce the truncation.
+        old_ticket = await session.get(m.PaperTicket, "tkt-old-open")
+        old_ticket.submitted_at = datetime(2020, 1, 1, tzinfo=UTC)
+        # 200 newer, unrelated tickets crowd it out of list_paper_tickets'
+        # default newest-first window.
+        for i in range(200):
+            await repo.insert_paper_ticket(
+                session,
+                ticket_id=f"tkt-noise-{i}",
+                account_id="default",
+                event_group_id="eg-noise",
+                title_snapshot="noise",
+                source="auto",
+                status="missed",
+                rejection_reason="edge_no_longer_available",
+            )
+
+    async with session_scope() as session:
+        # Confirm the setup actually reproduces the bug this test pins: the
+        # old list_paper_tickets-based approach must miss the buried ticket.
+        naive = [
+            t
+            for t in await repo.list_paper_tickets(session, "default")
+            if t["status"] == "filled" and t["realized_profit"] is None
+        ]
+        assert naive == [], "setup didn't crowd the open ticket out of the 200-row window"
+
+        assert await repo.count_open_paper_tickets(session, "default") == 1
