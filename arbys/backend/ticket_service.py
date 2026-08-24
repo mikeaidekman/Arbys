@@ -233,22 +233,20 @@ async def submit_arb_ticket(
     except InsufficientLegsError as e:
         reason = str(e)
         await _set_status(ticket_id, status="rejected", reason=reason)
-        # e.rejections is the discriminator: only the preview phase (and the
-        # atomic commit's unwound failure) raise with structured per-leg
-        # rejections, and neither of those has written any paper_order rows
-        # yet. The two post-preview *string* raises in
-        # `execution_router._commit_sequentially` carry `rejections == ()`
-        # and are raised *after* `place_order` already persisted a row for
-        # each attempted leg (including the one that filled) via
-        # `emit_order_events`. Writing rejected-leg rows here for that case
-        # would duplicate the filled leg -- once `filled` with a real fill,
-        # once `rejected` -- which corrupts `_score_ticket` (a phantom
-        # rejected leg makes it return None forever) and duplicates the
-        # frontend's `${venue_id}:${outcome_id}` React key. So a
-        # string-raise ticket is recorded as `rejected` with the reason, but
-        # gets no extra leg rows here -- whatever `_commit_sequentially`
-        # already wrote is the only leg history for it.
-        if e.rejections:
+        # e.legs_persisted is the discriminator, not whether e.rejections is
+        # structured: only `_commit_sequentially` has already persisted a
+        # paper_order row for each attempted leg (via `place_order` ->
+        # `emit_order_events`, including the one that filled) by the time it
+        # raises, so writing rejected-leg rows here for that case would
+        # duplicate the filled leg -- once `filled` with a real fill, once
+        # `rejected` -- which corrupts `_score_ticket` (a phantom rejected
+        # leg makes it return None forever) and duplicates the frontend's
+        # `${venue_id}:${outcome_id}` React key. The preview phase and
+        # `_commit_atomically`'s post-preview failure both raise having
+        # persisted nothing -- the latter unwinds every applied leg before
+        # raising -- so their legs must be written here or the audit record
+        # is lost entirely (a rejected ticket with `legs: []`).
+        if not e.legs_persisted:
             await _write_rejected_legs(
                 ticket_id=ticket_id,
                 account_id=account_id,

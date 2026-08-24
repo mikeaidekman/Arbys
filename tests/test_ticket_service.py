@@ -145,14 +145,85 @@ async def test_router_rejection_writes_per_leg_order_rows(monkeypatch):
     assert reasons["p-yes"] == "ticket_rejected"
 
 
+async def test_atomic_commit_failure_writes_per_leg_order_rows():
+    """Drives the *real* router into `_commit_atomically`'s post-preview
+    failure branch -- no stubbing of `router.submit` -- to prove that path
+    also gets its rejected legs written, not just the preview path above.
+
+    The preview loop checks each leg's cash requirement independently
+    against the unmutated balance, so a same-venue two-leg ticket whose
+    *combined* cost exceeds available cash passes preview on both legs (each
+    leg's cost alone is affordable) and only fails when the second leg's
+    `apply_fill` sees the balance already reduced by the first. That failure
+    unwinds completely (`restore_account` + `forget_order`) before raising a
+    plain string with `legs_persisted=False`, so nothing about the two legs
+    is in the database unless `ticket_service` writes it here.
+
+    Both legs sit on Kalshi, which routes through `detect_complementary_set`
+    (buy every outcome of a single-venue crossed book) rather than the
+    cross-venue detector, so a real two-leg same-adapter ticket can be
+    produced without a second venue.
+    """
+    s = get_state()
+    group = EventGroup(
+        id="eg-2",
+        title="Kalshi crossed book",
+        legs=(
+            EventGroupLeg(outcome_id="k-yes", venue_id="kalshi", is_yes_side=True),
+            EventGroupLeg(outcome_id="k-no", venue_id="kalshi", is_yes_side=False),
+        ),
+    )
+    s.event_groups[group.id] = group
+    s.engine.register_group(group)
+    async with session_scope() as session:
+        await repo.ensure_paper_account(session, s.default_account_id)
+    for oid in ("k-yes", "k-no"):
+        s.quotebook.upsert(
+            Quote(
+                outcome_id=oid,
+                bid=Decimal("0.47"),
+                ask=Decimal("0.47"),
+                ask_size=Decimal("100"),
+            )
+        )
+    # Each leg costs ~48.74 (100 contracts at 0.47 + Kalshi's 7%*p*(1-p) fee).
+    # $60 covers either leg alone but not both, so preview passes for both
+    # (checked independently) and the second leg's apply_fill is what fails.
+    s.paper_brokers["kalshi"].deposit(s.default_account_id, Decimal("60"))
+
+    found = s.engine.evaluate_now("eg-2")
+    comp = next(o for o in found if o.event_group_id == "eg-2:kalshi")
+    assert {leg.outcome_id for leg in comp.legs} == {"k-yes", "k-no"}
+
+    result = await submit_arb_ticket(s, comp, source="manual")
+
+    assert result.status == "rejected"
+    assert result.order_ids == ()
+    async with session_scope() as session:
+        tickets = await repo.list_paper_tickets(session, s.default_account_id)
+    assert tickets[0]["status"] == "rejected"
+    legs = tickets[0]["legs"]
+    assert len(legs) == 2
+    reasons = {leg["outcome_id"]: leg["rejection_reason"] for leg in legs}
+    # e.rejections is empty for this string-raise, so both legs fall back to
+    # the generic reason rather than naming which one actually failed.
+    assert reasons == {"k-yes": "ticket_rejected", "k-no": "ticket_rejected"}
+    statuses = {leg["status"] for leg in legs}
+    assert statuses == {"rejected"}
+    # The unwind must have left no trace in the broker's own books either.
+    cash, positions = s.paper_brokers["kalshi"].account_snapshot(s.default_account_id)
+    assert cash == Decimal("60")
+    assert positions == {}
+
+
 async def test_string_raise_rejection_does_not_duplicate_leg_rows(monkeypatch):
     """`_commit_sequentially`'s post-preview failures raise a plain string
-    (`InsufficientLegsError.rejections == ()`), *after* `place_order` already
-    persisted a `paper_order` row for each attempted leg via
-    `emit_order_events` -- unlike the preview/atomic paths, which raise
-    before anything is written. `_write_rejected_legs` must not run for this
-    string-raise case: it would add a second row for a leg that already has
-    one (once `filled`, once `rejected`), corrupting `_score_ticket` and the
+    (`InsufficientLegsError.rejections == ()`) with `legs_persisted=True`,
+    *after* `place_order` already persisted a `paper_order` row for each
+    attempted leg via `emit_order_events` -- unlike the preview/atomic paths,
+    which raise having persisted nothing. `_write_rejected_legs` must not run
+    for this case: it would add a second row for a leg that already has one
+    (once `filled`, once `rejected`), corrupting `_score_ticket` and the
     frontend's per-leg React key.
     """
     from arbys.shared.execution_router import InsufficientLegsError
@@ -161,7 +232,9 @@ async def test_string_raise_rejection_does_not_duplicate_leg_rows(monkeypatch):
     opp = s.engine.evaluate_now("eg-1")[0]
 
     async def _refuse(_intent):
-        raise InsufficientLegsError("post-preview rejection on kalshi: rejected")
+        raise InsufficientLegsError(
+            "post-preview rejection on kalshi: rejected", legs_persisted=True
+        )
 
     monkeypatch.setattr(s.router, "submit", _refuse)
 

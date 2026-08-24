@@ -31,9 +31,24 @@ class InsufficientLegsError(RuntimeError):
 
     `str(...)` keeps the joined `venue:reason` form the API already returns as
     a 409 detail; `rejections` is what the ticket log records per leg.
+
+    `legs_persisted` says whether the raising path already wrote a
+    `paper_order` row for each attempted leg. Only `_commit_sequentially`
+    does: it calls `place_order`, which persists immediately, so a leg row
+    already exists for everything it touched (including the one that
+    filled) before it raises. The preview loop and `_commit_atomically`'s
+    post-preview failure both raise having persisted nothing -- the latter
+    unwinds every applied leg (`restore_account` + `forget_order`) before
+    raising, and `emit_order_events` runs only after the failure check.
     """
 
-    def __init__(self, rejections: tuple[LegRejection, ...] | str) -> None:
+    def __init__(
+        self,
+        rejections: tuple[LegRejection, ...] | str,
+        *,
+        legs_persisted: bool = False,
+    ) -> None:
+        self.legs_persisted = legs_persisted
         if isinstance(rejections, str):
             self.rejections: tuple[LegRejection, ...] = ()
             super().__init__(rejections)
@@ -167,6 +182,7 @@ class ExecutionRouter:
             if order.status != OrderStatus.FILLED:
                 raise InsufficientLegsError(
                     f"post-preview rejection on {leg.venue_id}: {order.status} "
-                    f"({len(orders) - 1} leg(s) already filled and NOT reversed)"
+                    f"({len(orders) - 1} leg(s) already filled and NOT reversed)",
+                    legs_persisted=True,
                 )
         return orders
