@@ -16,6 +16,7 @@ import pytest
 from arbys.backend import state as state_module
 from arbys.backend.state import get_state
 from arbys.backend.ticket_service import submit_arb_ticket
+from arbys.db import models as m
 from arbys.db import repositories as repo
 from arbys.db import session as db_session
 from arbys.db.session import create_all, session_scope
@@ -142,3 +143,28 @@ async def test_router_rejection_writes_per_leg_order_rows(monkeypatch):
     # A leg that previewed fine still gets a row: the ticket failed as a whole
     # and no leg was submitted.
     assert reasons["p-yes"] == "ticket_rejected"
+
+
+async def test_ticket_row_exists_as_pending_before_the_router_runs(monkeypatch):
+    """paper_order.ticket_id is an FK to paper_ticket.id and the sink writes
+    order rows from inside router.submit, so the ticket must already exist.
+    SQLite does not enforce FKs, so only this test stands between that
+    ordering and a Postgres failure.
+    """
+    s, _ = await _arb_group()
+    opp = s.engine.evaluate_now("eg-1")[0]
+    seen: list[str | None] = []
+
+    real_submit = s.router.submit
+
+    async def _observe(intent):
+        async with session_scope() as session:
+            row = await session.get(m.PaperTicket, intent.ticket_id)
+            seen.append(None if row is None else row.status)
+        return await real_submit(intent)
+
+    monkeypatch.setattr(s.router, "submit", _observe)
+
+    result = await submit_arb_ticket(s, opp, source="manual")
+    assert result.status == "filled"
+    assert seen == ["pending"]
