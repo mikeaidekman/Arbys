@@ -84,7 +84,7 @@ export function AccountStrip() {
     <div
       style={{
         display: "flex",
-        gap: "var(--space-5)",
+        gap: "var(--space-4)",
         alignItems: "center",
         padding: "var(--space-2) var(--space-4)",
         borderBottom: "1px solid var(--color-divider)",

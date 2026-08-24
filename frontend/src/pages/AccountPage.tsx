@@ -87,7 +87,7 @@ export function AccountPage() {
         style={{
           display: "flex",
           flexDirection: "column",
-          gap: "var(--space-5)",
+          gap: "var(--space-6)",
           padding: "var(--space-4)",
         }}
       >
@@ -109,7 +109,20 @@ export function AccountPage() {
               </tr>
             </thead>
             <tbody>
-              {open.length === 0 ? (
+              {positions.isLoading ? (
+                <tr>
+                  <td colSpan={6} style={{ opacity: 0.5 }}>
+                    Loading…
+                  </td>
+                </tr>
+              ) : positions.isError ? (
+                <tr>
+                  <td colSpan={6} style={{ color: "var(--vt-red-dark)" }}>
+                    Couldn't load open positions
+                    {positions.error instanceof Error ? `: ${positions.error.message}` : "."}
+                  </td>
+                </tr>
+              ) : open.length === 0 ? (
                 <tr>
                   <td colSpan={6} style={{ opacity: 0.5 }}>
                     No open positions.
@@ -148,7 +161,16 @@ export function AccountPage() {
           <h2 style={{ margin: 0, fontFamily: "var(--font-heading)", fontSize: 16 }}>
             Equity
           </h2>
-          <EquityCurve points={[...(pnl.data ?? [])].reverse()} />
+          {pnl.isLoading ? (
+            <div style={{ opacity: 0.5, fontSize: 12 }}>Loading…</div>
+          ) : pnl.isError ? (
+            <div style={{ fontSize: 12, color: "var(--vt-red-dark)" }}>
+              Couldn't load equity history
+              {pnl.error instanceof Error ? `: ${pnl.error.message}` : "."}
+            </div>
+          ) : (
+            <EquityCurve points={[...(pnl.data ?? [])].reverse()} />
+          )}
         </section>
       </div>
     </div>
