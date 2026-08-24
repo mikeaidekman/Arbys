@@ -77,6 +77,9 @@ SERIES_TICKERS = {
     # Verified live 2026-08-24: KXWNBAGAME returns two markets per event
     # keyed by team code, identical in shape to the NBA/NFL/MLB series.
     "wnba": "KXWNBAGAME",
+    # College football. Kalshi listed 184 open CFB events on 2026-08-24 against
+    # Polymarket US's 88, so the overlap is bounded by Polymarket, not Kalshi.
+    "ncaaf": "KXNCAAFGAME",
 }
 
 

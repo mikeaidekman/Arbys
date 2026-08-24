@@ -30,7 +30,7 @@ import httpx
 from .kalshi_sports import VenueGame, _parse_utc
 from .matcher import OVER, UNDER
 from .players import Player, last_name_code
-from .teams import TeamResolver
+from .teams import Team, TeamResolver
 
 GATEWAY_BASE = "https://gateway.polymarket.us"
 
@@ -41,7 +41,11 @@ LEAGUE_SLUGS = {
     "mlb": "mlb",
     "nfl": "nfl",
     "nba": "nba",
+    # Polymarket US calls college football "cfb" where Kalshi's series is
+    # NCAAF. The two registries are separate dicts precisely so a league can
+    # be named differently per venue.
     "wnba": "wnba",
+    "ncaaf": "cfb",
 }
 
 TENNIS_LEAGUES = ("atp", "wta")
@@ -112,11 +116,48 @@ def _line(market: dict[str, Any]) -> Decimal | None:
 
 
 def _team_name(side: dict[str, Any]) -> str | None:
+    """The competitor's display name. Used for *individual* sports, where this
+    is a person and there is no roster to resolve against."""
     team = side.get("team")
     if not isinstance(team, dict):
         return None
     name = team.get("name")
     return name if isinstance(name, str) else None
+
+
+def _resolve_team(team: Any, resolver: TeamResolver) -> Team | None:
+    """Resolve one Polymarket US team object against a league roster.
+
+    `name` alone is not enough. What it holds varies by league — a full name
+    for NFL/MLB, a bare city for WNBA, and for CFB only the *mascot*, which is
+    not an identity: 28 mascots repeat across the 88 CFB games observed on
+    2026-08-24, covering 81 of 176 team-slots, so nearly half of college games
+    would resolve to nothing (or, before the uniqueness guard, to the wrong
+    school).
+
+    The payload carries two better fields, verified live the same day:
+
+        name                 "Tar Heels"       <- mascot, ambiguous
+        safeName             "North Carolina"  <- what Kalshi's title says
+        displayAbbreviation  "UNC"             <- what Kalshi's ticker uses
+
+    So try the precise ones first and keep `name` as the last resort, which
+    is what every league relied on before.
+    """
+    if not isinstance(team, dict):
+        return None
+    abbrev = team.get("displayAbbreviation")
+    if isinstance(abbrev, str) and abbrev:
+        found = resolver.by_code(abbrev)
+        if found is not None:
+            return found
+    for key in ("safeName", "name"):
+        value = team.get(key)
+        if isinstance(value, str) and value:
+            found = resolver.by_polymarket_name(value)
+            if found is not None:
+                return found
+    return None
 
 
 def _eastern_date(start: datetime) -> date:
@@ -171,11 +212,8 @@ async def fetch_polymarket_us_games(
                 continue
             long_side, short_side = pair
 
-            long_name, short_name = _team_name(long_side), _team_name(short_side)
-            if long_name is None or short_name is None:
-                continue
-            team_long = resolver.by_polymarket_name(long_name)
-            team_short = resolver.by_polymarket_name(short_name)
+            team_long = _resolve_team(long_side.get("team"), resolver)
+            team_short = _resolve_team(short_side.get("team"), resolver)
             if team_long is None or team_short is None:
                 continue
 
@@ -221,7 +259,7 @@ async def fetch_polymarket_us_totals(
         event_teams = [t for t in (event.get("teams") or []) if isinstance(t, dict)]
         if len(event_teams) != 2:
             continue
-        resolved = [resolver.by_polymarket_name(t.get("name") or "") for t in event_teams]
+        resolved = [_resolve_team(t, resolver) for t in event_teams]
         if any(t is None for t in resolved):
             continue
         team_a, team_b = resolved[0], resolved[1]

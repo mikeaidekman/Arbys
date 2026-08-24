@@ -298,3 +298,52 @@ def test_eastern_date_leaves_an_afternoon_game_alone():
 
     # 2026-09-13 17:00Z == 2026-09-13 13:00 EDT
     assert _eastern_date(datetime(2026, 9, 13, 17, 0, tzinfo=UTC)) == date(2026, 9, 13)
+
+
+def test_resolve_team_prefers_abbreviation_then_school_then_mascot():
+    """`teams[].name` alone cannot identify a college team.
+
+    The payload carries three identifiers of decreasing precision, verified
+    live on 2026-08-24:
+
+        displayAbbreviation  "UNC"             <- Kalshi's ticker code
+        safeName             "North Carolina"  <- Kalshi's title
+        name                 "Tar Heels"       <- mascot, repeats across schools
+
+    Precision order matters: a mascot-first resolution drops or misassigns the
+    81 of 176 CFB team-slots whose mascot is shared.
+    """
+    from arbys.discovery.polymarket_us import _resolve_team
+    from arbys.discovery.teams import CFB_RESOLVER
+
+    # All three present: the code wins.
+    assert (
+        _resolve_team(
+            {
+                "displayAbbreviation": "UNC",
+                "safeName": "North Carolina",
+                "name": "Tar Heels",
+            },
+            CFB_RESOLVER,
+        ).code
+        == "UNC"
+    )
+    # No code: fall back to the school name.
+    assert (
+        _resolve_team({"safeName": "Arizona State", "name": "Sun Devils"}, CFB_RESOLVER).code
+        == "ASU"
+    )
+    # Only an ambiguous mascot: refuse rather than guess.
+    assert _resolve_team({"name": "Tigers"}, CFB_RESOLVER) is None
+    # Junk in, None out.
+    assert _resolve_team(None, CFB_RESOLVER) is None
+    assert _resolve_team({}, CFB_RESOLVER) is None
+
+
+def test_resolve_team_still_handles_the_pro_league_shape():
+    """NFL sends a full name in `name` and no safeName/displayAbbreviation the
+    resolver knows — the original path must keep working."""
+    from arbys.discovery.polymarket_us import _resolve_team
+    from arbys.discovery.teams import NFL_RESOLVER
+
+    assert _resolve_team({"name": "Arizona Cardinals"}, NFL_RESOLVER).code == "ARI"

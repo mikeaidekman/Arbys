@@ -19,6 +19,7 @@ from .polymarket_us import (
     fetch_polymarket_us_totals,
 )
 from .teams import (
+    CFB_RESOLVER,
     MLB_RESOLVER,
     NBA_RESOLVER,
     NFL_RESOLVER,
@@ -34,6 +35,7 @@ TEAM_SPORTS: tuple[tuple[str, TeamResolver], ...] = (
     ("nfl", NFL_RESOLVER),
     ("nba", NBA_RESOLVER),
     ("wnba", WNBA_RESOLVER),
+    ("ncaaf", CFB_RESOLVER),
 )
 
 # Sports whose over/under markets both venues quote. MLB and WNBA were wired on
@@ -45,6 +47,7 @@ TOTALS_SPORTS: tuple[tuple[str, TeamResolver], ...] = (
     ("nfl", NFL_RESOLVER),
     ("mlb", MLB_RESOLVER),
     ("wnba", WNBA_RESOLVER),
+    ("ncaaf", CFB_RESOLVER),
 )
 
 

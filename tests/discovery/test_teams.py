@@ -153,3 +153,53 @@ def test_unique_nickname_still_resolves_for_pro_leagues():
     from arbys.discovery.teams import MLB_RESOLVER
 
     assert MLB_RESOLVER.by_polymarket_name("Dodgers").code == "LAD"
+
+
+# ---------------------------------------------------------------------------
+# CFB: the college table, where mascots are not identities
+# ---------------------------------------------------------------------------
+
+def test_cfb_resolves_by_kalshi_code():
+    """`displayAbbreviation` on the Polymarket payload equals Kalshi's ticker
+    code for 154 of the 168 CFB teams observed on 2026-08-24, so code lookup
+    carries most of the league."""
+    from arbys.discovery.teams import CFB_RESOLVER
+
+    assert CFB_RESOLVER.by_code("UNC").city == "North Carolina"
+    assert CFB_RESOLVER.by_code("TCU").nickname == "Horned Frogs"
+
+
+def test_cfb_resolves_state_spelled_either_way():
+    """Polymarket writes "Arizona State" where Kalshi writes "Arizona St." —
+    39 of the 154 shared codes differ only in that. Both spellings resolve so
+    `safeName` remains a usable fallback."""
+    from arbys.discovery.teams import CFB_RESOLVER
+
+    assert CFB_RESOLVER.by_polymarket_name("Arizona St.").code == "ASU"
+    assert CFB_RESOLVER.by_polymarket_name("Arizona State").code == "ASU"
+
+
+def test_cfb_refuses_a_repeated_mascot():
+    """The whole reason CFB resolves on code and school rather than mascot.
+
+    "Tigers" is seven different schools in the observed set. Returning any one
+    of them would let a matcher pair one school's market with another's and
+    report a guaranteed profit on two unrelated fixtures.
+    """
+    from arbys.discovery.teams import CFB_RESOLVER
+
+    assert CFB_RESOLVER.by_polymarket_name("Tigers") is None
+    assert CFB_RESOLVER.by_polymarket_name("Bulldogs") is None
+    # A mascot that happens to be unique is still fine.
+    assert CFB_RESOLVER.by_polymarket_name("Tar Heels").code == "UNC"
+
+
+def test_cfb_table_has_no_duplicate_codes():
+    """A duplicate code would silently shadow a school in `_by_code`, which is
+    the lookup CFB depends on most."""
+    from arbys.discovery.teams import CFB_TEAMS
+
+    codes = [t.code for t in CFB_TEAMS]
+    assert len(codes) == len(set(codes)), sorted(
+        c for c in set(codes) if codes.count(c) > 1
+    )
