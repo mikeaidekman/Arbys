@@ -78,7 +78,8 @@ def test_ufc_registries_are_distinct_from_tennis():
     # Tennis untouched.
     assert TENNIS_SERIES == (("atp", "KXATPMATCH"), ("wta", "KXWTAMATCH"))
     assert TENNIS_LEAGUES == ("atp", "wta")
-    assert TENNIS_WINNER_TYPES == frozenset({"tennis_match_winner"})
+    assert "tennis_match_winner" in TENNIS_WINNER_TYPES
+    assert len(TENNIS_WINNER_TYPES) == 1
 
 
 def test_kalshi_title_prefix_does_not_break_competitor_codes():
