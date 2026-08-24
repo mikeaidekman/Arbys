@@ -57,6 +57,10 @@ export function TicketHistory() {
         source: source === "all" ? undefined : source,
       }),
     refetchInterval: 10_000,
+    // Keep the previous rows visible across a filter change instead of
+    // flashing back to the loading state — each filter combo is its own
+    // cache entry, so without this every click would blank the table.
+    placeholderData: (prev) => prev,
   });
 
   const rows = tickets.data ?? [];
@@ -108,6 +112,13 @@ export function TicketHistory() {
             <tr>
               <td colSpan={8} style={{ opacity: 0.5 }}>
                 Loading…
+              </td>
+            </tr>
+          ) : tickets.isError ? (
+            <tr>
+              <td colSpan={8} style={{ color: "var(--vt-red-dark)" }}>
+                Couldn't load ticket history
+                {tickets.error instanceof Error ? `: ${tickets.error.message}` : "."}
               </td>
             </tr>
           ) : rows.length === 0 ? (
