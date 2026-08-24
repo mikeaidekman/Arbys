@@ -26,22 +26,36 @@ TENNIS_SERIES: tuple[tuple[str, str], ...] = (
     ("wta", "KXWTAMATCH"),
 )
 
+# UFC rides the same path: two named individuals per event, no roster to
+# enumerate, and Kalshi's yes_sub_title carries the fighter's full name while
+# the event title carries surnames behind a "Fight Night: " prefix. Last-token
+# coding absorbs that prefix, so nothing here needed a special case.
+UFC_SERIES: tuple[tuple[str, str], ...] = (("ufc", "KXUFCFIGHT"),)
+
 
 async def fetch_kalshi_tennis_matches(
     *,
     http_client: httpx.AsyncClient | None = None,
     limit: int = 100,
+    series: tuple[tuple[str, str], ...] = TENNIS_SERIES,
 ) -> list[VenueGame]:
+    """Open matches for any head-to-head individual sport.
+
+    ``series`` defaults to tennis but takes any (sport, series_ticker) pairs
+    sharing the shape: one event per contest, two markets keyed by competitor.
+    """
     owns_client = http_client is None
     client = http_client or httpx.AsyncClient(timeout=15.0, base_url=KALSHI_BASE)
     try:
         out: list[VenueGame] = []
-        for sport, series in TENNIS_SERIES:
+        for sport, series_ticker in series:
             events_resp = await _get_with_retry(
-                client, "/events", {"series_ticker": series, "status": "open", "limit": limit}
+                client, "/events", {"series_ticker": series_ticker, "status": "open", "limit": limit}
             )
             if events_resp.status_code != 200:
-                log.warning("kalshi %s events fetch failed: %s", series, events_resp.status_code)
+                log.warning(
+                    "kalshi %s events fetch failed: %s", series_ticker, events_resp.status_code
+                )
                 continue
             events = events_resp.json().get("events", [])
             for ev in events:

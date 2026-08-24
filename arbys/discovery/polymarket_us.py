@@ -63,6 +63,11 @@ MONEYLINE_TYPES = frozenset(
 )
 TENNIS_WINNER_TYPES = frozenset({"tennis_match_winner"})
 
+# UFC. Verified live 2026-08-24: 54 events, 49 typed ufc_fight_winner and 5
+# still on the older generic "moneyline" label, so both are accepted.
+UFC_LEAGUES = ("ufc",)
+UFC_WINNER_TYPES = frozenset({"ufc_fight_winner", "moneyline"})
+
 # One shared set, like MONEYLINE_TYPES above: `_fetch_events` is league-scoped,
 # so a baseball type can never surface in the nfl league response and there is
 # nothing to key per sport. MLB and WNBA totals were wired on 2026-08-24 once
@@ -297,6 +302,8 @@ async def fetch_polymarket_us_tennis(
     *,
     http_client: httpx.AsyncClient | None = None,
     limit: int = 200,
+    leagues: tuple[str, ...] = TENNIS_LEAGUES,
+    winner_types: frozenset[str] = TENNIS_WINNER_TYPES,
 ) -> list[VenueGame]:
     """ATP + WTA match winners.
 
@@ -310,7 +317,7 @@ async def fetch_polymarket_us_tennis(
     ``CATEGORY_LABELS`` in ``frontend/src/lib/combo.ts`` keys on atp/wta.
     """
     matches: list[VenueGame] = []
-    for league in TENNIS_LEAGUES:
+    for league in leagues:
         events = await _fetch_events(league, http_client, limit)
         for event in events:
             start_time = _parse_utc(event.get("startTime"))
@@ -319,7 +326,7 @@ async def fetch_polymarket_us_tennis(
             for market in event.get("markets") or []:
                 if not isinstance(market, dict):
                     continue
-                if market.get("sportsMarketType") not in TENNIS_WINNER_TYPES:
+                if market.get("sportsMarketType") not in winner_types:
                     continue
                 pair = _sides(market)
                 slug = market.get("slug")

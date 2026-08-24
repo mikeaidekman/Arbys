@@ -10,10 +10,12 @@ from ..db import repositories as repo
 from ..db.session import session_scope
 from ..shared.types import EventGroup
 from .kalshi_sports import fetch_kalshi_team_games
-from .kalshi_tennis import fetch_kalshi_tennis_matches
+from .kalshi_tennis import UFC_SERIES, fetch_kalshi_tennis_matches
 from .kalshi_totals import fetch_kalshi_totals
 from .matcher import match_games, match_to_event_group
 from .polymarket_us import (
+    UFC_LEAGUES,
+    UFC_WINNER_TYPES,
     fetch_polymarket_us_games,
     fetch_polymarket_us_tennis,
     fetch_polymarket_us_totals,
@@ -114,6 +116,33 @@ async def discover_tennis_event_groups() -> list[EventGroup]:
     return [match_to_event_group(m) for m in matches]
 
 
+async def discover_ufc_event_groups() -> list[EventGroup]:
+    """Run one UFC discovery pass and return the EventGroups to register.
+
+    UFC reuses the tennis path wholesale: two named individuals per contest and
+    no roster to enumerate, so competitors resolve from venue strings rather
+    than a table. Date tolerance is 1 day for the same reason tennis needs it —
+    Kalshi's ticker embeds a trading day that can sit either side of the
+    contest's UTC date.
+
+    Known limitation, measured 2026-08-24: competitor identity is the ASCII
+    uppercase last token of the name, and the venues do not always render a
+    name the same way. Four of the five fights on the observed card matched;
+    "Xiong Jing Nan" on Kalshi against "Xiong Jingnan" on Polymarket coded to
+    NAN and JINGNAN and was dropped. A failed match drops the fight, which
+    costs an opportunity but cannot invent one, so this is safe to ship while
+    imperfect. The residual risk worth knowing is shared surnames on a single
+    card: two different fighters coding to the same token could pair the wrong
+    contests, which is pre-existing exposure on the tennis path too.
+    """
+    kalshi_games, poly_games = await asyncio.gather(
+        fetch_kalshi_tennis_matches(series=UFC_SERIES),
+        fetch_polymarket_us_tennis(leagues=UFC_LEAGUES, winner_types=UFC_WINNER_TYPES),
+    )
+    matches = match_games(kalshi_games, poly_games, date_tolerance_days=1)
+    return [match_to_event_group(m) for m in matches]
+
+
 async def discover_all_event_groups() -> tuple[list[EventGroup], bool]:
     """Aggregate discovery across every sport we currently support.
 
@@ -126,6 +155,7 @@ async def discover_all_event_groups() -> tuple[list[EventGroup], bool]:
         *(discover_team_sport_event_groups(s, r) for s, r in TEAM_SPORTS),
         *(discover_totals_event_groups(s, r) for s, r in TOTALS_SPORTS),
         discover_tennis_event_groups(),
+        discover_ufc_event_groups(),
         return_exceptions=True,
     )
     groups: list[EventGroup] = []
