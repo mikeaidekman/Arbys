@@ -157,9 +157,14 @@ def _cap_breach(state: AppState, live: ArbOpportunity, account_id: str) -> str |
         _cash, positions = broker.account_snapshot(account_id)
         held = positions.get(leg.outcome_id, (Decimal("0"),))[0]
         if held + leg.qty > cap:
+            # Prefix is a machine-matchable marker (see
+            # test_position_cap_is_enforced_here_not_in_the_endpoint); the
+            # words "position cap" also have to appear for the HTTP endpoint,
+            # which surfaces this string verbatim as the 409 detail (see
+            # test_repeat_fills_stop_at_the_position_cap).
             return (
-                f"position_cap:{leg.outcome_id} holding {held} "
-                f"adds {leg.qty} cap {cap}"
+                f"position_cap:{leg.outcome_id} position cap reached: "
+                f"holding {held} adds {leg.qty} cap {cap}"
             )
     return None
 

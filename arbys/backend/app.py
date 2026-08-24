@@ -13,7 +13,6 @@ from fastapi import FastAPI, HTTPException, WebSocket, WebSocketDisconnect
 # uvicorn is launched with no explicit --env-file.
 load_dotenv()
 
-from ..adapters.base import ExecutionIntent, IntentLeg  # noqa: E402
 from ..db import repositories as repo  # noqa: E402
 from ..db.session import session_scope  # noqa: E402
 from ..shared.arb_engine import (  # noqa: E402
@@ -21,7 +20,6 @@ from ..shared.arb_engine import (  # noqa: E402
     leg_unit_cost,
     net_edge_per_contract,
 )
-from ..shared.execution_router import InsufficientLegsError  # noqa: E402
 from ..shared.qty import tradeable_qty  # noqa: E402
 from ..shared.types import EventGroup, EventGroupLeg, Quote  # noqa: E402
 from .schemas import (  # noqa: E402
@@ -35,7 +33,8 @@ from .schemas import (  # noqa: E402
     PaperAccountSummary,
     QuoteIn,
 )
-from .state import get_state, max_outcome_qty, max_ticket_stake, reset_state  # noqa: E402
+from .state import get_state, max_ticket_stake, reset_state  # noqa: E402
+from .ticket_service import submit_arb_ticket  # noqa: E402
 
 
 class _PairCandidate(NamedTuple):
@@ -398,14 +397,11 @@ def create_app() -> FastAPI:
     async def paper_execute(body: ExecuteArbIn) -> list[str]:
         s = get_state()
         if body.event_group_id is not None:
-            # Re-detect against the live quote book rather than filling from a
-            # stored record. A previously detected opportunity carries the
-            # prices it was found at; replaying those is what produced
-            # "limit_exceeded" once the market moved.
-            fresh = s.live_opportunities_for(body.event_group_id)
+            # Pick the published opportunity the caller is describing. The
+            # re-detect against live quotes happens inside submit_arb_ticket.
             wanted = set(body.outcome_ids) if body.outcome_ids else None
             opp = None
-            for candidate in fresh:
+            for candidate in s.live_opportunities_for(body.event_group_id):
                 if candidate.event_group_id != body.event_group_id:
                     continue
                 if wanted is not None:
@@ -427,50 +423,13 @@ def create_app() -> FastAPI:
             if body.opportunity_index < 0 or body.opportunity_index >= len(opportunities):
                 raise HTTPException(status_code=404, detail="opportunity_index out of range")
             opp = opportunities[body.opportunity_index]
-        account_id = body.account_id or s.default_account_id
 
-        # Refuse to stack beyond the per-outcome cap. The same edge stays
-        # published while it exists, so without this each repeat click adds
-        # another full ticket.
-        cap = max_outcome_qty()
-        if cap is not None:
-            for leg in opp.legs:
-                if not leg.is_buy:
-                    continue
-                broker = s.paper_brokers.get(leg.venue_id)
-                if broker is None:
-                    continue
-                _cash, positions = broker.account_snapshot(account_id)
-                held = positions.get(leg.outcome_id, (Decimal("0"),))[0]
-                if held + leg.qty > cap:
-                    raise HTTPException(
-                        status_code=409,
-                        detail=(
-                            f"position cap reached for {leg.outcome_id} on "
-                            f"{leg.venue_id}: holding {held}, ticket adds {leg.qty}, "
-                            f"cap {cap}. Raise ARBYS_MAX_OUTCOME_QTY or reset the account."
-                        ),
-                    )
-
-        intent = ExecutionIntent(
-            event_group_id=opp.event_group_id,
-            account_id=account_id,
-            legs=tuple(
-                IntentLeg(
-                    venue_id=leg.venue_id,
-                    outcome_id=leg.outcome_id,
-                    is_buy=leg.is_buy,
-                    qty=leg.qty,
-                    limit_price=leg.price,
-                )
-                for leg in opp.legs
-            ),
+        result = await submit_arb_ticket(
+            s, opp, source="manual", account_id=body.account_id
         )
-        try:
-            orders = await s.router.submit(intent)
-        except InsufficientLegsError as e:
-            raise HTTPException(status_code=409, detail=str(e)) from e
-        return [o.id for o in orders]
+        if result.status != "filled":
+            raise HTTPException(status_code=409, detail=result.reason or result.status)
+        return list(result.order_ids)
 
     return app
 
