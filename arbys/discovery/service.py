@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import logging
+import os
 
 from ..db import repositories as repo
 from ..db.session import session_scope
@@ -143,6 +144,37 @@ async def discover_ufc_event_groups() -> list[EventGroup]:
     return [match_to_event_group(m) for m in matches]
 
 
+DEFAULT_MAX_CONCURRENT_PASSES = 1
+
+
+def _max_concurrent_passes() -> int:
+    """How many discovery sub-passes may hit the venues at once.
+
+    One by default, which is not timidity: `kalshi_sports._REQUEST_SPACING_S`
+    is 0.15s, calibrated as "~6 req/s; Kalshi public tier tolerates this", and
+    that calibration assumes a single pass at a time. Every sub-pass makes a
+    per-event `/markets` call, so running them together multiplies the rate by
+    the number of passes.
+
+    That bill came due when WNBA, CFB and UFC were added on 2026-08-24: the
+    pass count went from 5 to 11, Kalshi returned 429 after `_get_with_retry`
+    exhausted its four backoffs, and MLB and CFB were dropped from the pass
+    entirely. Nothing corrupt resulted — `complete` came back False, so the
+    caller correctly declined to retire the groups it had not seen — but the
+    league coverage silently halved.
+
+    A serial pass is comfortably inside the 600s default discovery interval.
+    Raise ARBYS_DISCOVERY_CONCURRENCY to trade reliability for latency.
+    """
+    raw = os.environ.get("ARBYS_DISCOVERY_CONCURRENCY")
+    if raw is None:
+        return DEFAULT_MAX_CONCURRENT_PASSES
+    try:
+        return max(1, int(raw))
+    except ValueError:
+        return DEFAULT_MAX_CONCURRENT_PASSES
+
+
 async def discover_all_event_groups() -> tuple[list[EventGroup], bool]:
     """Aggregate discovery across every sport we currently support.
 
@@ -151,11 +183,22 @@ async def discover_all_event_groups() -> tuple[list[EventGroup], bool]:
     result — and a transient venue error must not be read as "these games no
     longer exist".
     """
+    limit = asyncio.Semaphore(_max_concurrent_passes())
+
+    async def _bounded(coro):
+        async with limit:
+            return await coro
+
     results = await asyncio.gather(
-        *(discover_team_sport_event_groups(s, r) for s, r in TEAM_SPORTS),
-        *(discover_totals_event_groups(s, r) for s, r in TOTALS_SPORTS),
-        discover_tennis_event_groups(),
-        discover_ufc_event_groups(),
+        *(
+            _bounded(c)
+            for c in (
+                *(discover_team_sport_event_groups(s, r) for s, r in TEAM_SPORTS),
+                *(discover_totals_event_groups(s, r) for s, r in TOTALS_SPORTS),
+                discover_tennis_event_groups(),
+                discover_ufc_event_groups(),
+            )
+        ),
         return_exceptions=True,
     )
     groups: list[EventGroup] = []
