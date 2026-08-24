@@ -163,6 +163,10 @@ class PositionOut(BaseModel):
     venue_id: str
     outcome_id: str
     title: str
+    # Exact grouping key for "all legs of one game". None when the outcome
+    # was never traded through a ticket and its group is gone, in which case
+    # the UI falls back to grouping on outcome_id.
+    event_group_id: str | None
     qty: Decimal
     avg_price: Decimal
     mark: Decimal | None

@@ -620,37 +620,55 @@ async def count_open_paper_tickets(session: AsyncSession, account_id: str) -> in
     return len(open_ids)
 
 
-async def paper_position_titles(
+async def paper_position_meta(
     session: AsyncSession, account_id: str
-) -> dict[str, str]:
-    """outcome_id -> best available human title.
+) -> dict[str, tuple[str, str | None]]:
+    """outcome_id -> (best available human title, owning event_group_id).
 
     Prefers the most recent ticket that traded the outcome, because its
     `title_snapshot` survives group retirement. Falls back to the live
     event_group join for outcomes only ever quoted, never traded.
+
+    The group id rides along so a caller can group a game's legs together
+    exactly. Grouping on the title *string* would split one game into two
+    rows whenever its legs resolve their titles from different sources — a
+    ticket snapshot on one leg, the live join on the other — which is
+    precisely what a renamed group produces.
     """
     rows = (
         await session.execute(
-            select(m.PaperOrder.outcome_id, m.PaperTicket.title_snapshot)
+            select(
+                m.PaperOrder.outcome_id,
+                m.PaperTicket.title_snapshot,
+                m.PaperTicket.event_group_id,
+            )
             .join(m.PaperTicket, m.PaperTicket.id == m.PaperOrder.ticket_id)
             .where(m.PaperOrder.account_id == account_id)
             .order_by(m.PaperTicket.submitted_at.desc())
         )
     ).all()
-    titles: dict[str, str] = {}
-    for outcome_id, title in rows:
-        titles.setdefault(outcome_id, title)
+    meta: dict[str, tuple[str, str | None]] = {}
+    for outcome_id, title, group_id in rows:
+        meta.setdefault(outcome_id, (title, group_id))
 
     live = (
         await session.execute(
-            select(m.EventGroupLeg.outcome_id, m.EventGroup.title).join(
-                m.EventGroup, m.EventGroup.id == m.EventGroupLeg.event_group_id
-            )
+            select(
+                m.EventGroupLeg.outcome_id, m.EventGroup.title, m.EventGroup.id
+            ).join(m.EventGroup, m.EventGroup.id == m.EventGroupLeg.event_group_id)
         )
     ).all()
-    for outcome_id, title in live:
-        titles.setdefault(outcome_id, title)
-    return titles
+    for outcome_id, title, group_id in live:
+        meta.setdefault(outcome_id, (title, group_id))
+    return meta
+
+
+async def paper_position_titles(
+    session: AsyncSession, account_id: str
+) -> dict[str, str]:
+    """outcome_id -> best available human title. See `paper_position_meta`."""
+    meta = await paper_position_meta(session, account_id)
+    return {outcome_id: title for outcome_id, (title, _gid) in meta.items()}
 
 
 async def update_paper_ticket_status(
@@ -683,6 +701,7 @@ __all__ = [
     "list_paper_tickets",
     "list_pnl_snapshots",
     "list_recent_opportunities",
+    "paper_position_meta",
     "paper_position_titles",
     "update_paper_ticket_status",
     "upsert_event_group",

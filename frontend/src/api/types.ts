@@ -120,6 +120,10 @@ export interface PaperPosition {
   venue_id: string;
   outcome_id: string;
   title: string;
+  /** Exact grouping key for "all legs of one game". Null when the outcome was
+   *  never traded through a ticket and its event group is gone — group on
+   *  outcome_id in that case, never on the title string. */
+  event_group_id: string | null;
   qty: string;
   avg_price: string;
   mark: string | null;

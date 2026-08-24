@@ -6,14 +6,71 @@ import { TicketHistory } from "../components/TicketHistory";
 
 const ACCOUNT = "default";
 
-function money(v: string, opts: { sign?: boolean } = {}): string {
-  const n = Number(v);
+function amount(n: number, opts: { sign?: boolean } = {}): string {
   const s = Math.abs(n).toLocaleString("en-US", {
     minimumFractionDigits: 2,
     maximumFractionDigits: 2,
   });
   const sign = opts.sign ? (n >= 0 ? "+" : "-") : n < 0 ? "-" : "";
   return `${sign}$${s}`;
+}
+
+interface PositionEventRow {
+  key: string;
+  title: string;
+  eventGroupId: string | null;
+  legs: PaperPosition[];
+  /** Cost basis: Σ qty × avg_price. */
+  capital: number;
+  /** Σ qty × mark, falling back to avg_price for an unquoted leg. */
+  markValue: number;
+  unrealized: number;
+  unmarkedLegs: number;
+}
+
+/**
+ * Collapse position legs into one row per event group.
+ *
+ * Keyed on `event_group_id`, never on the title string: one game's two legs
+ * can resolve their titles from different sources — a ticket's frozen
+ * snapshot on one, the live event_group join on the other — so a renamed
+ * group would split a single game into two rows. A leg with no group id
+ * (never traded through a ticket, and its group since retired) stands alone
+ * under its own outcome id rather than being merged by name.
+ *
+ * `markValue` uses each leg's own mark where the venue is quoting and its
+ * `avg_price` where it is not — flat mark-to-market, matching the backend's
+ * `account_equity`, because a missing quote means unknown rather than
+ * worthless. The count of unquoted legs is surfaced so the figure is not
+ * mistaken for fully-marked.
+ */
+function groupPositionsByEvent(legs: PaperPosition[]): PositionEventRow[] {
+  const rows = new Map<string, PositionEventRow>();
+  for (const p of legs) {
+    const key = p.event_group_id ?? `outcome:${p.outcome_id}`;
+    let row = rows.get(key);
+    if (row === undefined) {
+      row = {
+        key,
+        title: p.title,
+        eventGroupId: p.event_group_id,
+        legs: [],
+        capital: 0,
+        markValue: 0,
+        unrealized: 0,
+        unmarkedLegs: 0,
+      };
+      rows.set(key, row);
+    }
+    const qty = Number(p.qty);
+    const avg = Number(p.avg_price);
+    row.legs.push(p);
+    row.capital += qty * avg;
+    row.markValue += qty * (p.mark === null ? avg : Number(p.mark));
+    row.unrealized += Number(p.unrealized);
+    if (p.mark === null) row.unmarkedLegs += 1;
+  }
+  return [...rows.values()].sort((a, b) => b.capital - a.capital);
 }
 
 function EquityCurve({ points }: { points: PnlSnapshot[] }) {
@@ -66,7 +123,9 @@ export function AccountPage() {
     refetchInterval: 30_000,
   });
 
-  const open = (positions.data ?? []).filter((p) => Number(p.qty) !== 0);
+  const open = groupPositionsByEvent(
+    (positions.data ?? []).filter((p) => Number(p.qty) !== 0),
+  );
 
   return (
     <div style={{ minHeight: "100vh", display: "flex", flexDirection: "column" }}>
@@ -101,55 +160,71 @@ export function AccountPage() {
             <thead>
               <tr>
                 <th>Event</th>
-                <th>Venue</th>
-                <th>Qty</th>
-                <th>Avg</th>
-                <th>Mark</th>
+                <th>Legs</th>
+                <th>Capital</th>
+                <th>Mark value</th>
                 <th>Unrealized</th>
               </tr>
             </thead>
             <tbody>
               {positions.isLoading ? (
                 <tr>
-                  <td colSpan={6} style={{ opacity: 0.5 }}>
+                  <td colSpan={5} style={{ opacity: 0.5 }}>
                     Loading…
                   </td>
                 </tr>
               ) : positions.isError ? (
                 <tr>
-                  <td colSpan={6} style={{ color: "var(--vt-red-dark)" }}>
+                  <td colSpan={5} style={{ color: "var(--vt-red-dark)" }}>
                     Couldn't load open positions
                     {positions.error instanceof Error ? `: ${positions.error.message}` : "."}
                   </td>
                 </tr>
               ) : open.length === 0 ? (
                 <tr>
-                  <td colSpan={6} style={{ opacity: 0.5 }}>
+                  <td colSpan={5} style={{ opacity: 0.5 }}>
                     No open positions.
                   </td>
                 </tr>
               ) : null}
-              {open.map((p) => (
-                <tr key={`${p.venue_id}:${p.outcome_id}`}>
-                  <td title={p.outcome_id}>{p.title}</td>
-                  <td style={{ textTransform: "capitalize" }}>
-                    {p.venue_id.replace(/_/g, " ")}
+              {open.map((row) => (
+                <tr key={row.key}>
+                  <td title={row.eventGroupId ?? undefined}>{row.title}</td>
+                  <td>
+                    {row.legs.map((p) => (
+                      <div
+                        key={`${p.venue_id}:${p.outcome_id}`}
+                        style={{ fontSize: 11, opacity: 0.85, whiteSpace: "nowrap" }}
+                        title={p.outcome_id}
+                      >
+                        <span style={{ textTransform: "capitalize" }}>
+                          {p.venue_id.replace(/_/g, " ")}
+                        </span>{" "}
+                        {Number(p.qty).toFixed(2)} @{" "}
+                        {(Number(p.avg_price) * 100).toFixed(1)}¢ → mark{" "}
+                        {p.mark === null ? "—" : `${(Number(p.mark) * 100).toFixed(1)}¢`}
+                      </div>
+                    ))}
                   </td>
-                  <td className="vt-mono">{Number(p.qty).toFixed(2)}</td>
-                  <td className="vt-mono">{(Number(p.avg_price) * 100).toFixed(1)}¢</td>
+                  <td className="vt-mono">{amount(row.capital)}</td>
                   <td className="vt-mono">
-                    {p.mark === null ? "—" : `${(Number(p.mark) * 100).toFixed(1)}¢`}
+                    {amount(row.markValue)}
+                    {row.unmarkedLegs > 0 ? (
+                      <div style={{ fontSize: 10, opacity: 0.7 }}>
+                        {row.unmarkedLegs} leg{row.unmarkedLegs === 1 ? "" : "s"} unquoted
+                      </div>
+                    ) : null}
                   </td>
                   <td
                     className="vt-mono"
                     style={{
                       color:
-                        Number(p.unrealized) >= 0
+                        row.unrealized >= 0
                           ? "var(--vt-green-dark)"
                           : "var(--vt-red-dark)",
                     }}
                   >
-                    {money(p.unrealized, { sign: true })}
+                    {amount(row.unrealized, { sign: true })}
                   </td>
                 </tr>
               ))}

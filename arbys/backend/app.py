@@ -409,7 +409,7 @@ def create_app() -> FastAPI:
     async def paper_positions(account_id: str) -> list[PositionOut]:
         s = get_state()
         async with session_scope() as session:
-            titles = await repo.paper_position_titles(session, account_id)
+            meta = await repo.paper_position_meta(session, account_id)
         out: list[PositionOut] = []
         for venue_id, broker in s.paper_brokers.items():
             _cash, held = broker.account_snapshot(account_id)
@@ -417,11 +417,13 @@ def create_app() -> FastAPI:
                 quote = s.quotebook.get(outcome_id)
                 mark = (quote.bid + quote.ask) / Decimal(2) if quote is not None else None
                 effective = avg_price if mark is None else mark
+                title, event_group_id = meta.get(outcome_id, (outcome_id, None))
                 out.append(
                     PositionOut(
                         venue_id=venue_id,
                         outcome_id=outcome_id,
-                        title=titles.get(outcome_id, outcome_id),
+                        title=title,
+                        event_group_id=event_group_id,
                         qty=qty,
                         avg_price=avg_price,
                         mark=mark,

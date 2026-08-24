@@ -762,3 +762,70 @@ def test_positions_endpoint_prefers_ticket_snapshot_over_the_live_join():
         assert len(positions) == 2
         for p in positions:
             assert p["title"] == "Group eg-rename"
+
+
+def test_positions_carry_a_shared_event_group_id_for_grouping():
+    """Both legs of one game must report the same event_group_id.
+
+    The account page groups position rows per event. It keys on this id rather
+    than on the title string precisely because the two title sources can
+    disagree: after a re-registration, a filled ticket's frozen
+    `title_snapshot` and the live `event_group.title` differ, and grouping by
+    name would split one game across two rows. The id is stable across a
+    rename, so the grouping survives it.
+    """
+    with TestClient(create_app()) as client:
+        _register(client, "eg-group", "p-yes-gr", "k-no-gr")
+        client.post("/quotes", json={"outcome_id": "p-yes-gr", "bid": "0.40", "ask": "0.40"})
+        client.post("/quotes", json={"outcome_id": "k-no-gr", "bid": "0.50", "ask": "0.50"})
+        assert client.post(
+            "/paper/execute",
+            json={"event_group_id": "eg-group", "outcome_ids": ["p-yes-gr", "k-no-gr"]},
+        ).status_code == 200
+
+        # Rename the live group so the two title sources now disagree.
+        assert client.post(
+            "/event-groups",
+            json={
+                "id": "eg-group",
+                "title": "Renamed mid-flight",
+                "legs": [
+                    {"outcome_id": "p-yes-gr", "venue_id": "polymarket_us", "is_yes_side": True},
+                    {"outcome_id": "k-no-gr", "venue_id": "kalshi", "is_yes_side": False},
+                ],
+            },
+        ).status_code == 201
+
+        positions = client.get("/paper/default/positions").json()
+        assert len(positions) == 2
+        assert {p["event_group_id"] for p in positions} == {"eg-group"}
+        # One key for the pair is what collapses them into a single row.
+        assert len({p["event_group_id"] for p in positions}) == 1
+
+
+def test_position_event_group_id_survives_group_deletion():
+    """The grouping key outlives the event group itself.
+
+    Discovery retires groups routinely, so a finished game's legs would lose
+    their shared key if it were read from the live join. It comes from the
+    ticket's frozen snapshot instead, which is what keeps a settled game's
+    rows collapsed into one row rather than scattering into per-leg rows the
+    moment the group is retired.
+
+    (An outcome never traded through a ticket *and* whose group is gone has no
+    key at all and reports null; the UI falls back to the outcome id there, so
+    unrelated legs are never merged under a shared null.)
+    """
+    with TestClient(create_app()) as client:
+        _register(client, "eg-orphan", "p-yes-or", "k-no-or")
+        client.post("/quotes", json={"outcome_id": "p-yes-or", "bid": "0.40", "ask": "0.40"})
+        client.post("/quotes", json={"outcome_id": "k-no-or", "bid": "0.50", "ask": "0.50"})
+        assert client.post(
+            "/paper/execute",
+            json={"event_group_id": "eg-orphan", "outcome_ids": ["p-yes-or", "k-no-or"]},
+        ).status_code == 200
+        # Traded through a ticket, so the snapshot keeps the id alive even
+        # after the group is deleted.
+        assert client.delete("/event-groups/eg-orphan").status_code == 204
+        positions = client.get("/paper/default/positions").json()
+        assert {p["event_group_id"] for p in positions} == {"eg-orphan"}
