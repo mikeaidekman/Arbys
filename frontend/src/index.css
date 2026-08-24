@@ -24,6 +24,7 @@ a:hover { color: var(--color-accent-700); }
   --vt-green: #1f9d55;
   --vt-green-dark: #167a42;
   --vt-green-tint: #e7f6ec;
+  --vt-red-dark: #a1263c;
 }
 
 .vt-scroll::-webkit-scrollbar { width: 8px; }

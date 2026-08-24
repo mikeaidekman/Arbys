@@ -5,7 +5,7 @@ import type { ArbOpportunity, MonitoredGroup } from "../api/types";
 import { useOpportunityStream } from "../hooks/useOpportunityStream";
 import { CategoryRail } from "../components/CategoryRail";
 import { OpportunityTable } from "../components/OpportunityTable";
-import { AccountPanel } from "../components/AccountPanel";
+import { AccountStrip } from "../components/AccountStrip";
 import {
   buildCombos,
   categoryOf,
@@ -127,17 +127,21 @@ export function TerminalPage() {
         <a href="/admin" className="tag tag-outline" style={{ textDecoration: "none" }}>
           Admin
         </a>
+        <a href="/account" className="tag tag-outline" style={{ textDecoration: "none" }}>
+          Account
+        </a>
         <span className="tag tag-accent">Polymarket US · connected</span>
         <span className="tag tag-accent">Kalshi · connected</span>
       </nav>
+
+      <AccountStrip />
 
       <div
         style={{
           flex: 1,
           minHeight: 0,
           display: "grid",
-          gridTemplateColumns:
-            "minmax(160px, 190px) minmax(0, 1fr) minmax(280px, 320px)",
+          gridTemplateColumns: "minmax(160px, 190px) minmax(0, 1fr)",
           gap: 0,
         }}
       >
@@ -170,8 +174,6 @@ export function TerminalPage() {
             />
           )}
         </section>
-
-        <AccountPanel />
       </div>
     </div>
   );
