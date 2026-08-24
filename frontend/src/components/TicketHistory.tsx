@@ -166,7 +166,11 @@ export function TicketHistory() {
                           : "var(--vt-red-dark)",
                   }}
                 >
-                  {t.realized_profit === null ? "open" : money(t.realized_profit, { sign: true })}
+                  {t.realized_profit !== null
+                    ? money(t.realized_profit, { sign: true })
+                    : t.status === "rejected" || t.status === "missed"
+                      ? "—"
+                      : "open"}
                 </td>
                 <td>
                   <span className="tag" title={t.rejection_reason ?? undefined}>

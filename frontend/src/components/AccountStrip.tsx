@@ -68,6 +68,30 @@ export function AccountStrip() {
     refetchInterval: 5_000,
   });
 
+  const stripStyle = {
+    display: "flex",
+    gap: "var(--space-4)",
+    alignItems: "center",
+    padding: "var(--space-2) var(--space-4)",
+    borderBottom: "1px solid var(--color-divider)",
+    flex: "none",
+    flexWrap: "wrap",
+  } as const;
+
+  // This strip sits at the top of both / and /account, so a failed fetch is
+  // the most visible thing on screen — render it as an error, not as a
+  // quietly wiped $0.00 account (which is indistinguishable from a reset one).
+  if (summary.isError) {
+    return (
+      <div style={stripStyle}>
+        <span style={{ fontSize: 12, color: "var(--vt-red-dark)" }}>
+          Couldn't load account summary
+          {summary.error instanceof Error ? `: ${summary.error.message}` : "."}
+        </span>
+      </div>
+    );
+  }
+
   const cash = Number(summary.data?.cash ?? 0);
   const positionValue = Number(summary.data?.position_value ?? 0);
   const equity = Number(summary.data?.equity ?? 0);
@@ -81,17 +105,7 @@ export function AccountStrip() {
   const tone = (n: number) => (n > 0 ? "pos" : n < 0 ? "neg" : undefined);
 
   return (
-    <div
-      style={{
-        display: "flex",
-        gap: "var(--space-4)",
-        alignItems: "center",
-        padding: "var(--space-2) var(--space-4)",
-        borderBottom: "1px solid var(--color-divider)",
-        flex: "none",
-        flexWrap: "wrap",
-      }}
-    >
+    <div style={stripStyle}>
       <Cell label="Equity" value={money(equity)} />
       <Cell label="Cash" value={money(cash)} />
       <Cell label="Position value" value={money(positionValue)} />
