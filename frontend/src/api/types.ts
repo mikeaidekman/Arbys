@@ -76,6 +76,54 @@ export interface PaperAccountSummary {
   balances: Record<string, string>;
   positions: Record<string, string>;
   realized_pnl: Record<string, string>;
+  /** Live mark-to-market, not the 30s PnL snapshot. */
+  cash: string;
+  position_value: string;
+  equity: string;
+  unrealized_pnl: string;
+  /** Filled tickets with at least one leg still unsettled. */
+  open_ticket_count: number;
+}
+
+export interface TicketLeg {
+  venue_id: string;
+  outcome_id: string;
+  is_buy: boolean;
+  qty: string;
+  limit_price: string;
+  /** Null for a leg that never filled. */
+  fill_price: string | null;
+  fee: string;
+  status: string;
+  rejection_reason: string | null;
+}
+
+export interface Ticket {
+  id: string;
+  event_group_id: string;
+  /** Frozen at submit time — event groups get retired and deleted. */
+  title_snapshot: string;
+  source: "manual" | "auto";
+  status: "filled" | "rejected" | "missed" | "pending";
+  rejection_reason: string | null;
+  /** Null on a missed ticket: there were no economics to record. */
+  total_stake: string | null;
+  expected_profit: string | null;
+  expected_edge_bps: string | null;
+  submitted_at: string;
+  /** Null while any leg is unsettled. */
+  realized_profit: string | null;
+  legs: TicketLeg[];
+}
+
+export interface PaperPosition {
+  venue_id: string;
+  outcome_id: string;
+  title: string;
+  qty: string;
+  avg_price: string;
+  mark: string | null;
+  unrealized: string;
 }
 
 export interface PaperOrder {

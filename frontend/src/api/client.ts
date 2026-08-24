@@ -4,7 +4,9 @@ import type {
   MonitoredGroup,
   PaperAccountSummary,
   PaperOrder,
+  PaperPosition,
   PnlSnapshot,
+  Ticket,
 } from "./types";
 
 const BASE = "/api";
@@ -66,4 +68,16 @@ export const api = {
     req<PnlSnapshot[]>(`/paper/${account_id}/pnl-snapshots?limit=${limit}`),
   paperReset: (account_id: string) =>
     req<PaperAccountSummary>(`/paper/${account_id}/reset`, { method: "POST" }),
+  paperTickets: (
+    account_id: string,
+    opts: { limit?: number; status?: string; source?: string } = {},
+  ) => {
+    const q = new URLSearchParams();
+    q.set("limit", String(opts.limit ?? 200));
+    if (opts.status) q.set("status", opts.status);
+    if (opts.source) q.set("source", opts.source);
+    return req<Ticket[]>(`/paper/${account_id}/tickets?${q.toString()}`);
+  },
+  paperPositions: (account_id: string) =>
+    req<PaperPosition[]>(`/paper/${account_id}/positions`),
 };
