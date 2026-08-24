@@ -123,3 +123,47 @@ class PaperAccountSummary(BaseModel):
     balances: dict[str, Decimal]
     positions: dict[str, Decimal]
     realized_pnl: dict[str, Decimal]
+    # Live mark-to-market, computed on request rather than read from the
+    # 30-second PnL snapshot — which does not exist at all after a restart.
+    cash: Decimal
+    position_value: Decimal
+    equity: Decimal
+    unrealized_pnl: Decimal
+    open_ticket_count: int
+
+
+class TicketLegOut(BaseModel):
+    venue_id: str
+    outcome_id: str
+    is_buy: bool
+    qty: Decimal
+    limit_price: Decimal
+    fill_price: Decimal | None
+    fee: Decimal
+    status: str
+    rejection_reason: str | None
+
+
+class TicketOut(BaseModel):
+    id: str
+    event_group_id: str
+    title_snapshot: str
+    source: str
+    status: str
+    rejection_reason: str | None
+    total_stake: Decimal | None
+    expected_profit: Decimal | None
+    expected_edge_bps: Decimal | None
+    submitted_at: datetime
+    realized_profit: Decimal | None
+    legs: list[TicketLegOut]
+
+
+class PositionOut(BaseModel):
+    venue_id: str
+    outcome_id: str
+    title: str
+    qty: Decimal
+    avg_price: Decimal
+    mark: Decimal | None
+    unrealized: Decimal

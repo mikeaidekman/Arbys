@@ -561,6 +561,39 @@ def _score_ticket(
     return total
 
 
+async def paper_position_titles(
+    session: AsyncSession, account_id: str
+) -> dict[str, str]:
+    """outcome_id -> best available human title.
+
+    Prefers the most recent ticket that traded the outcome, because its
+    `title_snapshot` survives group retirement. Falls back to the live
+    event_group join for outcomes only ever quoted, never traded.
+    """
+    rows = (
+        await session.execute(
+            select(m.PaperOrder.outcome_id, m.PaperTicket.title_snapshot)
+            .join(m.PaperTicket, m.PaperTicket.id == m.PaperOrder.ticket_id)
+            .where(m.PaperOrder.account_id == account_id)
+            .order_by(m.PaperTicket.submitted_at.desc())
+        )
+    ).all()
+    titles: dict[str, str] = {}
+    for outcome_id, title in rows:
+        titles.setdefault(outcome_id, title)
+
+    live = (
+        await session.execute(
+            select(m.EventGroupLeg.outcome_id, m.EventGroup.title).join(
+                m.EventGroup, m.EventGroup.id == m.EventGroupLeg.event_group_id
+            )
+        )
+    ).all()
+    for outcome_id, title in live:
+        titles.setdefault(outcome_id, title)
+    return titles
+
+
 async def update_paper_ticket_status(
     session: AsyncSession, ticket_id: str, *, status: str,
     rejection_reason: str | None = None,
@@ -590,6 +623,7 @@ __all__ = [
     "list_paper_tickets",
     "list_pnl_snapshots",
     "list_recent_opportunities",
+    "paper_position_titles",
     "update_paper_ticket_status",
     "upsert_event_group",
     "upsert_paper_balance",

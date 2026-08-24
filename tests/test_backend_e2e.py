@@ -640,3 +640,62 @@ def test_monitored_positive_pairs_still_rank_by_absolute_profit():
         assert Decimal(group["net_edge"]) == Decimal("0.011836")
         assert Decimal(group["max_tradeable_qty"]) == Decimal("202.39")
         assert Decimal(group["net_max_profit"]) == Decimal("2.39548804")
+
+
+def test_summary_reports_live_equity_without_waiting_for_a_snapshot():
+    """PnlSnapshotService writes every 30s; the strip cannot wait for it, and
+    after a restart there is no snapshot at all."""
+    with TestClient(create_app()) as client:
+        _register(client, "eg-eq", "p-yes", "k-no")
+        client.post("/quotes", json={"outcome_id": "p-yes", "bid": "0.40", "ask": "0.40"})
+        client.post("/quotes", json={"outcome_id": "k-no", "bid": "0.50", "ask": "0.50"})
+        assert client.post(
+            "/paper/execute",
+            json={"event_group_id": "eg-eq", "outcome_ids": ["p-yes", "k-no"]},
+        ).status_code == 200
+
+        body = client.get("/paper/default").json()
+        assert Decimal(body["position_value"]) > 0
+        assert Decimal(body["equity"]) == Decimal(body["cash"]) + Decimal(
+            body["position_value"]
+        )
+        assert "unrealized_pnl" in body
+        # The ticket that was just filled has no settlement row yet. Per the
+        # design spec ("Tickets with any unsettled leg report realized: null
+        # and show as open" / "Missing settlement rows are the normal state
+        # for open tickets and render as open"), that is exactly what "open"
+        # means, so the just-filled ticket counts as one open ticket here.
+        assert body["open_ticket_count"] == 1
+
+
+def test_tickets_endpoint_groups_legs_and_names_the_event():
+    with TestClient(create_app()) as client:
+        _register(client, "eg-tk", "p-yes", "k-no")
+        client.post("/quotes", json={"outcome_id": "p-yes", "bid": "0.40", "ask": "0.40"})
+        client.post("/quotes", json={"outcome_id": "k-no", "bid": "0.50", "ask": "0.50"})
+        client.post(
+            "/paper/execute",
+            json={"event_group_id": "eg-tk", "outcome_ids": ["p-yes", "k-no"]},
+        )
+        tickets = client.get("/paper/default/tickets").json()
+        assert len(tickets) == 1
+        assert tickets[0]["status"] == "filled"
+        assert tickets[0]["source"] == "manual"
+        assert len(tickets[0]["legs"]) == 2
+        assert tickets[0]["title_snapshot"]
+        assert tickets[0]["legs"][0]["fill_price"] is not None
+
+
+def test_positions_endpoint_returns_readable_titles():
+    with TestClient(create_app()) as client:
+        _register(client, "eg-pos", "p-yes", "k-no")
+        client.post("/quotes", json={"outcome_id": "p-yes", "bid": "0.40", "ask": "0.40"})
+        client.post("/quotes", json={"outcome_id": "k-no", "bid": "0.50", "ask": "0.50"})
+        client.post(
+            "/paper/execute",
+            json={"event_group_id": "eg-pos", "outcome_ids": ["p-yes", "k-no"]},
+        )
+        positions = client.get("/paper/default/positions").json()
+        assert len(positions) == 2
+        assert all(p["title"] for p in positions)
+        assert all(p["mark"] is not None for p in positions)

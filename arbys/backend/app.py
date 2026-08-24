@@ -20,6 +20,7 @@ from ..shared.arb_engine import (  # noqa: E402
     leg_unit_cost,
     net_edge_per_contract,
 )
+from ..shared.equity import account_equity  # noqa: E402
 from ..shared.qty import tradeable_qty  # noqa: E402
 from ..shared.types import EventGroup, EventGroupLeg, Quote  # noqa: E402
 from .schemas import (  # noqa: E402
@@ -31,7 +32,9 @@ from .schemas import (  # noqa: E402
     MonitoredGroupOut,
     MonitoredLegOut,
     PaperAccountSummary,
+    PositionOut,
     QuoteIn,
+    TicketOut,
 )
 from .state import get_state, max_ticket_stake, reset_state  # noqa: E402
 from .ticket_service import submit_arb_ticket  # noqa: E402
@@ -370,12 +373,61 @@ def create_app() -> FastAPI:
                 if qty != 0:
                     positions[oid] = positions.get(oid, Decimal("0")) + qty
             realized[venue_id] = broker.realized_pnl(account_id)
+        eq = account_equity(s.paper_brokers, s.quotebook, account_id)
+        async with session_scope() as session:
+            open_tickets = [
+                t
+                for t in await repo.list_paper_tickets(session, account_id)
+                if t["status"] == "filled" and t["realized_profit"] is None
+            ]
         return PaperAccountSummary(
             account_id=account_id,
             balances=balances,
             positions=positions,
             realized_pnl=realized,
+            cash=eq.cash,
+            position_value=eq.position_value,
+            equity=eq.equity,
+            unrealized_pnl=eq.unrealized,
+            open_ticket_count=len(open_tickets),
         )
+
+    @app.get("/paper/{account_id}/tickets", response_model=list[TicketOut])
+    async def paper_tickets(
+        account_id: str,
+        limit: int = 200,
+        status: str | None = None,
+        source: str | None = None,
+    ) -> list[dict]:
+        async with session_scope() as session:
+            return await repo.list_paper_tickets(
+                session, account_id, limit=limit, status=status, source=source
+            )
+
+    @app.get("/paper/{account_id}/positions", response_model=list[PositionOut])
+    async def paper_positions(account_id: str) -> list[PositionOut]:
+        s = get_state()
+        async with session_scope() as session:
+            titles = await repo.paper_position_titles(session, account_id)
+        out: list[PositionOut] = []
+        for venue_id, broker in s.paper_brokers.items():
+            _cash, held = broker.account_snapshot(account_id)
+            for outcome_id, (qty, avg_price, _realized) in held.items():
+                quote = s.quotebook.get(outcome_id)
+                mark = (quote.bid + quote.ask) / Decimal(2) if quote is not None else None
+                effective = avg_price if mark is None else mark
+                out.append(
+                    PositionOut(
+                        venue_id=venue_id,
+                        outcome_id=outcome_id,
+                        title=titles.get(outcome_id, outcome_id),
+                        qty=qty,
+                        avg_price=avg_price,
+                        mark=mark,
+                        unrealized=(effective - avg_price) * qty,
+                    )
+                )
+        return out
 
     @app.get("/paper/{account_id}/orders")
     async def paper_orders(account_id: str) -> list[dict]:
