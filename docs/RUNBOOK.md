@@ -218,8 +218,43 @@ execution, implement `ExecutionAdapter` for the venue, then swap it into
   `paper_fill`, `paper_pnl_snapshot` for the account.
 - **Multi-leg atomicity** — `ExecutionRouter.submit()` fills all legs or
   none. If any leg would exceed its limit price or lack balance, the entire
-  ticket rejects; nothing is persisted for rejected tickets. Check server
-  logs for the rejection reason.
+  ticket rejects. The ticket itself is still persisted (see 4.1) — it's the
+  `paper_order`/`paper_fill` rows that never get written for a rejection.
+  Check `rejection_reason` on the ticket, or server logs, for why.
+
+## 4.1 Trade history and ticket statuses
+
+Every submission attempt — `POST /paper/execute` today, the auto-trader
+later — goes through `submit_arb_ticket` and writes one `paper_ticket` row.
+Read the log with `GET /paper/{account_id}/tickets` (`?status=` and
+`?source=` filter it). This is the only place "the bot tried and failed" is
+distinguishable from "the bot never saw an edge" — a detector run that finds
+nothing writes no row at all.
+
+A ticket's `status` is one of three terminal values:
+
+- **`filled`** — every leg executed. `paper_order` rows exist and each leg in
+  the response carries a real `fill_price`.
+- **`rejected`** — stopped before any order was built: a limit-price breach,
+  insufficient book depth, or the `ARBYS_MAX_OUTCOME_QTY` cap (enforced in
+  `ticket_service.py`, not the endpoint — see CLAUDE.md). `rejection_reason`
+  says which. `legs` is empty; there is nothing to show because nothing was
+  built.
+- **`missed`** — the opportunity was already gone by the time the ticket
+  tried to act on it (quotes moved between detection and submission). This is
+  the number that tells you whether faster execution would actually help —
+  `rejected` means the edge was still there and something else stopped you.
+
+`pending` is not one of the three — it's a transient state written the
+instant the ticket id is minted, before the router runs. A ticket stuck on
+`pending` means the process died mid-submission, not that anything is broken
+in normal operation.
+
+`paper_settlement` rows come from `AutoSettleService`'s heuristic settlement,
+not a real exchange feed — Arbys has no settlement API to poll. If the
+heuristic calls a game wrong, the tell is a ticket whose `realized_profit`
+(computed at read time from that ticket's own fills) looks nothing like its
+`expected_profit` from detection.
 
 ## 5. Troubleshooting
 

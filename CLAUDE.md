@@ -22,7 +22,7 @@ Run everything from the repo root with the venv Python — `venv\Scripts\python.
 — rather than a bare `python`.
 
 ```powershell
-venv\Scripts\python.exe -m pytest -q            # 235 tests, must stay green
+venv\Scripts\python.exe -m pytest -q            # 265 tests, must stay green
 venv\Scripts\python.exe -m ruff check .         # must stay clean
 venv\Scripts\python.exe -m mypy arbys           # see caveat below — NOT clean today
 ```
@@ -151,6 +151,12 @@ Layers, strictly inward-depending:
   tick, and it isn't 1** below).
 - `arbys/backend/` — FastAPI app + `AppState`. `state.py` is the wiring hub:
   fee registry, adapter factories, broker construction, bootstrap/hydration.
+  `ticket_service.py` is the **only** way an arb ticket is submitted — both
+  `POST /paper/execute` and (later) the auto-trader call `submit_arb_ticket`.
+  It mints the ticket id, enforces `ARBYS_MAX_OUTCOME_QTY`, and writes the
+  `paper_ticket` row. **The cap used to live in the endpoint**, so any
+  non-HTTP caller bypassed it silently and stacked without bound; keep it in
+  the service.
 - `arbys/db/` — SQLAlchemy models, repos, Alembic migrations.
 
 **Event group** is the core concept: one real-world proposition whose outcomes
@@ -191,9 +197,11 @@ with Kalshi-NO on the same question.
 
 ### Frontend
 
-Single-page terminal at `/`, with `/admin` as the secondary route. The UI is
-built on an external design system copied in verbatim at
-`frontend/public/design/industry/styles.css`.
+Single-page terminal at `/`, with `/admin` and `/account` as secondary routes.
+`/account` replaced the old sidebar — `AccountPanel.tsx` no longer exists;
+`AccountStrip` (full-width, above the opportunity table) and `TicketHistory`
+took its place. The UI is built on an external design system copied in
+verbatim at `frontend/public/design/industry/styles.css`.
 
 Style via that system's semantic classes (`.card.blueprint`, `.btn.btn-primary`,
 `.tag`, `.table`, `.field`, `.input`) and its CSS custom properties
@@ -201,6 +209,18 @@ Style via that system's semantic classes (`.card.blueprint`, `.btn.btn-primary`,
 **Do not introduce new hex colors, radii, or type scales** — take them from the
 tokens. Tailwind stays installed as a layout escape hatch (grid/flex helpers)
 but is not the styling engine for color, border, radius, or type.
+
+The one sanctioned exception is `frontend/src/index.css`'s small `--vt-*` set
+(`--vt-green`, `--vt-green-dark`, `--vt-green-tint`, `--vt-red-dark`) — the
+design system has no profit/loss color pair, so the terminal defines its own
+rather than smuggling in a raw hex value at the call site.
+
+**The `--space-*` scale skips 5 and 7** (`--space-4` then `--space-6`,
+`--space-8`; see the design system CSS). `var(--space-5)` is not an error, not
+a fallback to the nearest defined step, and not a browser warning — it
+silently resolves to nothing, collapsing whatever margin or gap it was set on.
+This has shipped twice during the account-page work and nothing in the test
+or lint suite catches it; check the actual token list before using one.
 
 The design system is a light-ground brief with no dark mode. Don't add one
 casually.
@@ -460,6 +480,33 @@ against a live Kalshi leg.
 - **Opportunities follow the group.** Retiring must call
   `clear_group_opportunities` — unregistering from the engine means no further
   evaluation, so nothing else would ever empty that group's set.
+
+## Trade history is ticket-level
+
+`paper_ticket` gives an arb ticket a durable identity and `paper_order.ticket_id`
+groups its legs. Three things about it are deliberate:
+
+- **`event_group_id` is not a foreign key, and `title_snapshot` is frozen at
+  submit time.** Discovery retires groups routinely and `delete_event_group`
+  takes the legs with it, so a live join to `event_group.title` blanks the name
+  of every finished game — exactly the rows worth auditing.
+- **Rejected and missed tickets are recorded, not just fills.** A preview
+  rejection never builds an `Order`, so before this nothing reached the DB and
+  a bot attempting 400 tickets looked identical to one attempting 3. `missed`
+  means the edge vanished between detection and submission, which is the
+  measurement that decides whether latency work is worth anything.
+- **An attempt is logged only once it reaches `submit_arb_ticket`.** "The
+  detector found nothing" is not an attempt and is never written.
+
+`paper_settlement` records resolution events, which `settle_outcome_async`
+previously did not — a settled winner was indistinguishable from a position
+sold out at market. A ticket's realized profit is computed at read time from
+its **own** fills, because settlement uses an `avg_price` blended across every
+ticket on that outcome.
+
+Equity is computed by `shared/equity.py:account_equity` and by nothing else.
+`PnlSnapshotService` and `GET /paper/{id}` both call it; if they diverged, the
+account strip and the equity curve would disagree on the same page.
 
 ## Known defects
 
