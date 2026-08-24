@@ -8,12 +8,18 @@ export const POLY = "polymarket_us";
 export const KALSHI = "kalshi";
 export const COMPLETED_ASK_THRESHOLD = 0.98;
 
+// `categoryOf` upper-cases an unknown prefix rather than hiding it, so a newly
+// wired league still appears in the rail without a label here. These exist to
+// spell out the ones an acronym reads badly for.
 export const CATEGORY_LABELS: Record<string, string> = {
   atp: "ATP Tennis",
   wta: "WTA Tennis",
   mlb: "MLB",
   nfl: "NFL",
   nba: "NBA",
+  wnba: "WNBA",
+  ncaaf: "College Football",
+  ufc: "UFC",
 };
 
 export function categoryOf(group: MonitoredGroup): { id: string; label: string } {
