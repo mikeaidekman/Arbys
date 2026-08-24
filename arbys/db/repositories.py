@@ -561,6 +561,17 @@ def _score_ticket(
     return total
 
 
+async def update_paper_ticket_status(
+    session: AsyncSession, ticket_id: str, *, status: str,
+    rejection_reason: str | None = None,
+) -> None:
+    row = await session.get(m.PaperTicket, ticket_id)
+    if row is None:
+        return
+    row.status = status
+    row.rejection_reason = rejection_reason
+
+
 __all__ = [
     "delete_event_group",
     "ensure_outcome_placeholder",
@@ -579,6 +590,7 @@ __all__ = [
     "list_paper_tickets",
     "list_pnl_snapshots",
     "list_recent_opportunities",
+    "update_paper_ticket_status",
     "upsert_event_group",
     "upsert_paper_balance",
     "upsert_paper_position",
