@@ -11,18 +11,14 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import logging
-from decimal import Decimal
 
 from ..db import repositories as repo
 from ..db.session import session_scope
+from ..shared.equity import account_equity
 from ..shared.paper_broker import PaperExecutionAdapter
 from ..shared.quotebook import QuoteBook
 
 log = logging.getLogger(__name__)
-
-
-def _mid(q) -> Decimal:
-    return (q.bid + q.ask) / Decimal(2)
 
 
 class PnlSnapshotService:
@@ -55,23 +51,15 @@ class PnlSnapshotService:
 
     async def snapshot_once(self) -> None:
         for account_id in self._account_ids:
-            cash_total = Decimal("0")
-            mtm_total = Decimal("0")
-            for broker in self._brokers.values():
-                cash, positions = broker.account_snapshot(account_id)
-                cash_total += cash
-                for outcome_id, (qty, avg_price, _realized) in positions.items():
-                    q = self._book.get(outcome_id)
-                    price = _mid(q) if q is not None else avg_price
-                    mtm_total += price * qty
+            eq = account_equity(self._brokers, self._book, account_id)
             try:
                 async with session_scope() as session:
                     await repo.insert_paper_pnl_snapshot(
                         session,
                         account_id=account_id,
-                        cash=cash_total,
-                        mtm_positions=mtm_total,
-                        total_equity=cash_total + mtm_total,
+                        cash=eq.cash,
+                        mtm_positions=eq.position_value,
+                        total_equity=eq.equity,
                     )
             except Exception:
                 log.exception("pnl snapshot write failed for %s", account_id)
