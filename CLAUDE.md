@@ -70,7 +70,48 @@ Layers, strictly inward-depending:
   game. Team sports share one path: `fetch_kalshi_team_games` +
   `SERIES_TICKERS` on the Kalshi side, `/v2/leagues/<slug>/events` +
   `LEAGUE_SLUGS` on the Polymarket US side. Adding a league means adding a
-  team table, a series ticker, and a league slug.
+  team table, a series ticker, and a league slug. Individual sports (tennis,
+  UFC) share a second path built on `players.py` instead of a roster table;
+  `fetch_kalshi_tennis_matches(series=...)` and
+  `fetch_polymarket_us_tennis(leagues=..., winner_types=...)` are
+  parameterised, so a new head-to-head sport is registry entries, not a new
+  parser.
+
+  Wired as of 2026-08-24, with live group counts from one full pass (567
+  total): **nfl** 268, **mlb** 69, **atp** 68, **wta** 62, **ncaaf** 59,
+  **wnba** 34, **ufc** 7. Note `ncaaf` is Kalshi's name and `cfb` is
+  Polymarket's — `SERIES_TICKERS` and `LEAGUE_SLUGS` are separate dicts
+  precisely so a league can be named differently per venue.
+
+  **`teams[].name` on Polymarket US holds a different thing per league.** This
+  is the trap that cost the most time here, because it fails silently — the
+  league discovers zero groups while both venues are visibly quoting it:
+
+  | league | `teams[].name` | resolves via |
+  | --- | --- | --- |
+  | NFL / MLB | `"Arizona Cardinals"` (full name) | `_by_full` |
+  | WNBA | `"Golden State"` (bare city) | `_by_city_unique` |
+  | CFB | `"Tar Heels"` (mascot only) | **not usable** |
+
+  A college mascot is not an identity: 28 repeat across the 88 CFB games
+  observed, `"Tigers"` being seven different schools, covering 81 of 176
+  team-slots. `TeamResolver` therefore refuses a bare *ambiguous* nickname,
+  and `_resolve_team` prefers the two better fields the payload carries —
+  `displayAbbreviation` (equals Kalshi's ticker code for 154 of 168 CFB teams)
+  then `safeName` (equals Kalshi's title) — before falling back to `name`.
+  Polymarket writes `"Arizona State"` where Kalshi writes `"Arizona St."` on
+  39 of the shared codes, so both spellings are indexed.
+
+  **`game_date` is Eastern on both sides, deliberately.** Kalshi's comes from
+  its ticker, which carries a local Eastern trading day; Polymarket's is
+  derived from a UTC `startTime` and is converted by `_eastern_date`. Without
+  that conversion an evening game lands on different dates per venue, and
+  `_same_fixture` falls back to comparing dates whenever either side lacks an
+  exact start — which is every sport whose Kalshi ticker omits `HHMM` (WNBA,
+  NFL, CFB). Reading UTC there silently dropped every evening fixture: NFL
+  totals found 151 groups where the Eastern read finds 252. Do **not** "fix"
+  this class of miss by widening `date_tolerance_days` — that also fuses
+  Monday's game with Tuesday's and invents an arb between two fixtures.
 
   One live trap: Kalshi sends a **bare city** (`"Atlanta"`) except where a city
   fields two teams (`"New York Y"`), which `TeamResolver` handles. Two others
@@ -101,12 +142,10 @@ Layers, strictly inward-depending:
   `None`. It landed early so adding spreads is registering a market type
   rather than reopening the matcher. See **Phase 2** below.
 
-  Only NFL totals are wired, and that is now a **choice, not a limit**:
-  Polymarket US carries `baseball_team_full_game_total` and Kalshi lists
-  `KXMLBTOTAL`, so adding `("mlb", MLB_RESOLVER)` to `TOTALS_SPORTS` should
-  work. It is held back so the Polymarket US port had exactly one behavioural
-  variable. (Polymarket *international* genuinely carried no baseball totals,
-  which is why this used to read as impossible.)
+  Totals are wired for **nfl, mlb, wnba and ncaaf** (`TOTALS_SPORTS`), each
+  with a `TOTALS_SERIES` ticker and a `TOTAL_TYPES` entry. NBA stays out of
+  both `TEAM_SPORTS`-in-practice and `TOTALS_SPORTS` verification until its
+  season opens, for the same reason its moneyline is unverified.
 
   Kalshi puts the strike in `yes_sub_title` and the team codes only in the
   event ticker, concatenated and variable-width, so `split_team_codes` tries
@@ -236,6 +275,13 @@ Feature flags in `.env` (copy from `.env.example`; `.env` is gitignored):
 - `ARBYS_DB_URL` — defaults to SQLite `./arbys-local.db`.
 - `ARBYS_ENABLE_INGEST` — **0 by default.** When off, no venue is contacted and
   quotes must be pushed via `POST /quotes`. Tests and demos rely on this.
+- `ARBYS_DISCOVERY_CONCURRENCY` — how many discovery sub-passes may hit the
+  venues at once, **1 by default**. `_REQUEST_SPACING_S` is 0.15s, calibrated
+  as ~6 req/s for Kalshi's public tier, and that assumes one pass at a time.
+  Going from 5 sub-passes to 11 (adding WNBA, CFB, UFC) asked for ~66 req/s
+  and earned a 429 that dropped MLB and CFB from the pass — coverage halving
+  in a way that looks like "those games ended". A serial pass takes ~128s
+  against the 600s default interval. Raise it to trade reliability for latency.
 - `ARBYS_ENABLE_DISCOVERY` / `ARBYS_DISCOVERY_INTERVAL_S` — auto-registration of
   cross-venue games. Needs ingest on to actually stream.
 - `ARBYS_MAX_OUTCOME_QTY` — max open units per outcome per paper account,
