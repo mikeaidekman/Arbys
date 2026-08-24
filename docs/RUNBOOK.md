@@ -217,10 +217,12 @@ execution, implement `ExecutionAdapter` for the venue, then swap it into
   DB or delete rows from `paper_balance`, `paper_position`, `paper_order`,
   `paper_fill`, `paper_pnl_snapshot` for the account.
 - **Multi-leg atomicity** — `ExecutionRouter.submit()` fills all legs or
-  none. If any leg would exceed its limit price or lack balance, the entire
-  ticket rejects. The ticket itself is still persisted (see 4.1) — it's the
-  `paper_order`/`paper_fill` rows that never get written for a rejection.
-  Check `rejection_reason` on the ticket, or server logs, for why.
+  none. A rejection never writes a `paper_fill` row. `paper_order` rows are
+  written one per attempted leg on a router-level rejection (limit price,
+  balance, depth — see 4.1), but not on the pre-router
+  `ARBYS_MAX_OUTCOME_QTY` cap rejection, which stops before an
+  `ExecutionIntent` ever exists. Check `rejection_reason` on the ticket, and
+  on its legs, for why.
 
 ## 4.1 Trade history and ticket statuses
 
@@ -235,11 +237,19 @@ A ticket's `status` is one of three terminal values:
 
 - **`filled`** — every leg executed. `paper_order` rows exist and each leg in
   the response carries a real `fill_price`.
-- **`rejected`** — stopped before any order was built: a limit-price breach,
-  insufficient book depth, or the `ARBYS_MAX_OUTCOME_QTY` cap (enforced in
-  `ticket_service.py`, not the endpoint — see CLAUDE.md). `rejection_reason`
-  says which. `legs` is empty; there is nothing to show because nothing was
-  built.
+- **`rejected`** — two different paths, and whether `legs` is populated
+  tells you which:
+  - **Cap breach** — `ARBYS_MAX_OUTCOME_QTY` (enforced in
+    `ticket_service.py`, not the endpoint — see CLAUDE.md) stops the ticket
+    before an `ExecutionIntent` is ever built. `legs` is empty; nothing was
+    attempted.
+  - **Router-level rejection** — a limit-price breach, insufficient balance,
+    or insufficient book depth. `legs` is populated, one row per attempted
+    leg: the leg that actually failed carries its own `rejection_reason`,
+    every other leg is marked `ticket_rejected` (it previewed fine but the
+    ticket failed as a whole), and `fill_price` is null on all of them —
+    nothing filled. This is the more useful of the two for debugging: it
+    names the specific leg that broke the ticket.
 - **`missed`** — the opportunity was already gone by the time the ticket
   tried to act on it (quotes moved between detection and submission). This is
   the number that tells you whether faster execution would actually help —

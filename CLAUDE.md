@@ -505,7 +505,7 @@ its **own** fills, because settlement uses an `avg_price` blended across every
 ticket on that outcome.
 
 Equity is computed by `shared/equity.py:account_equity` and by nothing else.
-`PnlSnapshotService` and `GET /paper/{id}` both call it; if they diverged, the
+`PnlSnapshotService` and `GET /paper/{account_id}` both call it; if they diverged, the
 account strip and the equity curve would disagree on the same page.
 
 ## Known defects
