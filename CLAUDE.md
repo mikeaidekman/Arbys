@@ -151,12 +151,16 @@ Layers, strictly inward-depending:
   tick, and it isn't 1** below).
 - `arbys/backend/` — FastAPI app + `AppState`. `state.py` is the wiring hub:
   fee registry, adapter factories, broker construction, bootstrap/hydration.
-  `ticket_service.py` is the **only** way an arb ticket is submitted — both
-  `POST /paper/execute` and (later) the auto-trader call `submit_arb_ticket`.
-  It mints the ticket id, enforces `ARBYS_MAX_OUTCOME_QTY`, and writes the
-  `paper_ticket` row. **The cap used to live in the endpoint**, so any
-  non-HTTP caller bypassed it silently and stacked without bound; keep it in
-  the service.
+  `ticket_service.py` is the **only** way a live arb ticket is submitted —
+  both `POST /paper/execute` and (later) the auto-trader call
+  `submit_arb_ticket`. (The backtest harness, `arbys/backtest/__init__.py`,
+  builds an `ExecutionIntent` directly and calls the router itself, skipping
+  both the ticket log and the cap — correctly, since it runs its own
+  throwaway brokers with no DB sink, so there is nothing to log and no
+  shared position to cap.) It mints the ticket id, enforces
+  `ARBYS_MAX_OUTCOME_QTY`, and writes the `paper_ticket` row. **The cap used
+  to live in the endpoint**, so any non-HTTP caller bypassed it silently and
+  stacked without bound; keep it in the service.
 - `arbys/db/` — SQLAlchemy models, repos, Alembic migrations.
 
 **Event group** is the core concept: one real-world proposition whose outcomes
@@ -504,9 +508,14 @@ sold out at market. A ticket's realized profit is computed at read time from
 its **own** fills, because settlement uses an `avg_price` blended across every
 ticket on that outcome.
 
-Equity is computed by `shared/equity.py:account_equity` and by nothing else.
+Account-level equity is computed by `shared/equity.py:account_equity`.
 `PnlSnapshotService` and `GET /paper/{account_id}` both call it; if they diverged, the
 account strip and the equity curve would disagree on the same page.
+`GET /paper/{account_id}/positions` (`arbys/backend/app.py:418-428`) does
+**not** go through it — it recomputes a mark and per-position unrealized
+inline, because it needs the per-outcome breakdown `account_equity` doesn't
+return. Keep its mark logic (mid, falling back to `avg_price` when there's no
+live quote) in step with `account_equity`'s if that ever changes.
 
 ## Known defects
 

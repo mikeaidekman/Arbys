@@ -36,6 +36,36 @@ On startup `AppState.bootstrap()` will:
 5. Seed `DEFAULT_STARTING_BALANCE = $1000` for any venue not previously funded.
 6. Start the periodic PnL snapshot service.
 
+## 1.1 Upgrading an existing database
+
+**Run `alembic upgrade head` before starting the backend on a new version —
+not after.** Step 1 above (`create_all`) only creates *missing tables*; it
+never adds a *column* to a table that already exists. On a database sitting
+at migration `0005`, starting this version's backend first will create the
+new `paper_ticket` and `paper_settlement` tables but leave
+`paper_order.ticket_id` absent, and every ticket endpoint then 500s with
+`no such column: paper_order.ticket_id`. Worse, `alembic_version` still says
+`0005` at that point, so the ticket-history migration (`0006`) looks
+unapplied — but running it now fails with `table paper_ticket already
+exists`, because `create_all` already made the table with the wrong shape.
+(CLAUDE.md documents the same trap for migration `0002`.)
+
+**Recovery**, if you already hit this: stop the backend, drop the two tables
+`create_all` created (this does not touch anything from `0001`–`0005`), then
+run the migration properly.
+
+```powershell
+# Postgres
+psql $env:ARBYS_DB_URL -c "DROP TABLE paper_settlement; DROP TABLE paper_ticket;"
+alembic upgrade head
+
+# SQLite
+venv\Scripts\python.exe -c "import sqlite3; c = sqlite3.connect('arbys-local.db'); c.execute('DROP TABLE paper_settlement'); c.execute('DROP TABLE paper_ticket'); c.commit()"
+alembic upgrade head
+```
+
+Then start the backend as normal.
+
 ## 2. Adding a new event group (curated allowlist)
 
 An "event group" is Arbys' term for a real-world event whose outcomes are
@@ -213,9 +243,18 @@ execution, implement `ExecutionAdapter` for the venue, then swap it into
 - **Slippage / latency** are configured on `PaperExecutionAdapter` construction
   (in `state.py`). Defaults are conservative for local demo; tune per venue
   once you have real quote history.
-- **Resetting a paper account** — for a clean slate, wipe the SQLite/Postgres
-  DB or delete rows from `paper_balance`, `paper_position`, `paper_order`,
-  `paper_fill`, `paper_pnl_snapshot` for the account.
+- **Resetting a paper account** — `POST /paper/{account_id}/reset` (wired to
+  the admin UI's reset button) calls `delete_paper_history`, which wipes
+  `paper_balance`, `paper_position`, `paper_order`, `paper_fill`,
+  `paper_pnl_snapshot`, and `paper_ticket` for the account, **and every row**
+  of `paper_settlement` — that table has no `account_id` column (settlement
+  is keyed by `outcome_id`, since on a real exchange it's global), so on this
+  single-account simulator "reset the account" clears it entirely rather than
+  filtering it. Leaving `paper_ticket` or `paper_settlement` behind after a
+  reset is what makes a fresh account report phantom "open tickets" forever,
+  or score a brand-new ticket against a stale resolution. For a clean slate
+  by hand instead, wipe the SQLite/Postgres DB or delete rows from all seven
+  of those tables.
 - **Multi-leg atomicity** — `ExecutionRouter.submit()` fills all legs or
   none. A rejection never writes a `paper_fill` row. `paper_order` rows are
   written one per attempted leg on a router-level rejection (limit price,
