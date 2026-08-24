@@ -64,6 +64,18 @@ class DbPaperPersistenceSink:
                 realized_pnl=realized_pnl,
             )
 
+    async def on_settlement(
+        self, outcome_id: str, resolved_value: Decimal, *, venue_id: str, source: str
+    ) -> None:
+        async with session_scope() as session:
+            await repo.insert_paper_settlement(
+                session,
+                outcome_id=outcome_id,
+                venue_id=venue_id,
+                resolved_value=resolved_value,
+                source=source,
+            )
+
 
 class AccountScopedSink:
     """Wraps a `DbPaperPersistenceSink` and pins the account id on `on_order`."""
@@ -107,4 +119,11 @@ class AccountScopedSink:
     ) -> None:
         await self._inner.on_position(
             account_id, outcome_id, qty, avg_price, realized_pnl, venue_id=venue_id
+        )
+
+    async def on_settlement(
+        self, outcome_id: str, resolved_value: Decimal, *, venue_id: str, source: str
+    ) -> None:
+        await self._inner.on_settlement(
+            outcome_id, resolved_value, venue_id=venue_id, source=source
         )

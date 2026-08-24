@@ -61,6 +61,9 @@ class PaperPersistenceSink(Protocol):
         *,
         venue_id: str,
     ) -> None: ...
+    async def on_settlement(
+        self, outcome_id: str, resolved_value: Decimal, *, venue_id: str, source: str
+    ) -> None: ...
 
 
 @dataclass
@@ -395,7 +398,9 @@ class PaperExecutionAdapter(ExecutionAdapter):
     # Resolution / settlement
     # ------------------------------------------------------------------
 
-    async def settle_outcome_async(self, outcome_id: str, resolved_value: Decimal) -> None:
+    async def settle_outcome_async(
+        self, outcome_id: str, resolved_value: Decimal, *, source: str = "heuristic"
+    ) -> None:
         for account_id, st in self._accounts.items():
             qty = st.positions.get(outcome_id, Decimal("0"))
             if qty == 0:
@@ -423,6 +428,12 @@ class PaperExecutionAdapter(ExecutionAdapter):
                         venue_id=self.venue_id,
                     )
                 )
+        if self._sink is not None:
+            await self._emit(
+                self._sink.on_settlement(
+                    outcome_id, resolved_value, venue_id=self.venue_id, source=source
+                )
+            )
 
     def settle_outcome(self, outcome_id: str, resolved_value: Decimal) -> None:
         """Synchronous settlement (no persistence). Kept for existing callers."""

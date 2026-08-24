@@ -469,3 +469,91 @@ async def test_router_rejection_names_the_failing_leg():
     assert rejections[0].outcome_id == "k-yes"
     assert rejections[0].reason == "insufficient_liquidity"
     assert "kalshi:insufficient_liquidity" in str(excinfo.value)
+
+
+@pytest.mark.asyncio
+async def test_settlement_notifies_the_sink_exactly_once_with_multiple_holders():
+    """Settlement emits exactly once per outcome, even with multiple accounts
+    holding the position. This catches emit-inside-loop regressions that would
+    fire once per holding account."""
+    recorded: list[tuple[str, Decimal, str, str]] = []
+
+    class _Sink:
+        async def on_order(self, order, *, rejection_reason=None): ...
+        async def on_fill(self, order, fill): ...
+        async def on_balance(self, account_id, venue_id, amount): ...
+        async def on_position(
+            self, account_id, outcome_id, qty, avg_price, realized_pnl, *, venue_id
+        ): ...
+        async def on_settlement(
+            self, outcome_id, resolved_value, *, venue_id, source
+        ):
+            recorded.append((outcome_id, resolved_value, venue_id, source))
+
+    book = QuoteBook()
+    book.upsert(
+        Quote(
+            outcome_id="k-yes",
+            bid=Decimal("0.39"),
+            ask=Decimal("0.40"),
+        )
+    )
+    broker = PaperExecutionAdapter(
+        venue_id="kalshi", quotebook=book, fee_model=KalshiFeeModel(), sink=_Sink()
+    )
+    # First account places and holds a position
+    broker.deposit("acct", Decimal("100"))
+    await broker.place_order(
+        account_id="acct",
+        outcome_id="k-yes",
+        is_buy=True,
+        qty=Decimal("10"),
+        limit_price=Decimal("0.40"),
+    )
+    # Second account also holds the same position (without placing order,
+    # to avoid polluting the recorded list)
+    broker.deposit("acct2", Decimal("100"))
+    broker.hydrate_position(
+        "acct2", "k-yes", qty=Decimal("5"), avg_price=Decimal("0.40"), realized_pnl=Decimal("0")
+    )
+    # Settlement should emit exactly once, not once per holding account
+    await broker.settle_outcome_async("k-yes", Decimal("1"))
+    assert len(recorded) == 1, f"Expected 1 settlement record, got {len(recorded)}"
+    assert recorded[0] == ("k-yes", Decimal("1"), "kalshi", "heuristic")
+
+
+@pytest.mark.asyncio
+async def test_settlement_notifies_the_sink_when_no_account_holds():
+    """Settlement emits exactly once even when no account holds the position.
+    This catches emit-inside-loop regressions that would fire zero times when
+    the loop has nothing to settle."""
+    recorded: list[tuple[str, Decimal, str, str]] = []
+
+    class _Sink:
+        async def on_order(self, order, *, rejection_reason=None): ...
+        async def on_fill(self, order, fill): ...
+        async def on_balance(self, account_id, venue_id, amount): ...
+        async def on_position(
+            self, account_id, outcome_id, qty, avg_price, realized_pnl, *, venue_id
+        ): ...
+        async def on_settlement(
+            self, outcome_id, resolved_value, *, venue_id, source
+        ):
+            recorded.append((outcome_id, resolved_value, venue_id, source))
+
+    book = QuoteBook()
+    book.upsert(
+        Quote(
+            outcome_id="k-yes",
+            bid=Decimal("0.39"),
+            ask=Decimal("0.40"),
+        )
+    )
+    broker = PaperExecutionAdapter(
+        venue_id="kalshi", quotebook=book, fee_model=KalshiFeeModel(), sink=_Sink()
+    )
+    broker.deposit("acct", Decimal("100"))
+    # Settle an outcome that no account holds
+    await broker.settle_outcome_async("k-yes", Decimal("1"))
+    assert len(recorded) == 1, f"Expected 1 settlement record, got {len(recorded)}"
+    assert recorded[0] == ("k-yes", Decimal("1"), "kalshi", "heuristic")
