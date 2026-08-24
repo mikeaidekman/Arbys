@@ -81,6 +81,14 @@ async def _write_ticket(
     a broken trade is not."""
     try:
         async with session_scope() as session:
+            # A non-default account_id may never have had a paper_account
+            # row created for it. On Postgres that makes the ticket's FK
+            # fail, which this try/except swallows -- so with no ticket row,
+            # the sink's paper_order.ticket_id FK then fails too (swallowed
+            # by _emit), and a trade executes in memory with zero database
+            # rows. ensure_paper_account is idempotent, so this is free on
+            # the common "default" path.
+            await repo.ensure_paper_account(session, account_id)
             await repo.insert_paper_ticket(
                 session,
                 ticket_id=ticket_id,
@@ -157,14 +165,15 @@ def _cap_breach(state: AppState, live: ArbOpportunity, account_id: str) -> str |
         _cash, positions = broker.account_snapshot(account_id)
         held = positions.get(leg.outcome_id, (Decimal("0"),))[0]
         if held + leg.qty > cap:
-            # Prefix is a machine-matchable marker (see
+            # `position_cap:` prefix is a machine-matchable marker (see
             # test_position_cap_is_enforced_here_not_in_the_endpoint); the
             # words "position cap" also have to appear for the HTTP endpoint,
             # which surfaces this string verbatim as the 409 detail (see
             # test_repeat_fills_stop_at_the_position_cap).
             return (
-                f"position_cap:{leg.outcome_id} position cap reached: "
-                f"holding {held} adds {leg.qty} cap {cap}"
+                f"position_cap:{leg.outcome_id} would exceed the position cap "
+                f"of {cap}: holds {held}, ticket adds {leg.qty}. Raise "
+                f"ARBYS_MAX_OUTCOME_QTY or reset the account."
             )
     return None
 
@@ -224,12 +233,28 @@ async def submit_arb_ticket(
     except InsufficientLegsError as e:
         reason = str(e)
         await _set_status(ticket_id, status="rejected", reason=reason)
-        await _write_rejected_legs(
-            ticket_id=ticket_id,
-            account_id=account_id,
-            live=live,
-            reasons={r.outcome_id: r.reason for r in e.rejections},
-        )
+        # e.rejections is the discriminator: only the preview phase (and the
+        # atomic commit's unwound failure) raise with structured per-leg
+        # rejections, and neither of those has written any paper_order rows
+        # yet. The two post-preview *string* raises in
+        # `execution_router._commit_sequentially` carry `rejections == ()`
+        # and are raised *after* `place_order` already persisted a row for
+        # each attempted leg (including the one that filled) via
+        # `emit_order_events`. Writing rejected-leg rows here for that case
+        # would duplicate the filled leg -- once `filled` with a real fill,
+        # once `rejected` -- which corrupts `_score_ticket` (a phantom
+        # rejected leg makes it return None forever) and duplicates the
+        # frontend's `${venue_id}:${outcome_id}` React key. So a
+        # string-raise ticket is recorded as `rejected` with the reason, but
+        # gets no extra leg rows here -- whatever `_commit_sequentially`
+        # already wrote is the only leg history for it.
+        if e.rejections:
+            await _write_rejected_legs(
+                ticket_id=ticket_id,
+                account_id=account_id,
+                live=live,
+                reasons={r.outcome_id: r.reason for r in e.rejections},
+            )
         return TicketResult(ticket_id, "rejected", (), reason)
 
     await _set_status(ticket_id, status="filled", reason=None)

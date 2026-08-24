@@ -355,8 +355,9 @@ async def insert_paper_pnl_snapshot(
 async def delete_paper_history(session: AsyncSession, account_id: str) -> None:
     """Wipe all paper trading history for an account.
 
-    Deletes pnl snapshots, fills (via their orders), orders, positions, and
-    balances. Leaves the paper_account row itself intact.
+    Deletes pnl snapshots, fills (via their orders), orders, tickets,
+    positions, and balances, and wipes every `paper_settlement` row (see
+    below). Leaves the paper_account row itself intact.
     """
     order_ids = (
         await session.execute(
@@ -370,6 +371,24 @@ async def delete_paper_history(session: AsyncSession, account_id: str) -> None:
     await session.execute(
         delete(m.PaperOrder).where(m.PaperOrder.account_id == account_id)
     )
+    # Orders are already gone, so no paper_order.ticket_id still points at
+    # these rows. Leaving tickets behind after their orders are deleted is
+    # what used to make count_open_paper_tickets' outer join see a ticket
+    # with no matching order (outcome_id is None) and count it as open
+    # forever, and list_paper_tickets kept showing it as "filled" with an
+    # empty legs list.
+    await session.execute(
+        delete(m.PaperTicket).where(m.PaperTicket.account_id == account_id)
+    )
+    # paper_settlement has no account_id column: it's keyed by outcome_id,
+    # because on a real exchange settlement is global, not per-account. This
+    # is a single-account paper simulator though, so "reset the account" and
+    # "clear every settlement this simulator has recorded" are the same
+    # operation in practice — delete them all. Leaving stale rows behind
+    # would score a brand-new ticket on a previously-settled outcome
+    # immediately against that old resolution, before the ticket's own legs
+    # ever settle.
+    await session.execute(delete(m.PaperSettlement))
     await session.execute(
         delete(m.PaperPnlSnapshot).where(m.PaperPnlSnapshot.account_id == account_id)
     )
@@ -478,7 +497,9 @@ async def list_paper_tickets(
     ticket_ids = [t.id for t in tickets]
     orders = (
         await session.execute(
-            select(m.PaperOrder).where(m.PaperOrder.ticket_id.in_(ticket_ids))
+            select(m.PaperOrder)
+            .where(m.PaperOrder.ticket_id.in_(ticket_ids))
+            .order_by(m.PaperOrder.submitted_at, m.PaperOrder.id)
         )
     ).scalars().all()
 

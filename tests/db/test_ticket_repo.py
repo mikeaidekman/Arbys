@@ -104,8 +104,13 @@ async def test_missed_ticket_has_null_economics():
         assert ticket.expected_edge_bps is None
 
 
-async def _two_leg_filled_ticket(session, *, ticket_id: str) -> None:
-    """A 100-unit arb: buy YES at 0.40 and NO at 0.50, 1c fee each side."""
+async def _two_leg_filled_ticket(
+    session, *, ticket_id: str, fill_prices: dict[str, Decimal] | None = None
+) -> None:
+    """A 100-unit arb: buy YES at limit 0.40 and NO at limit 0.50, 1c fee each
+    side. Fills at the limit price by default; pass `fill_prices` to fill at a
+    different price than the limit (needed to tell "reports the fill" apart
+    from "reports the limit")."""
     await repo.ensure_venue(session, "kalshi", name="Kalshi", kind="exchange")
     await repo.ensure_venue(
         session, "polymarket_us", name="Polymarket US", kind="exchange"
@@ -139,20 +144,31 @@ async def _two_leg_filled_ticket(session, *, ticket_id: str) -> None:
             status="filled",
             ticket_id=ticket_id,
         )
+        fill_price = px if fill_prices is None else fill_prices[oid]
         await repo.insert_paper_fill(
-            session, order_id=order_id, qty=Decimal("100"), price=px, fee=Decimal("1.00")
+            session, order_id=order_id, qty=Decimal("100"), price=fill_price, fee=Decimal("1.00")
         )
 
 
 async def test_ticket_reports_fills_not_just_limits():
+    """fill_price must come from the fill, not be a copy of the limit price --
+    fill here at 0.42/0.53 against limits of 0.40/0.50 so the two can't be
+    confused. (Fails against a repo that reports `limit_price` for
+    `fill_price`: the old version of this test used the same variable for
+    both and couldn't tell the difference.)"""
     await create_all()
     async with session_scope() as session:
-        await _two_leg_filled_ticket(session, ticket_id="tkt-1")
+        await _two_leg_filled_ticket(
+            session,
+            ticket_id="tkt-1",
+            fill_prices={"k-yes": Decimal("0.42"), "p-no": Decimal("0.53")},
+        )
     async with session_scope() as session:
         tickets = await repo.list_paper_tickets(session, "default")
     assert len(tickets) == 1
     legs = sorted(tickets[0]["legs"], key=lambda leg: leg["outcome_id"])
-    assert [leg["fill_price"] for leg in legs] == [Decimal("0.40"), Decimal("0.50")]
+    assert [leg["limit_price"] for leg in legs] == [Decimal("0.40"), Decimal("0.50")]
+    assert [leg["fill_price"] for leg in legs] == [Decimal("0.42"), Decimal("0.53")]
     assert [leg["fee"] for leg in legs] == [Decimal("1.00"), Decimal("1.00")]
 
 
@@ -291,3 +307,37 @@ async def test_open_ticket_count_is_not_truncated_by_the_200_row_default():
         assert naive == [], "setup didn't crowd the open ticket out of the 200-row window"
 
         assert await repo.count_open_paper_tickets(session, "default") == 1
+
+
+async def test_reset_empties_the_audit_trail():
+    """`delete_paper_history` must take `paper_ticket` and `paper_settlement`
+    with it, not just orders/fills/positions/balances.
+
+    Fails against the pre-fix `delete_paper_history` (which deleted neither
+    table): the ticket row would survive with its order already gone, so
+    `count_open_paper_tickets`'s outer join sees `outcome_id is None` and
+    counts it as open forever, and `list_paper_tickets` would still return it
+    as a "filled" ticket with an empty `legs` list instead of nothing at all.
+    """
+    await create_all()
+    async with session_scope() as session:
+        await _two_leg_filled_ticket(session, ticket_id="tkt-1")
+        await repo.insert_paper_settlement(
+            session, outcome_id="k-yes", venue_id="kalshi",
+            resolved_value=Decimal("1"), source="heuristic",
+        )
+    async with session_scope() as session:
+        # Sanity check the fixture actually produced what the test pins on:
+        # one leg (k-yes) settled, the other (p-no) not, so this is a real
+        # open ticket going into the reset -- not already empty.
+        assert await repo.count_open_paper_tickets(session, "default") == 1
+        settlements_before = await repo.list_paper_settlements(session)
+        assert len(settlements_before) == 1
+
+    async with session_scope() as session:
+        await repo.delete_paper_history(session, "default")
+
+    async with session_scope() as session:
+        assert await repo.list_paper_tickets(session, "default") == []
+        assert await repo.count_open_paper_tickets(session, "default") == 0
+        assert await repo.list_paper_settlements(session) == []

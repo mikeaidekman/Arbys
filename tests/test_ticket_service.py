@@ -145,6 +145,36 @@ async def test_router_rejection_writes_per_leg_order_rows(monkeypatch):
     assert reasons["p-yes"] == "ticket_rejected"
 
 
+async def test_string_raise_rejection_does_not_duplicate_leg_rows(monkeypatch):
+    """`_commit_sequentially`'s post-preview failures raise a plain string
+    (`InsufficientLegsError.rejections == ()`), *after* `place_order` already
+    persisted a `paper_order` row for each attempted leg via
+    `emit_order_events` -- unlike the preview/atomic paths, which raise
+    before anything is written. `_write_rejected_legs` must not run for this
+    string-raise case: it would add a second row for a leg that already has
+    one (once `filled`, once `rejected`), corrupting `_score_ticket` and the
+    frontend's per-leg React key.
+    """
+    from arbys.shared.execution_router import InsufficientLegsError
+
+    s, _ = await _arb_group()
+    opp = s.engine.evaluate_now("eg-1")[0]
+
+    async def _refuse(_intent):
+        raise InsufficientLegsError("post-preview rejection on kalshi: rejected")
+
+    monkeypatch.setattr(s.router, "submit", _refuse)
+
+    result = await submit_arb_ticket(s, opp, source="auto")
+    assert result.status == "rejected"
+    async with session_scope() as session:
+        tickets = await repo.list_paper_tickets(session, s.default_account_id)
+    assert tickets[0]["status"] == "rejected"
+    # No leg rows written here -- whatever the router already persisted (or
+    # didn't, in this stubbed case) is the only leg history for this ticket.
+    assert tickets[0]["legs"] == []
+
+
 async def test_ticket_row_exists_as_pending_before_the_router_runs(monkeypatch):
     """paper_order.ticket_id is an FK to paper_ticket.id and the sink writes
     order rows from inside router.submit, so the ticket must already exist.

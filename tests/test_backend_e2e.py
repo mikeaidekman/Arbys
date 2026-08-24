@@ -682,7 +682,9 @@ def test_tickets_endpoint_groups_legs_and_names_the_event():
         assert tickets[0]["status"] == "filled"
         assert tickets[0]["source"] == "manual"
         assert len(tickets[0]["legs"]) == 2
-        assert tickets[0]["title_snapshot"]
+        # Not just truthiness: `_title`'s fallback is `event_group_id`, which
+        # is also truthy, so this must pin the actual registered title.
+        assert tickets[0]["title_snapshot"] == "Group eg-tk"
         assert tickets[0]["legs"][0]["fill_price"] is not None
 
 
@@ -697,7 +699,10 @@ def test_positions_endpoint_returns_readable_titles():
         )
         positions = client.get("/paper/default/positions").json()
         assert len(positions) == 2
-        assert all(p["title"] for p in positions)
+        # Not just truthiness: the fallback is the raw venue-native outcome
+        # id, which is also truthy -- pin the actual registered title so a
+        # regression to the fallback is caught.
+        assert all(p["title"] == "Group eg-pos" for p in positions)
         assert all(p["mark"] is not None for p in positions)
 
 
