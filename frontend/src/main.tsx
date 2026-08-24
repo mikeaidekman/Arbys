@@ -5,6 +5,7 @@ import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import "./index.css";
 import { TerminalPage } from "./pages/TerminalPage";
 import { AdminPage } from "./pages/AdminPage";
+import { AccountPage } from "./pages/AccountPage";
 
 const qc = new QueryClient({
   defaultOptions: {
@@ -19,6 +20,7 @@ createRoot(document.getElementById("root")!).render(
         <Routes>
           <Route path="/" element={<TerminalPage />} />
           <Route path="/admin" element={<AdminPage />} />
+          <Route path="/account" element={<AccountPage />} />
         </Routes>
       </BrowserRouter>
     </QueryClientProvider>
