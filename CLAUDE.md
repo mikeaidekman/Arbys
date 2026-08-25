@@ -310,13 +310,12 @@ Feature flags in `.env` (copy from `.env.example`; `.env` is gitignored):
   fraction of its markets past some ceiling, so the subscription is split
   across sockets; see **Venues** for the measurement. Lower it if a shard's
   `live` count sags, raise it to trade that margin for fewer connections.
-- `ARBYS_POLYMARKET_US_BACKSTOP_S` — seconds of socket silence before a
-  Polymarket US market is re-read from the public `/bbo` gateway, default 120,
-  `0` disables. The market WebSocket abandons a persistent subset of markets
-  and no shard size reaches them; see **The feed abandons markets, and says so
-  only in a field we used to ignore** below. 120s is well above a normal quiet
-  gap and well below the quote book's 600s withholding threshold, so an
-  abandoned market is corrected before it can ever be traded on.
+- `ARBYS_POLYMARKET_US_DARK_AFTER_S` / `..._PRIORITY_DARK_AFTER_S` — socket
+  silence before a subscribed market is treated as **dark**, default 120s and
+  6s respectively, the tighter one applying where the venue says the game is
+  under way. Dark is a *diagnosis*, not a data source: the adapter re-sends a
+  subscribe for that market, and rebuilds the connection if that fails for a
+  live game. See **The feed abandons markets** below.
 - `KALSHI_API_KEY_ID` + `KALSHI_PRIVATE_KEY_PATH` — when both set, the
   authenticated WS adapter is used instead of 5s REST polling. **Keep the .pem
   outside this repo.**
@@ -544,10 +543,11 @@ Two things follow, and both are now in the code:
   replayed snapshot can therefore be stale on arrival — which is the intended
   outcome, because it is exactly the quote that must not be traded on. Ageing
   now describes the data rather than the delivery.
-- **A `/bbo` backstop** (`ARBYS_POLYMARKET_US_BACKSTOP_S`) re-reads any market
-  the socket has not served in 120s. Nothing in a push-only feed can correct a
-  market the feed has abandoned; something has to go and ask. `/bbo` is public,
-  needs no credentials, and reported the correct price in every case checked.
+- **Nothing else may write a price.** The socket is the only quote source.
+  When a market goes dark the adapter escalates *on the socket* — re-subscribe
+  that market, then rebuild the connection if that fails for a live game — and
+  if neither works the quote ages out and is withheld. A withheld leg is safe;
+  a wrong one is not.
 
 **In-play markets get a far tighter deadline, and the venue says which they
 are.** `/v2/leagues/<slug>/events` carries `live` and `ended` per event;
@@ -575,26 +575,35 @@ forever — finished tennis matches were polled at in-play rates and
 re-subscribed every 15s for the life of the process, 13 per shard.
 
 **In-play markets get a far tighter deadline.** A market whose game is under
-way reprices on every point, so 120s is useless for it: measured 2026-08-25,
-three of thirty in-play markets were abandoned by the socket and rode the
-backstop from 39s to 122s stale, one of them 11¢ from the live book. Those
-markets are re-read after `DEFAULT_PRIORITY_BACKSTOP_AFTER_S` (6s) instead.
-`AppState.in_play_slugs` supplies the set and is called every sweep, so a game
-going in-play tightens its own deadline with no restart. Only ~30 markets are
-in-play at once, so this is nearly free — and the health warning counts only
-the *non*-priority share, since polling in-play hard is by design.
+way reprices on every point, so 120s of silence is a fault where the same
+silence on next week's game is normal: measured 2026-08-25, three of thirty
+in-play markets went unserved and drifted from 39s to 122s stale, one of them
+11¢ from the live book. Those count as dark after
+`ARBYS_POLYMARKET_US_PRIORITY_DARK_AFTER_S` (6s), and they are the **only**
+markets whose darkness justifies dropping an otherwise-healthy connection — a
+pre-game book that never answers is usually finished or delisted, and
+reconnecting for it would thrash the socket forever.
 
-**This is not the WS→REST fallback the adapter refuses to make.** That rule
-exists so a revoked credential cannot hide behind a silent downgrade, and it
-still holds: the backstop never replaces a live socket, only markets that
-socket has gone quiet on, and it logs at **warning** level once it is carrying
-more than half the book — the point at which the socket, not the market, is
-what is wrong. Each shard's report also counts `stale-on-arrival` frames, so
-the venue serving replays is visible rather than inferred.
+**A REST read is not an acceptable substitute, and this was tried.** A `/bbo`
+backstop briefly filled these gaps and had to be removed, for two compounding
+reasons:
 
-`/bbo` reports no sizes, so a backstopped quote carries size `None` —
-*unknown*, still fillable — instead of the real depth a ladder frame carries.
-A correct price with unknown depth beats a wrong price with precise depth.
+- **`/bbo` lags the WebSocket.** Measured on an in-play ATP match, the ladder
+  read `0.55/0.56` while `/bbo` still said `0.60/0.61`, converging seconds
+  later. Substituting it hands the engine a price the venue has already moved
+  past — the exact false positive this section exists to prevent.
+- **`/bbo` reports no size, and unknown depth is not harmless.** Its
+  `bidDepth`/`askDepth` count price *levels*, not contracts, so a quote built
+  from it carries `ask_size=None`. `tradeable_qty` treats `None` as **no
+  ceiling** (correctly — that rule is what keeps hand-pushed quotes tradeable),
+  so sizing falls through to the stake budget. Observed live: a ticket sized at
+  **200 contracts** off a backstop leg while two legs built from real ladder
+  depth were capped at **25**.
+
+So a substituted quote is wrong twice over — a price that may be behind, sized
+against a book we cannot see. **Withholding is the correct failure mode**, and
+`/bbo` is for asking *whether* a market is being served, never for what it is
+worth.
 
 **A subscription is acknowledged as a whole, never per market — so verify it
 is actually arriving.** If the venue registers 97 of the 100 names in a

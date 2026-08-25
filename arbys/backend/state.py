@@ -139,27 +139,44 @@ def polymarket_us_ws_shard_size() -> int:
         return DEFAULT_POLYMARKET_US_WS_SHARD_SIZE
 
 
-DEFAULT_POLYMARKET_US_BACKSTOP_S = 120.0
+DEFAULT_POLYMARKET_US_DARK_AFTER_S = 120.0
+DEFAULT_POLYMARKET_US_PRIORITY_DARK_AFTER_S = 6.0
 
 
-def polymarket_us_backstop_s() -> float:
-    """Seconds of socket silence before a market is re-read from ``/bbo``.
+def polymarket_us_dark_after_s() -> float:
+    """Socket silence before a subscribed market is treated as dark.
 
-    The Polymarket US WebSocket abandons a persistent subset of markets: it
-    pushes nothing for them and answers a resubscribe with a snapshot hours
-    out of date, regardless of shard size. A push-only feed cannot correct
-    that on its own, so the adapter re-reads those markets from the public
-    gateway. ``0`` disables the backstop, which restores the old behaviour of
-    serving whatever the socket last said - including a stale replay.
+    Dark is a *diagnosis*, not a data source. The adapter responds by
+    re-subscribing the market, and by rebuilding the connection if that fails
+    for a game already under way - never by fetching the price from somewhere
+    else. A REST read lags the WebSocket ladder and carries no size at all,
+    and a sizeless quote is worse than none: `tradeable_qty` treats unknown
+    depth as *no ceiling*, so one sized a live ticket at 200 contracts where
+    the legs built from real ladder depth were capped at 25.
     """
-    raw = os.environ.get("ARBYS_POLYMARKET_US_BACKSTOP_S")
+    raw = os.environ.get("ARBYS_POLYMARKET_US_DARK_AFTER_S")
     if raw is None:
-        return DEFAULT_POLYMARKET_US_BACKSTOP_S
+        return DEFAULT_POLYMARKET_US_DARK_AFTER_S
     try:
-        value = float(raw)
+        return max(0.0, float(raw))
     except ValueError:
-        return DEFAULT_POLYMARKET_US_BACKSTOP_S
-    return max(0.0, value)
+        return DEFAULT_POLYMARKET_US_DARK_AFTER_S
+
+
+def polymarket_us_priority_dark_after_s() -> float:
+    """The same, for a market whose game is already under way.
+
+    Far tighter, because an in-play book reprices on every point: the silence
+    that is normal for next week's game is a fault here, and a stale in-play
+    leg is exactly what invents an arbitrage against the other venue.
+    """
+    raw = os.environ.get("ARBYS_POLYMARKET_US_PRIORITY_DARK_AFTER_S")
+    if raw is None:
+        return DEFAULT_POLYMARKET_US_PRIORITY_DARK_AFTER_S
+    try:
+        return max(0.0, float(raw))
+    except ValueError:
+        return DEFAULT_POLYMARKET_US_PRIORITY_DARK_AFTER_S
 
 
 DEFAULT_MAX_OUTCOME_QTY = Decimal("500")
@@ -236,7 +253,8 @@ def _default_adapter_factories() -> dict[str, AdapterFactory]:
                 outcome_ids=oids,
                 creds=creds,
                 shard_size=polymarket_us_ws_shard_size(),
-                backstop_after_s=polymarket_us_backstop_s(),
+                dark_after_s=polymarket_us_dark_after_s(),
+                priority_dark_after_s=polymarket_us_priority_dark_after_s(),
             )
         # The REST path is the only one that works without KYC, so it stays.
         log.info("using Polymarket US REST poll adapter (no credentials set)")

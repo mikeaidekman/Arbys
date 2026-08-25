@@ -50,19 +50,11 @@ from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from typing import Any
 
-import httpx
 import websockets
 
 from ..shared.types import Outcome, Quote, Side
 from .base import MarketDataAdapter
-from .polymarket_us import (
-    GATEWAY_BASE,
-    LONG,
-    SHORT,
-    quotes_from_bbo,
-    quotes_from_levels,
-    split_outcome_id,
-)
+from .polymarket_us import LONG, SHORT, quotes_from_levels, split_outcome_id
 from .polymarket_us_auth import PolymarketUsCredentials, auth_headers
 
 DEFAULT_WS_URL = "wss://api.polymarket.us/v1/ws/markets"
@@ -84,34 +76,15 @@ DEFAULT_SHARD_SIZE = 100
 # this reports every interval whether or not anything did.
 FEED_REPORT_INTERVAL_S = 30.0
 
-# A market the socket has not delivered in this long is re-read from the public
-# ``/bbo`` gateway. 120s sits well above a normal quiet gap on an active market
-# and well below the quote book's 600s withholding threshold, so a market the
-# feed has genuinely abandoned is corrected before it can ever be traded on.
-DEFAULT_BACKSTOP_AFTER_S = 120.0
+# A subscribed market that has not been delivered in this long is treated as
+# dark. This is a *diagnosis*, not a data source: the response is to get the
+# socket delivering it again, never to substitute a price from somewhere else.
+DEFAULT_DARK_AFTER_S = 120.0
 
-# How often the backstop looks for markets to re-read. Short, because it only
-# *fetches* the markets that are actually behind - a sweep that finds nothing
-# stale costs one dict scan.
-BACKSTOP_SWEEP_S = 3.0
-
-# A market whose game is already under way gets a far tighter deadline. An
-# in-play tennis book reprices on every point, so the 120s that is perfectly
-# safe for an NFL line two weeks out is useless here: measured 2026-08-25,
-# three of thirty in-play markets were abandoned by the socket and rode the
-# backstop from 39s to 122s stale, one of them 11c away from the live book.
-# Only ~30 markets are in-play at once, so polling them hard is nearly free.
-DEFAULT_PRIORITY_BACKSTOP_AFTER_S = 6.0
-
-# Concurrent /bbo reads. Measured 2026-08-11: 53 concurrent calls returned in
-# 1.46s with no rate limiting.
-BACKSTOP_CONCURRENCY = 24
-
-# If the backstop is carrying more than this share of the book, the WebSocket
-# is not doing its job and saying so is the whole point - a REST path quietly
-# covering for a dead socket is the silent downgrade this adapter refuses to
-# make.
-BACKSTOP_LOUD_FRACTION = 0.5
+# A market whose game is under way earns a far tighter deadline - an in-play
+# book reprices on every point, so 120s of silence there is a fault where the
+# same silence on next week's game is normal.
+DEFAULT_PRIORITY_DARK_AFTER_S = 6.0
 
 # Re-subscribing markets the socket is not delivering. Subscribing is additive
 # and needs no unsubscribe, so a repair costs one small message on the existing
@@ -120,21 +93,17 @@ BACKSTOP_LOUD_FRACTION = 0.5
 # Why this is needed at all: the venue acknowledges a subscription as a whole,
 # never per market. If it registers 97 of the 100 names we send, nothing says
 # so, and those three stay dark for the life of the connection because we
-# subscribe exactly once at connect and never check. Measured 2026-08-25, a
-# market delivering 165 frames/30s when subscribed alone - and 149 inside a
-# fresh 100-slug shard - was getting nothing on the running backend's socket,
-# and the dark set stayed the *same three markets* across a 90s sample. A
-# throughput-shedding venue would have churned; a subscription that silently
-# failed to register would not.
+# subscribe exactly once at connect and never check.
 REPAIR_SWEEP_S = 15.0
 
-# Socket silence that makes a market a repair candidate.
-REPAIR_AFTER_S = 20.0
-
-# Per market, per connection. Bounds the cost when a market is genuinely
-# finished rather than dropped - a settled book never streams again no matter
-# how often it is asked for.
+# Per market, per connection, before giving up on repairing in place and
+# rebuilding the connection instead.
 MAX_REPAIR_ATTEMPTS = 5
+
+# A shard reconnects for dark markets at most this often. Reconnecting costs a
+# burst of replayed snapshots, so it is the escalation of last resort and must
+# not become a loop when a market is simply finished.
+RECONNECT_COOLDOWN_S = 120.0
 
 # Bounded so a stalled consumer applies backpressure to the sockets rather than
 # growing without limit. Generous enough that a normal burst never reaches it:
@@ -142,6 +111,16 @@ MAX_REPAIR_ATTEMPTS = 5
 QUEUE_MAXSIZE = 20_000
 
 log = logging.getLogger(__name__)
+
+
+class DarkMarkets(Exception):
+    """Raised to drop a shard whose in-play markets will not come back.
+
+    Not an error condition on the wire - the socket is healthy and busy. It is
+    the deliberate escalation when re-subscribing in place has failed for a
+    market whose game is under way: rebuild the connection and get a fresh
+    subscription rather than leave a live book unquoted.
+    """
 
 # The venue stamps nanoseconds; datetime handles at most microseconds.
 _FRACTION = re.compile(r"\.(\d{1,9})")
@@ -206,12 +185,10 @@ class PolymarketUsWebSocketAdapter(MarketDataAdapter):
         initial_backoff_s: float = 1.0,
         max_backoff_s: float = 30.0,
         shard_size: int = DEFAULT_SHARD_SIZE,
-        backstop_after_s: float = DEFAULT_BACKSTOP_AFTER_S,
-        backstop_sweep_s: float = BACKSTOP_SWEEP_S,
-        priority_after_s: float = DEFAULT_PRIORITY_BACKSTOP_AFTER_S,
+        dark_after_s: float = DEFAULT_DARK_AFTER_S,
+        priority_dark_after_s: float = DEFAULT_PRIORITY_DARK_AFTER_S,
+        repair_sweep_s: float = REPAIR_SWEEP_S,
         priority_slugs: Callable[[], set[str]] | None = None,
-        gateway_base: str = GATEWAY_BASE,
-        http_client: httpx.AsyncClient | None = None,
     ) -> None:
         self._outcome_ids = outcome_ids or []
         self._creds = creds
@@ -219,34 +196,29 @@ class PolymarketUsWebSocketAdapter(MarketDataAdapter):
         self._initial_backoff_s = initial_backoff_s
         self._max_backoff_s = max_backoff_s
         self._shard_size = max(1, shard_size)
-        self._backstop_after_s = backstop_after_s
-        self._backstop_sweep_s = backstop_sweep_s
-        self._priority_after_s = priority_after_s
-        # Supplied by AppState, which knows each group's start time. Called
-        # every sweep so a game going in-play tightens its own deadline with
-        # no restart.
+        self._dark_after_s = dark_after_s
+        self._priority_dark_after_s = priority_dark_after_s
+        self._repair_sweep_s = repair_sweep_s
+        # Supplied by AppState, which knows each group's start time and the
+        # venue's live/ended flags. Re-read every sweep, so a game going
+        # in-play tightens its own deadline with no restart.
         self._priority_slugs = priority_slugs
-        self._gateway_base = gateway_base
-        self._http = http_client
         self._slugs = sorted({split_outcome_id(o)[0] for o in self._outcome_ids})
         self._slug_set = set(self._slugs)
         self._shard_tasks: list[asyncio.Task[None]] = []
-        self._backstop_task: asyncio.Task[None] | None = None
-        # Monotonic time each slug last produced a quote, by either path. The
-        # backstop reads this to find markets the socket has abandoned.
-        self._last_quote_at: dict[str, float] = {}
-        # Socket deliveries only. The repair pass must key off this, not
-        # `_last_quote_at`: a market the backstop is successfully covering
-        # still needs its subscription repaired, and reading the combined
-        # figure would mark it healthy and never fix the real problem.
+        # Monotonic time each slug last arrived on the socket. This is the
+        # only delivery clock there is, deliberately: nothing else may write
+        # a price, so nothing else may make a market look healthy.
         self._last_ws_at: dict[str, float] = {}
+        # Per shard, when it last reconnected because of dark markets.
+        self._last_reconnect_at: dict[int, float] = {}
 
     def set_priority_slugs(self, fn: Callable[[], set[str]] | None) -> None:
-        """Tell the backstop which markets need the tighter deadline.
+        """Tell the adapter which markets need the tighter deadline.
 
         Called by ``AppState`` at wiring time; the callable is re-invoked every
-        sweep, so a game that goes in-play starts being polled harder without
-        anything being rebuilt.
+        sweep, so a game that goes in-play starts being watched more closely
+        without anything being rebuilt.
         """
         self._priority_slugs = fn
 
@@ -271,9 +243,6 @@ class PolymarketUsWebSocketAdapter(MarketDataAdapter):
 
     async def _cancel_shards(self) -> None:
         tasks, self._shard_tasks = self._shard_tasks, []
-        if self._backstop_task is not None:
-            tasks.append(self._backstop_task)
-            self._backstop_task = None
         for task in tasks:
             task.cancel()
         for task in tasks:
@@ -312,17 +281,13 @@ class PolymarketUsWebSocketAdapter(MarketDataAdapter):
         )
         await self._cancel_shards()  # never run two generations at once
         started = time.monotonic()
-        self._last_quote_at = dict.fromkeys(self._slugs, started)
+        self._last_ws_at = dict.fromkeys(self._slugs, started)
         self._shard_tasks = [
             asyncio.create_task(
                 self._run_shard(i, shard, queue), name=f"polymarket_us-ws-{i}"
             )
             for i, shard in enumerate(shards)
         ]
-        if self._backstop_after_s > 0:
-            self._backstop_task = asyncio.create_task(
-                self._run_backstop(queue), name="polymarket_us-ws-backstop"
-            )
         try:
             while True:
                 yield await queue.get()
@@ -394,14 +359,30 @@ class PolymarketUsWebSocketAdapter(MarketDataAdapter):
             connected_at = time.monotonic()
             stats.reset(connected_at)
             # Seed from the subscribe, so a market that never answers becomes a
-            # repair candidate REPAIR_AFTER_S later rather than looking fresh
+            # repair candidate once its deadline passes rather than looking fresh
             # forever on an absent entry.
             for slug in slugs:
                 self._last_ws_at[slug] = connected_at
             delivered: set[str] = set()
             attempts: dict[str, int] = {}
-            next_repair = connected_at + REPAIR_SWEEP_S
-            async for raw in ws:
+            next_repair = connected_at + self._repair_sweep_s
+            while True:
+                # A timeout rather than `async for`, so the repair sweep below
+                # runs on a clock instead of only when traffic arrives. Frame-
+                # driven, a shard whose markets had *all* gone dark could never
+                # repair itself - the one case that most needs repairing.
+                try:
+                    raw = await asyncio.wait_for(
+                        ws.recv(), timeout=self._repair_sweep_s
+                    )
+                except TimeoutError:
+                    now = time.monotonic()
+                    if now >= next_repair:
+                        next_repair = now + self._repair_sweep_s
+                        await self._repair_subscriptions(
+                            ws, index, slugs, delivered, attempts
+                        )
+                    continue
                 try:
                     msg = json.loads(raw)
                 except (json.JSONDecodeError, TypeError):
@@ -409,12 +390,14 @@ class PolymarketUsWebSocketAdapter(MarketDataAdapter):
                 stats.frames += 1
                 for quote in self._quotes_from_message(msg, stats):
                     stats.quotes += 1
-                    delivered.add(split_outcome_id(quote.outcome_id)[0])
+                    slug = split_outcome_id(quote.outcome_id)[0]
+                    delivered.add(slug)
+                    attempts.pop(slug, None)  # it answered; restore its budget
                     await queue.put(quote)
                 self._maybe_report(index, len(slugs), stats)
                 now = time.monotonic()
                 if now >= next_repair:
-                    next_repair = now + REPAIR_SWEEP_S
+                    next_repair = now + self._repair_sweep_s
                     await self._repair_subscriptions(
                         ws, index, slugs, delivered, attempts
                     )
@@ -432,21 +415,32 @@ class PolymarketUsWebSocketAdapter(MarketDataAdapter):
         Two kinds of market qualify, and the distinction keeps this from
         spamming a healthy feed:
 
-        * **Never delivered on this connection.** The subscription almost
-          certainly did not register - a market that exists and is subscribed
-          answers immediately, if only with a snapshot.
-        * **In-play and gone quiet.** A book being played reprices constantly,
-          so 20s of silence is abnormal in a way it simply is not for a game
-          next week.
+        A market qualifies once it has sent *nothing at all* for longer than
+        its deadline - 6s for a game under way, 120s otherwise. Note the
+        deadline is on **delivery**, not on how current the book is: a market
+        that is quiet because nothing has traded is subscribed correctly and
+        keeps answering, so it never becomes a candidate. Whether its prices
+        are still worth anything is a separate question, settled by
+        `source_age_s` back-dating and the quote book's age check.
 
-        A merely quiet pre-game market is deliberately *not* a candidate: it
-        answered at connect, it is behaving normally, and the `/bbo` backstop
-        already covers it. Re-subscribing all of those every sweep would be
-        hundreds of pointless messages a minute.
+        `MAX_REPAIR_ATTEMPTS` bounds the cost per connection, and the counter
+        resets the moment a market delivers, so a market that answers a repair
+        gets its full budget back and only a permanently silent one is
+        abandoned.
 
         Safe to do at any time because the quote book refuses to go backwards:
         the snapshot a fresh subscribe replays can be hours old, and on a
         market that is streaming it would otherwise clobber live prices.
+
+        **Raises ``DarkMarkets`` when repairing in place has failed** for a
+        market whose game is under way, which drops the connection so the
+        shard rebuilds it from scratch. That escalation is the whole design:
+        the answer to a socket that is not delivering is to get the socket
+        delivering, never to fill the gap from a slower endpoint. A REST read
+        would be both behind the ladder and sizeless, and a sizeless quote is
+        worse than no quote - `tradeable_qty` treats unknown depth as *no
+        ceiling*, so it sized a real ticket at 200 contracts where the two
+        built from ladder depth were capped at 25.
         """
         now = time.monotonic()
         priority: set[str] = set()
@@ -458,13 +452,14 @@ class PolymarketUsWebSocketAdapter(MarketDataAdapter):
         for slug in slugs:
             if attempts.get(slug, 0) >= MAX_REPAIR_ATTEMPTS:
                 continue
-            if now - self._last_ws_at.get(slug, now) <= REPAIR_AFTER_S:
+            threshold = (
+                self._priority_dark_after_s if slug in priority else self._dark_after_s
+            )
+            if now - self._last_ws_at.get(slug, now) <= threshold:
                 continue
+            dark.append(slug)
             if slug not in delivered:
-                dark.append(slug)
                 never += 1
-            elif slug in priority:
-                dark.append(slug)
         if not dark:
             return
         for i in range(0, len(dark), MAX_SLUGS_PER_SUBSCRIPTION):
@@ -482,6 +477,7 @@ class PolymarketUsWebSocketAdapter(MarketDataAdapter):
             )
         for slug in dark:
             attempts[slug] = attempts.get(slug, 0) + 1
+        self._maybe_escalate(index, slugs, priority, attempts, now)
         log.info(
             "polymarket_us WS shard %d: re-subscribing %d market(s) "
             "(%d never delivered on this connection, %d in-play gone quiet)",
@@ -490,113 +486,6 @@ class PolymarketUsWebSocketAdapter(MarketDataAdapter):
             never,
             len(dark) - never,
         )
-
-    async def _run_backstop(self, queue: asyncio.Queue[Quote]) -> None:
-        """Re-read markets the socket has stopped serving, from public ``/bbo``.
-
-        The WebSocket is push-only, so a quote is replaced only when the venue
-        sends a frame or we resubscribe. For a persistent subset of markets it
-        does neither: measured 2026-08-25, the venue answered a subscribe with
-        a snapshot over an hour stale for 199 of 571 markets, and 58% of those
-        disagreed with the live book by 2c or more - one by 97c. Resubscribing
-        those same markets 20 to a socket returned 44 of 74 *still* over an
-        hour stale, so this is not the per-connection ceiling that sharding
-        addresses and no shard size fixes it. Nothing in a push-only feed can
-        correct a market the feed has abandoned; something has to go and ask.
-
-        This is deliberately **not** the WS-to-REST fallback this adapter
-        refuses to make. It never replaces a live socket, only markets that
-        socket has gone quiet on, and it is loud when it is carrying enough of
-        the book that the socket is the thing at fault.
-
-        ``/bbo`` reports no sizes, so refreshed quotes carry size ``None`` -
-        unknown, still fillable - rather than the real depth a ladder frame
-        carries. A correct price with unknown depth beats a wrong price with
-        precise depth.
-        """
-        # Sleep *before* building the client. httpx loads the CA trust store
-        # synchronously on construction, which stalls the event loop for long
-        # enough to delay the shards' own connects - the sockets that actually
-        # matter must get out first.
-        await asyncio.sleep(self._backstop_sweep_s)
-        client = self._http
-        owns = client is None
-        if client is None:
-            client = httpx.AsyncClient(timeout=20.0)
-        try:
-            while True:
-                try:
-                    await self._backstop_sweep(client, queue)
-                except asyncio.CancelledError:
-                    raise
-                except Exception as exc:  # a failed sweep must not end the task
-                    log.warning("polymarket_us backstop sweep failed: %s", exc)
-                await asyncio.sleep(self._backstop_sweep_s)
-        finally:
-            if owns:
-                await client.aclose()
-
-    async def _backstop_sweep(
-        self, client: httpx.AsyncClient, queue: asyncio.Queue[Quote]
-    ) -> None:
-        now = time.monotonic()
-        priority: set[str] = set()
-        if self._priority_slugs is not None:
-            with contextlib.suppress(Exception):
-                priority = self._priority_slugs()
-        stale = [
-            slug
-            for slug in self._slugs
-            if now - self._last_quote_at.get(slug, now)
-            > (self._priority_after_s if slug in priority else self._backstop_after_s)
-        ]
-        if not stale:
-            return
-        n_priority = sum(1 for s in stale if s in priority)
-        # Only the non-priority share speaks to the socket's health. In-play
-        # markets are polled hard by design, so counting them here would make
-        # a healthy feed look like a failing one.
-        routine = len(stale) - n_priority
-        share = routine / len(self._slugs)
-        report = log.warning if share >= BACKSTOP_LOUD_FRACTION else log.info
-        report(
-            "polymarket_us backstop: re-reading %d market(s) the socket has not "
-            "served (%d in-play past %.0fs, %d other past %.0fs; %.0f%% of the book)",
-            len(stale),
-            n_priority,
-            self._priority_after_s,
-            routine,
-            self._backstop_after_s,
-            share * 100,
-        )
-        sem = asyncio.Semaphore(BACKSTOP_CONCURRENCY)
-
-        async def refresh(slug: str) -> list[Quote]:
-            async with sem:
-                try:
-                    resp = await client.get(
-                        f"{self._gateway_base}/v1/markets/{slug}/bbo"
-                    )
-                    resp.raise_for_status()
-                    body = resp.json()
-                except (httpx.HTTPError, ValueError):
-                    return []
-            market_data = body.get("marketData")
-            if not isinstance(market_data, dict):
-                return []
-            return quotes_from_bbo(slug, market_data)
-
-        results = await asyncio.gather(*(refresh(s) for s in stale))
-        stamped = time.monotonic()
-        recovered = 0
-        for slug, quotes in zip(stale, results, strict=True):
-            if not quotes:
-                continue
-            recovered += 1
-            self._last_quote_at[slug] = stamped
-            for quote in quotes:
-                await queue.put(quote)
-        log.debug("polymarket_us backstop: refreshed %d market(s)", recovered)
 
     def _quotes_from_message(self, msg: Any, stats: _ShardStats) -> list[Quote]:
         if not isinstance(msg, dict):
@@ -623,17 +512,55 @@ class PolymarketUsWebSocketAdapter(MarketDataAdapter):
         # whose transactTime can be hours behind; stamped on arrival it would
         # enter the book as a fresh quote and no age check could withhold it.
         age = frame_age_s(data.get("transactTime"))
-        if age is not None and self._backstop_after_s > 0 and age > self._backstop_after_s:
-            # A replay, not a refresh. Deliberately does NOT count as the
-            # socket having served this market: if it did, a market the venue
-            # keeps answering with the same hours-old snapshot would hold the
-            # backstop off forever while never once being tradeable.
+        if age is not None and age > self._priority_dark_after_s:
             stats.replayed += 1
-        else:
-            now = time.monotonic()
-            self._last_quote_at[str(slug)] = now
-            self._last_ws_at[str(slug)] = now
+        # Any frame counts as the subscription working, however old the book it
+        # describes. These are two different questions and conflating them
+        # breaks both: a market that is quiet because nothing has traded is
+        # *subscribed correctly* and must not be re-subscribed forever, while a
+        # book that is genuinely out of date is handled where it belongs - by
+        # `source_age_s` back-dating it, so the quote book withholds it. Old
+        # and withheld is the safe answer; re-subscribing cannot make a market
+        # trade.
+        self._last_ws_at[str(slug)] = time.monotonic()
         return quotes_from_levels(str(slug), bids, offers, age)
+
+    def _maybe_escalate(
+        self,
+        index: int,
+        slugs: list[str],
+        priority: set[str],
+        attempts: dict[str, int],
+        now: float,
+    ) -> None:
+        """Drop the connection when in-play markets stay dark despite repairs.
+
+        Only in-play markets justify this. A pre-game book that never answers
+        is usually finished or delisted, and reconnecting for it would thrash
+        the socket forever; the age check withholds it, which is the correct
+        and safe outcome. A live book is different - it is exactly the leg
+        that invents an arbitrage against the other venue when it goes stale.
+
+        Cooldown-limited because a reconnect makes the venue replay cached
+        snapshots for the whole shard, so it must stay the last resort.
+        """
+        stuck = [
+            slug
+            for slug in slugs
+            if slug in priority
+            and attempts.get(slug, 0) >= MAX_REPAIR_ATTEMPTS
+            and now - self._last_ws_at.get(slug, now) > self._priority_dark_after_s
+        ]
+        if not stuck:
+            return
+        last = self._last_reconnect_at.get(index)
+        if last is not None and now - last < RECONNECT_COOLDOWN_S:
+            return
+        self._last_reconnect_at[index] = now
+        raise DarkMarkets(
+            f"{len(stuck)} in-play market(s) still dark after "
+            f"{MAX_REPAIR_ATTEMPTS} repairs: {stuck[:3]}"
+        )
 
     def _maybe_report(self, index: int, subscribed: int, stats: _ShardStats) -> None:
         """Log one shard's feed health once per interval.

@@ -5,7 +5,6 @@ import json
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 
-import httpx
 import pytest
 import websockets
 from cryptography.hazmat.primitives.asymmetric import ed25519
@@ -17,7 +16,6 @@ from arbys.adapters.polymarket_us_ws import (
     frame_age_s,
 )
 from arbys.shared.quotebook import QuoteBook
-from arbys.shared.types import Quote
 
 
 def _creds() -> tuple[PolymarketUsCredentials, ed25519.Ed25519PublicKey]:
@@ -395,7 +393,7 @@ async def test_a_replayed_snapshot_arrives_already_stale():
             outcome_ids=["slug1:LONG"],
             creds=creds,
             url=f"ws://127.0.0.1:{port}",
-            backstop_after_s=0,  # isolate the WS path
+            repair_sweep_s=60.0,  # keep the repair pass out of this one
         )
         got = []
 
@@ -420,212 +418,6 @@ async def test_a_replayed_snapshot_arrives_already_stale():
     assert book.get("slug1:LONG") is None, "a 6h-old book entered as tradeable"
     aged = book.get_with_age("slug1:LONG")
     assert aged is not None and aged[1] > 21_000  # still reportable, so the UI explains
-
-
-@pytest.mark.asyncio
-async def test_the_backstop_rereads_markets_the_socket_abandons():
-    """A market the socket never serves is corrected from the public gateway.
-
-    The feed is push-only, so nothing else can replace that quote. Measured
-    2026-08-25 the venue simply stops sending for a persistent subset and
-    answers a resubscribe with an hours-old snapshot regardless of shard size,
-    so no amount of resharding reaches these markets.
-    """
-
-    async def handler(ws):
-        await ws.recv()
-        await asyncio.sleep(30)  # connected, healthy, and silent - the failure
-
-    asked: list[str] = []
-
-    def gateway(request: httpx.Request) -> httpx.Response:
-        slug = str(request.url).rsplit("/", 2)[-2]
-        asked.append(slug)
-        return httpx.Response(
-            200,
-            json={
-                "marketData": {
-                    "marketSlug": slug,
-                    "bestBid": {"value": "0.1900"},
-                    "bestAsk": {"value": "0.2300"},
-                }
-            },
-        )
-
-    creds, _ = _creds()
-    async with websockets.serve(handler, "127.0.0.1", 0) as server:
-        port = server.sockets[0].getsockname()[1]
-        adapter = PolymarketUsWebSocketAdapter(
-            outcome_ids=["quiet:LONG"],
-            creds=creds,
-            url=f"ws://127.0.0.1:{port}",
-            backstop_after_s=0.05,
-            backstop_sweep_s=0.05,
-            http_client=httpx.AsyncClient(
-                transport=httpx.MockTransport(gateway), timeout=5.0
-            ),
-        )
-        got: dict[str, Quote] = {}
-
-        async def collect():
-            async for q in adapter.stream_quotes():
-                got[q.outcome_id] = q
-                if len(got) >= 2:
-                    return
-
-        # close() in a finally: a hung adapter must fail this test, not hang
-        # it - websockets.serve waits on any socket the adapter leaks.
-        try:
-            await asyncio.wait_for(collect(), timeout=5)
-        finally:
-            await adapter.close()
-
-    assert asked and asked[0] == "quiet"
-    assert got["quiet:LONG"].bid == Decimal("0.1900")
-    assert got["quiet:LONG"].ask == Decimal("0.2300")
-    # /bbo cannot report depth, and unknown must stay unknown rather than
-    # borrowing the ladder's numbers.
-    assert got["quiet:LONG"].ask_size is None
-    # The short side stays derived from the long one.
-    assert got["quiet:SHORT"].bid == Decimal("0.7700")
-
-
-@pytest.mark.asyncio
-async def test_the_backstop_leaves_a_live_market_alone():
-    """It corrects abandoned markets, never competes with a working socket."""
-
-    async def handler(ws):
-        await ws.recv()
-        while True:
-            await ws.send(
-                json.dumps(
-                    {
-                        "marketData": {
-                            "marketSlug": "busy",
-                            "transactTime": datetime.now(UTC).strftime(
-                                "%Y-%m-%dT%H:%M:%S.000000Z"
-                            ),
-                            "bids": [{"px": {"value": "0.4000"}, "qty": "5"}],
-                            "offers": [{"px": {"value": "0.4200"}, "qty": "7"}],
-                        }
-                    }
-                )
-            )
-            await asyncio.sleep(0.02)
-
-    asked: list[str] = []
-
-    def gateway(request: httpx.Request) -> httpx.Response:
-        asked.append(str(request.url))
-        return httpx.Response(200, json={})
-
-    creds, _ = _creds()
-    async with websockets.serve(handler, "127.0.0.1", 0) as server:
-        port = server.sockets[0].getsockname()[1]
-        adapter = PolymarketUsWebSocketAdapter(
-            outcome_ids=["busy:LONG"],
-            creds=creds,
-            url=f"ws://127.0.0.1:{port}",
-            backstop_after_s=0.5,
-            backstop_sweep_s=0.05,
-            http_client=httpx.AsyncClient(
-                transport=httpx.MockTransport(gateway), timeout=5.0
-            ),
-        )
-        seen = 0
-
-        async def collect():
-            nonlocal seen
-            async for _q in adapter.stream_quotes():
-                seen += 1
-                if seen >= 20:
-                    return
-
-        # close() in a finally: a hung adapter must fail this test, not hang
-        # it - websockets.serve waits on any socket the adapter leaks.
-        try:
-            await asyncio.wait_for(collect(), timeout=5)
-        finally:
-            await adapter.close()
-
-    assert seen >= 20
-    assert asked == [], f"backstop fetched a market the socket was serving: {asked}"
-
-
-@pytest.mark.asyncio
-async def test_repeated_stale_replays_do_not_hold_the_backstop_off():
-    """A market answered only with the same old snapshot is still abandoned.
-
-    The socket looks busy for it - frames keep arriving - but every one is a
-    replay of a book the venue left hours ago, so the market is never once
-    tradeable. If arriving frames counted as service, the backstop would be
-    starved for exactly the markets that need it most.
-    """
-    stale_stamp = (datetime.now(UTC) - timedelta(hours=6)).strftime(
-        "%Y-%m-%dT%H:%M:%S.000000000Z"
-    )
-
-    async def handler(ws):
-        await ws.recv()
-        while True:
-            await ws.send(
-                json.dumps(
-                    {
-                        "marketData": {
-                            "marketSlug": "replayed",
-                            "transactTime": stale_stamp,
-                            "bids": [{"px": {"value": "0.9900"}, "qty": "40"}],
-                            "offers": [{"px": {"value": "0.9900"}, "qty": "40"}],
-                        }
-                    }
-                )
-            )
-            await asyncio.sleep(0.02)
-
-    asked: list[str] = []
-
-    def gateway(request: httpx.Request) -> httpx.Response:
-        asked.append(str(request.url).rsplit("/", 2)[-2])
-        return httpx.Response(
-            200,
-            json={
-                "marketData": {
-                    "marketSlug": "replayed",
-                    "bestBid": {"value": "0.0100"},
-                    "bestAsk": {"value": "0.0200"},
-                }
-            },
-        )
-
-    creds, _ = _creds()
-    async with websockets.serve(handler, "127.0.0.1", 0) as server:
-        port = server.sockets[0].getsockname()[1]
-        adapter = PolymarketUsWebSocketAdapter(
-            outcome_ids=["replayed:LONG"],
-            creds=creds,
-            url=f"ws://127.0.0.1:{port}",
-            backstop_after_s=0.05,
-            backstop_sweep_s=0.05,
-            http_client=httpx.AsyncClient(
-                transport=httpx.MockTransport(gateway), timeout=5.0
-            ),
-        )
-        corrected: list[Quote] = []
-
-        async def collect():
-            async for q in adapter.stream_quotes():
-                # The corrected quote is the one with no venue-reported age.
-                if q.outcome_id == "replayed:LONG" and q.source_age_s is None:
-                    corrected.append(q)
-                    return
-
-        try:
-            await asyncio.wait_for(collect(), timeout=5)
-        finally:
-            await adapter.close()
-
-    assert asked, "the backstop never fired for a market fed only stale replays"
-    assert corrected[0].ask == Decimal("0.0200")
 
 
 # --- subscription repair ---------------------------------------------------
@@ -666,13 +458,10 @@ async def test_a_market_the_socket_never_delivers_is_resubscribed():
             outcome_ids=["chatty:LONG", "dark:LONG"],
             creds=creds,
             url=f"ws://127.0.0.1:{port}",
-            backstop_after_s=0,  # isolate the socket path
+            repair_sweep_s=0.05,
+            dark_after_s=0.05,
+            priority_dark_after_s=0.05,
         )
-        # Repair on a test-sized clock.
-        import arbys.adapters.polymarket_us_ws as mod
-
-        old_sweep, old_after = mod.REPAIR_SWEEP_S, mod.REPAIR_AFTER_S
-        mod.REPAIR_SWEEP_S, mod.REPAIR_AFTER_S = 0.05, 0.05
         try:
             async def drain():
                 async for _q in adapter.stream_quotes():
@@ -683,7 +472,6 @@ async def test_a_market_the_socket_never_delivers_is_resubscribed():
                 lambda: any("dark" in b for b in _subs(got)[1:]), timeout_s=4.0
             )
         finally:
-            mod.REPAIR_SWEEP_S, mod.REPAIR_AFTER_S = old_sweep, old_after
             task.cancel()
             with contextlib.suppress(asyncio.CancelledError):
                 await task
@@ -698,30 +486,40 @@ async def test_a_market_the_socket_never_delivers_is_resubscribed():
 
 
 @pytest.mark.asyncio
-async def test_a_quiet_pregame_market_is_not_resubscribed():
-    """It answered at connect and is simply quiet - that is normal.
+async def test_a_quiet_market_is_refreshed_by_resubscribing():
+    """A market that stops sending is re-asked on the socket, not elsewhere.
 
-    Re-subscribing every quiet pre-game market would be hundreds of pointless
-    messages a minute, and each one makes the venue replay a snapshot.
+    The venue pushes only on change, so a market nobody is trading sends
+    nothing for hours and its price quietly ages. Re-subscribing makes the
+    venue replay that book, which is how a push-only feed refreshes a quiet
+    market **without** reaching for a REST endpoint that lags the ladder and
+    reports no size.
+
+    Whether the replayed book is still worth anything is a separate question,
+    settled by `source_age_s` back-dating and the quote book's age check - old
+    and withheld beats old and presented as current.
     """
     got: list[dict] = []
 
     async def handler(ws):
         got.append(json.loads(await ws.recv()))
-        # Both answer once, then go quiet, like a normal pre-game book.
+        # Answers once, then goes quiet - a normal untraded pre-game book.
         for slug in ("a", "b"):
             await ws.send(
-                _frame(slug, [{"px": {"value": "0.4000"}, "qty": "5"}],
-                       [{"px": {"value": "0.4200"}, "qty": "7"}])
+                _frame(
+                    slug,
+                    [{"px": {"value": "0.4000"}, "qty": "5"}],
+                    [{"px": {"value": "0.4200"}, "qty": "7"}],
+                )
             )
         while True:
             try:
                 raw = await asyncio.wait_for(ws.recv(), timeout=0.05)
-                got.append(json.loads(raw))
             except TimeoutError:
                 continue
             except Exception:
                 return
+            got.append(json.loads(raw))
 
     creds, _ = _creds()
     async with websockets.serve(handler, "127.0.0.1", 0) as server:
@@ -730,31 +528,160 @@ async def test_a_quiet_pregame_market_is_not_resubscribed():
             outcome_ids=["a:LONG", "b:LONG"],
             creds=creds,
             url=f"ws://127.0.0.1:{port}",
-            backstop_after_s=0,
-            priority_slugs=set,  # nothing is in-play
+            repair_sweep_s=0.05,
+            dark_after_s=0.05,
+            priority_slugs=set,  # nothing is in-play; the 120s tier applies
         )
-        import arbys.adapters.polymarket_us_ws as mod
 
-        old_sweep, old_after = mod.REPAIR_SWEEP_S, mod.REPAIR_AFTER_S
-        mod.REPAIR_SWEEP_S, mod.REPAIR_AFTER_S = 0.05, 0.05
+        async def drain():
+            async for _q in adapter.stream_quotes():
+                pass
+
+        task = asyncio.create_task(drain())
         try:
-            seen = 0
-
-            async def drain():
-                nonlocal seen
-                async for _q in adapter.stream_quotes():
-                    seen += 1
-
-            task = asyncio.create_task(drain())
-            await _wait_for(lambda: seen >= 4, timeout_s=3.0)
-            await asyncio.sleep(0.5)  # several repair sweeps would have fired
+            await _wait_for(lambda: len(_subs(got)) >= 2, timeout_s=4.0)
         finally:
-            mod.REPAIR_SWEEP_S, mod.REPAIR_AFTER_S = old_sweep, old_after
             task.cancel()
             with contextlib.suppress(asyncio.CancelledError):
                 await task
             await adapter.close()
 
-    assert _subs(got)[1:] == [], (
-        f"quiet pre-game markets were re-subscribed: {_subs(got)[1:]}"
+    resubs = _subs(got)[1:]
+    assert resubs, "a market that went quiet was never re-asked for"
+    asked = {slug for batch in resubs for slug in batch}
+    assert asked <= {"a", "b"}, f"re-subscribed something we do not hold: {asked}"
+
+
+# --- escalation: repair in place, then rebuild the connection --------------
+#
+# The answer to a socket that is not delivering an in-play market is to get the
+# socket delivering it, never to fill the gap from a slower endpoint. A REST
+# read lags the ladder *and* carries no size, and a sizeless quote is worse
+# than no quote: tradeable_qty treats unknown depth as no ceiling, so one sized
+# a real ticket at 200 contracts where the legs built from ladder depth were
+# capped at 25.
+
+
+@pytest.mark.asyncio
+async def test_an_in_play_market_that_stays_dark_forces_a_reconnect():
+    """Repairs first; when those fail, the connection is rebuilt."""
+    connections: list[int] = []
+
+    async def handler(ws):
+        connections.append(id(ws))
+        while True:
+            try:
+                await asyncio.wait_for(ws.recv(), timeout=0.01)
+            except TimeoutError:
+                pass
+            except Exception:
+                return
+            # "chatty" streams; "dark" never does, however often it is asked
+            # for - the silent registration failure this exists to escape.
+            try:
+                await ws.send(
+                    _frame(
+                        "chatty",
+                        [{"px": {"value": "0.4000"}, "qty": "5"}],
+                        [{"px": {"value": "0.4200"}, "qty": "7"}],
+                    )
+                )
+            except Exception:
+                return
+            await asyncio.sleep(0.01)
+
+    creds, _ = _creds()
+    async with websockets.serve(handler, "127.0.0.1", 0) as server:
+        port = server.sockets[0].getsockname()[1]
+        adapter = PolymarketUsWebSocketAdapter(
+            outcome_ids=["chatty:LONG", "dark:LONG"],
+            creds=creds,
+            url=f"ws://127.0.0.1:{port}",
+            repair_sweep_s=0.02,
+            dark_after_s=0.02,
+            priority_dark_after_s=0.02,
+            priority_slugs=lambda: {"dark"},  # the game is under way
+            initial_backoff_s=0.01,
+            max_backoff_s=0.05,
+        )
+
+        async def drain():
+            async for _q in adapter.stream_quotes():
+                pass
+
+        task = asyncio.create_task(drain())
+        try:
+            await _wait_for(lambda: len(connections) >= 2, timeout_s=6.0)
+        finally:
+            task.cancel()
+            with contextlib.suppress(asyncio.CancelledError):
+                await task
+            await adapter.close()
+
+    assert len(connections) >= 2, (
+        "an in-play market stayed dark through every repair and the shard "
+        f"never rebuilt its connection (connections={len(connections)})"
+    )
+
+
+@pytest.mark.asyncio
+async def test_a_dark_pregame_market_does_not_force_a_reconnect():
+    """Only a live book justifies dropping a healthy socket.
+
+    A pre-game market that never answers is usually finished or delisted, and
+    reconnecting for it would thrash the connection forever. The age check
+    withholds it instead, which is the correct and safe outcome - no price
+    beats a wrong one.
+    """
+    connections: list[int] = []
+
+    async def handler(ws):
+        connections.append(id(ws))
+        while True:
+            try:
+                await asyncio.wait_for(ws.recv(), timeout=0.01)
+            except TimeoutError:
+                pass
+            except Exception:
+                return
+            try:
+                await ws.send(
+                    _frame(
+                        "chatty",
+                        [{"px": {"value": "0.4000"}, "qty": "5"}],
+                        [{"px": {"value": "0.4200"}, "qty": "7"}],
+                    )
+                )
+            except Exception:
+                return
+            await asyncio.sleep(0.01)
+
+    creds, _ = _creds()
+    async with websockets.serve(handler, "127.0.0.1", 0) as server:
+        port = server.sockets[0].getsockname()[1]
+        adapter = PolymarketUsWebSocketAdapter(
+            outcome_ids=["chatty:LONG", "dark:LONG"],
+            creds=creds,
+            url=f"ws://127.0.0.1:{port}",
+            repair_sweep_s=0.02,
+            dark_after_s=0.02,
+            priority_slugs=set,  # nothing is in-play
+            initial_backoff_s=0.01,
+        )
+
+        async def drain():
+            async for _q in adapter.stream_quotes():
+                pass
+
+        task = asyncio.create_task(drain())
+        try:
+            await asyncio.sleep(1.5)  # many repair sweeps
+        finally:
+            task.cancel()
+            with contextlib.suppress(asyncio.CancelledError):
+                await task
+            await adapter.close()
+
+    assert len(connections) == 1, (
+        f"a dark pre-game market thrashed the connection ({len(connections)} connects)"
     )
