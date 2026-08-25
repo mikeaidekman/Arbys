@@ -22,7 +22,7 @@ Run everything from the repo root with the venv Python — `venv\Scripts\python.
 — rather than a bare `python`.
 
 ```powershell
-venv\Scripts\python.exe -m pytest -q            # 265 tests, must stay green
+venv\Scripts\python.exe -m pytest -q            # 304 tests, must stay green
 venv\Scripts\python.exe -m ruff check .         # must stay clean
 venv\Scripts\python.exe -m mypy arbys           # see caveat below — NOT clean today
 ```
@@ -272,7 +272,14 @@ casually.
 
 Feature flags in `.env` (copy from `.env.example`; `.env` is gitignored):
 
-- `ARBYS_DB_URL` — defaults to SQLite `./arbys-local.db`.
+- `ARBYS_DB_URL` — defaults to SQLite `./arbys-local.db`. SQLite databases are
+  opened in **WAL** journal mode with `synchronous=NORMAL` and
+  `busy_timeout=15000`, applied per connection by a `connect` hook in
+  `db/session.py` and gated on the dialect — issuing `PRAGMA` against
+  Postgres is an error. The default `delete` journal mode allows one writer
+  *and blocks readers*, which with five concurrent writers produced 18
+  `database is locked` errors and 6 QueuePool timeouts in a day. WAL leaves
+  `-wal` and `-shm` sidecar files beside the database.
 - `ARBYS_ENABLE_INGEST` — **0 by default.** When off, no venue is contacted and
   quotes must be pushed via `POST /quotes`. Tests and demos rely on this.
 - `ARBYS_DISCOVERY_CONCURRENCY` — how many discovery sub-passes may hit the
@@ -545,8 +552,13 @@ groups its legs. Three things about it are deliberate:
   a bot attempting 400 tickets looked identical to one attempting 3. `missed`
   means the edge vanished between detection and submission, which is the
   measurement that decides whether latency work is worth anything.
-- **An attempt is logged only once it reaches `submit_arb_ticket`.** "The
-  detector found nothing" is not an attempt and is never written.
+- **A manual click is always an attempt.**
+  `submit_arb_ticket_for_descriptor` resolves the descriptor itself and writes
+  a `missed` ticket when no live edge matches, so a click on a row whose edge
+  just died leaves a record. The endpoint no longer resolves anything. The
+  narrower rule still holds for `submit_arb_ticket`, which the auto-trader
+  calls: a detector finding nothing is not an attempt, or a bot would write
+  thousands of rows a night saying nothing happened.
 
 `paper_settlement` records resolution events, which `settle_outcome_async`
 previously did not — a settled winner was indistinguishable from a position
@@ -562,6 +574,24 @@ account strip and the equity curve would disagree on the same page.
 inline, because it needs the per-outcome breakdown `account_equity` doesn't
 return. Keep its mark logic (mid, falling back to `avg_price` when there's no
 live quote) in step with `account_equity`'s if that ever changes.
+
+## A dropped write is counted, not silent
+
+Every persistence path in the paper broker and ticket service swallows its
+exception on purpose: a broken trade is worse than an unrecorded one. The flaw
+that cost real data was that a swallowed write was **indistinguishable from a
+successful one**. On 2026-08-25 that left a ticket stuck at `pending` and
+`paper_position.realized_pnl` $132 adrift from the broker's own figure, with
+nothing anywhere saying rows had been lost.
+
+All of those writes now go through `db/session.py:run_write`, which retries
+`database is locked` three times and, if it still fails, counts it.
+`GET /health` reports `dropped_writes` and `last_dropped_write`. **Non-zero
+means the ledger on screen is incomplete** — treat any figure derived from it
+as a lower bound until the count is back to zero.
+
+Only `database is locked` is retried. Any other exception is counted once and
+logged as itself, so a real bug is never filed as contention.
 
 ## Known defects
 
