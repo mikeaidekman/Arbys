@@ -48,6 +48,28 @@ class CrossVenueMatch:
         times = [g.start_time for g in self.per_venue.values() if g.start_time is not None]
         return min(times) if times else None
 
+    def in_play(self) -> bool | None:
+        """Whether any venue says this event is under way.
+
+        A venue that reports nothing (Kalshi publishes no live state) must not
+        be read as "not playing", so only venues that actually answered are
+        consulted. ``ended`` wins over ``live`` on the same venue, and a
+        finished report from one venue beats a stale ``live`` from another -
+        the safe direction, since treating a finished game as live only costs
+        pointless polling while the reverse under-polls a moving book.
+        """
+        seen = False
+        playing = False
+        for game in self.per_venue.values():
+            if game.ended is None and game.live is None:
+                continue
+            seen = True
+            if game.ended:
+                return False
+            if game.live:
+                playing = True
+        return playing if seen else None
+
     def event_group_id(self) -> str:
         base = f"{self.sport}-{self.team_a.code}-{self.team_b.code}-{self.game_date}"
         if self.market_type != "moneyline":
@@ -221,5 +243,6 @@ def match_to_event_group(match: CrossVenueMatch) -> EventGroup:
         title=match.event_group_title(),
         legs=tuple(legs),
         start_time=match.start_time(),
+        in_play=match.in_play(),
         source="discovery",
     )

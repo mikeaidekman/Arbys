@@ -76,7 +76,7 @@ async def test_run_once_registers_new_groups_and_restarts_ingest(monkeypatch):
     state = MagicMock()
     state.event_groups = {}
     state.engine = MagicMock()
-    state.restart_ingest = AsyncMock()
+    state.sync_ingest = AsyncMock()
 
     svc = DiscoveryService(state)
     count = await svc.run_once()
@@ -84,7 +84,7 @@ async def test_run_once_registers_new_groups_and_restarts_ingest(monkeypatch):
     assert count == 1
     assert "mlb-CHC-LAD-2026-08-05" in state.event_groups
     state.engine.register_group.assert_called_once()
-    state.restart_ingest.assert_awaited_once()
+    state.sync_ingest.assert_awaited_once()
 
 
 @pytest.mark.asyncio
@@ -133,15 +133,15 @@ async def test_run_once_noop_when_group_unchanged(monkeypatch):
     state = MagicMock()
     state.event_groups = {}
     state.engine = MagicMock()
-    state.restart_ingest = AsyncMock()
+    state.sync_ingest = AsyncMock()
 
     svc = DiscoveryService(state)
     await svc.run_once()
-    state.restart_ingest.reset_mock()
+    state.sync_ingest.reset_mock()
 
     # Second pass — should be a no-op.
     await svc.run_once()
-    state.restart_ingest.assert_not_awaited()
+    state.sync_ingest.assert_not_awaited()
 
 
 @pytest.mark.asyncio
@@ -181,7 +181,7 @@ async def test_run_once_retires_discovered_groups_that_vanish(monkeypatch):
     state = MagicMock()
     state.event_groups = {gone.id: gone, kept.id: kept}
     state.engine = MagicMock()
-    state.restart_ingest = AsyncMock()
+    state.sync_ingest = AsyncMock()
 
     svc = DiscoveryService(state)
     await svc.run_once()
@@ -190,7 +190,7 @@ async def test_run_once_retires_discovered_groups_that_vanish(monkeypatch):
     assert kept.id in state.event_groups, "hand-registered group must never be retired"
     state.engine.unregister_group.assert_called_once_with(gone.id)
     assert deleted.await_count == 1
-    state.restart_ingest.assert_awaited()
+    state.sync_ingest.assert_awaited()
     # Its opportunities must go too: once unregistered the engine never
     # re-evaluates it, so nothing else would ever empty the set.
     state.clear_group_opportunities.assert_called_once_with(gone.id)
@@ -228,7 +228,7 @@ async def test_dropped_retire_leaves_app_state_holding_the_group(monkeypatch):
     state = MagicMock()
     state.event_groups = {stale.id: stale}
     state.engine = MagicMock()
-    state.restart_ingest = AsyncMock()
+    state.sync_ingest = AsyncMock()
 
     count = await DiscoveryService(state).run_once()
 
@@ -236,7 +236,7 @@ async def test_dropped_retire_leaves_app_state_holding_the_group(monkeypatch):
     assert stale.id in state.event_groups, "dropped retire must not un-know a live group"
     state.engine.unregister_group.assert_not_called()
     state.clear_group_opportunities.assert_not_called()
-    state.restart_ingest.assert_not_awaited()
+    state.sync_ingest.assert_not_awaited()
 
 
 @pytest.mark.asyncio
@@ -268,7 +268,7 @@ async def test_failed_subpass_does_not_retire_anything(monkeypatch):
     state = MagicMock()
     state.event_groups = {existing.id: existing}
     state.engine = MagicMock()
-    state.restart_ingest = AsyncMock()
+    state.sync_ingest = AsyncMock()
 
     await DiscoveryService(state).run_once()
 
@@ -308,7 +308,7 @@ async def test_polymarket_us_outage_does_not_retire_anything(monkeypatch):
     state = MagicMock()
     state.event_groups = {existing.id: existing}
     state.engine = MagicMock()
-    state.restart_ingest = AsyncMock()
+    state.sync_ingest = AsyncMock()
 
     await DiscoveryService(state).run_once()
 
@@ -354,11 +354,11 @@ async def test_dropped_batch_leaves_app_state_untouched(monkeypatch):
     state = MagicMock()
     state.event_groups = {}
     state.engine = MagicMock()
-    state.restart_ingest = AsyncMock()
+    state.sync_ingest = AsyncMock()
 
     count = await DiscoveryService(state).run_once()
 
     assert count == 1, "discovery still reports what it found"
     assert group.id not in state.event_groups, "dropped batch must not be applied"
     state.engine.register_group.assert_not_called()
-    state.restart_ingest.assert_not_awaited()
+    state.sync_ingest.assert_not_awaited()

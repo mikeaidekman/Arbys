@@ -65,6 +65,14 @@ class VenueGame:
     # as ``gameStartTime``. ``game_date`` remains the matching key because
     # not every venue/sport supplies a time.
     start_time: datetime | None = None
+    # Whether the venue says the event is under way / finished. ``None`` means
+    # it did not say - which is different from False, and is what Kalshi always
+    # reports, since it publishes no live state at all. Polymarket US carries
+    # both on its league events payload and they are trustworthy: an ATP match
+    # mid-third-set reads ``live=True, ended=False``; a finished one reads
+    # ``live=False, ended=True`` with ``period="FT"``.
+    live: bool | None = None
+    ended: bool | None = None
 
 
 # Kalshi series ticker per team sport. All share the same event/market shape:

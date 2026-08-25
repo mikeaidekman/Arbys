@@ -71,6 +71,7 @@ def _pair_to_quotes(
     ask: Decimal | None,
     bid_size: Decimal | None,
     ask_size: Decimal | None,
+    source_age_s: float | None = None,
 ) -> list[Quote]:
     """Build the LONG/SHORT pair from one market's top of book.
 
@@ -115,6 +116,7 @@ def _pair_to_quotes(
                 ask=ask,
                 bid_size=bid_size,
                 ask_size=ask_size,
+                source_age_s=source_age_s,
             ),
             Quote(
                 outcome_id=f"{slug}:{SHORT}",
@@ -122,6 +124,7 @@ def _pair_to_quotes(
                 ask=one - bid,
                 bid_size=ask_size,
                 ask_size=bid_size,
+                source_age_s=source_age_s,
             ),
         ]
     except ValueError:
@@ -150,13 +153,20 @@ def quotes_from_bbo(slug: str, market_data: dict[str, Any]) -> list[Quote]:
 
 
 def quotes_from_levels(
-    slug: str, bids: list[dict[str, Any]], offers: list[dict[str, Any]]
+    slug: str,
+    bids: list[dict[str, Any]],
+    offers: list[dict[str, Any]],
+    source_age_s: float | None = None,
 ) -> list[Quote]:
     """Top of book from a full ladder - ``[{"px": {"value": ...}, "qty": ...}]``.
 
     Only level 0 is read. Carrying the whole ladder is the cost of the full
     market-data subscription, and the ``qty`` on level 0 is what that cost
     buys - the lite subscription reports only depth counters.
+
+    ``source_age_s`` is how far behind the frame's own ``transactTime`` was
+    when it arrived, and is passed straight through to both quotes. A frame
+    can be a replayed snapshot hours out of date; only that field says so.
     """
 
     def top(levels: list[dict[str, Any]]) -> tuple[Decimal | None, Decimal | None]:
@@ -166,7 +176,7 @@ def quotes_from_levels(
 
     bid, bid_size = top(bids)
     ask, ask_size = top(offers)
-    return _pair_to_quotes(slug, bid, ask, bid_size, ask_size)
+    return _pair_to_quotes(slug, bid, ask, bid_size, ask_size, source_age_s)
 
 
 class PolymarketUsAdapter(MarketDataAdapter):

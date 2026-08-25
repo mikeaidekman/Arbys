@@ -347,3 +347,26 @@ def test_resolve_team_still_handles_the_pro_league_shape():
     from arbys.discovery.teams import NFL_RESOLVER
 
     assert _resolve_team({"name": "Arizona Cardinals"}, NFL_RESOLVER).code == "ARI"
+
+
+# --- the venue's own live/ended flags -------------------------------------
+
+
+def test_live_flags_keep_unknown_distinct_from_false():
+    """Three states, not two.
+
+    Verified against the ATP feed 2026-08-25: in-progress reads
+    live=True/ended=False, finished reads live=False/ended=True, scheduled
+    reads False/False, and one the venue is not yet tracking reads None/None.
+    Collapsing the last into False asserts a game is not being played when the
+    venue simply has not said.
+    """
+    from arbys.discovery.polymarket_us import _live_flags
+
+    assert _live_flags({"live": True, "ended": False}) == (True, False)
+    assert _live_flags({"live": False, "ended": True}) == (False, True)
+    assert _live_flags({"live": False, "ended": False}) == (False, False)
+    assert _live_flags({"live": None, "ended": None}) == (None, None)
+    assert _live_flags({}) == (None, None)
+    # Not booleans -> unknown, never a truthy coercion.
+    assert _live_flags({"live": "yes", "ended": 1}) == (None, None)

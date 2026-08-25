@@ -69,6 +69,19 @@ class Quote:
     # trades or invents fills into an empty book.
     bid_size: Decimal | None = None
     ask_size: Decimal | None = None
+    # How stale the venue itself said this book was when the quote reached us,
+    # in seconds. None when the venue publishes no such timestamp, which is
+    # not the same as zero - it means unknown, and the book falls back to
+    # arrival time.
+    #
+    # This exists because arrival time is a lie on a replayed snapshot.
+    # Polymarket US serves a cached book on subscribe whose own `transactTime`
+    # can be hours behind: measured 2026-08-25, 199 of 571 markets came back
+    # over an hour stale and 58% of those disagreed with the live book by 2c
+    # or more, one by 97c. Stamped on arrival they read as 0.2s old, so no age
+    # check could withhold them, and a stale leg invented arbitrage against a
+    # live one on the other venue.
+    source_age_s: float | None = None
 
     def __post_init__(self) -> None:
         if not (Decimal("0") <= self.bid <= Decimal("1")):
@@ -103,6 +116,12 @@ class EventGroup:
     # Scheduled start of the underlying real-world event, UTC. None when the
     # group was registered by hand or the venue reported no time.
     start_time: datetime | None = None
+    # Whether a venue says the real-world event is under way right now.
+    # ``None`` means nobody said, in which case callers fall back to guessing
+    # from ``start_time``. Deliberately **not persisted**: it flips as games
+    # start and finish, so a value rehydrated from the database would be a
+    # confident lie, whereas ``None`` correctly means "ask again".
+    in_play: bool | None = None
     # "discovery" for auto-registered groups, "manual" for hand-registered
     # ones. Discovery retires its own groups when they stop matching; manual
     # groups are never touched.

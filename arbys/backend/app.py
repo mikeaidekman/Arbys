@@ -143,7 +143,7 @@ def create_app() -> FastAPI:
             await repo.upsert_event_group(session, group)
         s.event_groups[group.id] = group
         s.engine.register_group(group)
-        await s.restart_ingest()
+        await s.sync_ingest()
         return body
 
     @app.delete("/event-groups/{group_id}", status_code=204)
@@ -153,7 +153,7 @@ def create_app() -> FastAPI:
             await repo.delete_event_group(session, group_id)
         s.event_groups.pop(group_id, None)
         s.engine.unregister_group(group_id)
-        await s.restart_ingest()
+        await s.sync_ingest()
 
     # ------------------------------------------------------------------
     # Quote ingest (mocked/manual entry for local dev without live adapters)

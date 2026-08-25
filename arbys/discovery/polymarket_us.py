@@ -165,6 +165,27 @@ def _resolve_team(team: Any, resolver: TeamResolver) -> Team | None:
     return None
 
 
+def _live_flags(event: dict[str, Any]) -> tuple[bool | None, bool | None]:
+    """``(live, ended)`` as the venue reports them, or ``None`` where it did not.
+
+    Both are genuinely tri-state on this payload and the distinction matters.
+    Verified 2026-08-25 against the ATP feed: a match in its third set reads
+    ``live=True, ended=False, period="S3"``; a finished one reads
+    ``live=False, ended=True, period="FT"``; a scheduled one reads
+    ``live=False, ended=False, score="0-0"``; and one the venue is not yet
+    tracking reads ``None`` for both with ``period="NS"``. Coercing that last
+    case to False would assert a game is not being played when the venue has
+    simply not said - and Kalshi never says at all, so ``None`` has to survive
+    all the way to the matcher.
+    """
+    live = event.get("live")
+    ended = event.get("ended")
+    return (
+        live if isinstance(live, bool) else None,
+        ended if isinstance(ended, bool) else None,
+    )
+
+
 def _eastern_date(start: datetime) -> date:
     """The game's date **in Eastern time**, not UTC.
 
@@ -204,6 +225,7 @@ async def fetch_polymarket_us_games(
     games: list[VenueGame] = []
     for event in events:
         start_time = _parse_utc(event.get("startTime"))
+        live, ended = _live_flags(event)
         if start_time is None:
             continue
         for market in event.get("markets") or []:
@@ -235,6 +257,8 @@ async def fetch_polymarket_us_games(
                     ref=str(slug),
                     market_type="moneyline",
                     start_time=start_time,
+                    live=live,
+                    ended=ended,
                 )
             )
     return games
@@ -259,6 +283,7 @@ async def fetch_polymarket_us_totals(
     games: list[VenueGame] = []
     for event in events:
         start_time = _parse_utc(event.get("startTime"))
+        live, ended = _live_flags(event)
         if start_time is None:
             continue
         event_teams = [t for t in (event.get("teams") or []) if isinstance(t, dict)]
@@ -293,6 +318,8 @@ async def fetch_polymarket_us_totals(
                     market_type="total",
                     line=line,
                     start_time=start_time,
+                    live=live,
+                    ended=ended,
                 )
             )
     return games
@@ -321,6 +348,7 @@ async def fetch_polymarket_us_tennis(
         events = await _fetch_events(league, http_client, limit)
         for event in events:
             start_time = _parse_utc(event.get("startTime"))
+            live, ended = _live_flags(event)
             if start_time is None:
                 continue
             for market in event.get("markets") or []:
@@ -354,6 +382,8 @@ async def fetch_polymarket_us_tennis(
                         ref=str(slug),
                         market_type="moneyline",
                         start_time=start_time,
+                        live=live,
+                        ended=ended,
                     )
                 )
     return matches

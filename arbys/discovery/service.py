@@ -245,7 +245,9 @@ class DiscoveryService:
       1. Run discovery (MLB only for now).
       2. Upsert each match as an EventGroup in the DB.
       3. Register with the engine.
-      4. Trigger ``AppState.restart_ingest`` if any groups changed.
+      4. Trigger ``AppState.sync_ingest`` if any groups changed — which
+         rebuilds the venue subscriptions only if something new needs
+         subscribing, since a retirement needs no socket change.
 
     Existing groups from other sources are left alone.
     """
@@ -322,7 +324,7 @@ class DiscoveryService:
             )
 
         if changed:
-            await self._state.restart_ingest()
+            await self._state.sync_ingest()
         log.info("discovery: registered/updated %d groups (changed=%s)", len(groups), changed)
         return len(groups)
 

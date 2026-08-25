@@ -303,7 +303,20 @@ Feature flags in `.env` (copy from `.env.example`; `.env` is gitignored):
   contracts, so roughly 2.5 tickets on one outcome before the position cap
   binds. Both apply.
 - `ARBYS_POLYMARKET_US_POLL_S` — seconds between `/bbo` sweeps, default 5,
-  clamped to a 1s floor. Polymarket US has no WS path yet (see **Venues**).
+  clamped to a 1s floor. This is the **credential-less fallback** path only;
+  with credentials set the WebSocket is used instead (see **Venues**).
+- `ARBYS_POLYMARKET_US_WS_SHARD_SIZE` — markets per Polymarket US WebSocket
+  connection, default 100. One connection silently stops streaming a large
+  fraction of its markets past some ceiling, so the subscription is split
+  across sockets; see **Venues** for the measurement. Lower it if a shard's
+  `live` count sags, raise it to trade that margin for fewer connections.
+- `ARBYS_POLYMARKET_US_BACKSTOP_S` — seconds of socket silence before a
+  Polymarket US market is re-read from the public `/bbo` gateway, default 120,
+  `0` disables. The market WebSocket abandons a persistent subset of markets
+  and no shard size reaches them; see **The feed abandons markets, and says so
+  only in a field we used to ignore** below. 120s is well above a normal quiet
+  gap and well below the quote book's 600s withholding threshold, so an
+  abandoned market is corrected before it can ever be traded on.
 - `KALSHI_API_KEY_ID` + `KALSHI_PRIVATE_KEY_PATH` — when both set, the
   authenticated WS adapter is used instead of 5s REST polling. **Keep the .pem
   outside this repo.**
@@ -435,7 +448,8 @@ Two hosts, only the first of which we use:
   quotes. Measured 2026-08-11: 53 concurrent `/bbo` calls in 1.46s, no rate
   limiting.
 - **`api.polymarket.us`** — authenticated (Ed25519, needs completed identity
-  verification). Orders, portfolio, and the market WebSocket. **Not wired.**
+  verification). The **market WebSocket is wired and is the live quote path**
+  (see below); orders and portfolio are not.
 
 The adapter is **WebSocket-first with a REST-poll fallback**, chosen by
 `_polymarket_us_factory` on whether `POLYMARKET_US_API_KEY_ID` +
@@ -459,6 +473,167 @@ ladder carries real `qty`. REST `/bbo` cannot report size at all and reports
 **There is no runtime fallback from WS to REST.** A failing handshake retries
 under backoff; downgrading silently would hide a revoked credential
 indefinitely, visible only as degraded fill quality.
+
+**One connection will not stream every market, and it fails silently** — the
+worst trap found here so far, because it produces confident wrong prices
+rather than an error. Measured 2026-08-25 with 573 markets on a single socket:
+the connection stayed healthy (no error, no disconnect, ~250 frames/s arriving)
+while delivering deltas for only ~400 of them per 30s window, and what it
+dropped included the live in-play markets that reprice fastest. In-play
+Polymarket legs sat at a **median age of 416s** while their Kalshi
+counterparts were at **0.3s**.
+
+An A/B/A test separated this from "the market just went quiet": of nine slugs
+proven to be streaming both immediately before *and* immediately after,
+**eight were shed** while subscribed alongside 564 others, and all nine
+streamed when subscribed alone. A second connection on the same API key had
+full service throughout, so the ceiling is per **connection**, not per key.
+
+So the subscription is **sharded across connections** —
+`ARBYS_POLYMARKET_US_WS_SHARD_SIZE` slugs each, default 100, six sockets for
+573 markets. Sharding fixed the *shedding*: the markets that stream, stream
+promptly, and the six shards together report the venue's full-book heartbeat
+of ~127 frames/s.
+
+**It did not fix staleness, and an early note here claiming "every leg reads
+under 4.5s" was wrong** — that was measured moments after a resubscribe, when
+every market has just been handed a snapshot and nothing has had time to age.
+Measured 96s after a resubscribe instead, 191 of 571 markets had received
+nothing at all. The remaining cause is a different failure, below, and no
+shard size addresses it: re-subscribing the stale markets 20 to a socket left
+44 of 74 still hours out of date.
+
+**Each shard logs `live N/M` every 30s, and that count is the only symptom
+this failure has.** Don't read a single sub-100% value as a fault — plenty of
+pre-game markets are genuinely quiet — read it as a trend, and cross-check
+against actual quote ages. What went wrong before was not that the number was
+bad but that nobody was counting: stale quotes are indistinguishable from a
+quiet market, right up until a stale leg invents an arbitrage against a live
+one on the other venue. Our book held Mochizuki/Milavsky at 0.58/0.59 while
+the venue was at 0.87/0.88 and Kalshi at 0.94/0.95.
+
+### The feed abandons markets, and said so only in a field we ignored
+
+**The WebSocket is push-only, so a quote is replaced only when the venue sends
+a frame or we resubscribe. For a persistent subset of markets it does
+neither** — and until 2026-08-25 nothing noticed, because a frame's own
+timestamp was never read.
+
+Every `marketData` frame carries `transactTime`, the venue's own clock for the
+book it is describing. On subscribe the venue replays a **cached** snapshot,
+and for a large minority of markets that snapshot is hours old:
+
+| first-frame lag | markets | ≥2¢ wrong vs live `/bbo` |
+| --- | --- | --- |
+| < 10s | 304 | 2.3% |
+| 10s–60min | 66 | ~2% |
+| **> 1 hour** (median ~5.7h) | **199** | **58.3%**, worst 97¢ |
+
+We stamped **arrival** time, so a six-hour-old book entered the quote book
+reading 0.2s old. `ARBYS_QUOTE_MAX_AGE_S` was powerless against it by
+construction — the entry really had just arrived. A leg frozen at a price the
+venue left hours ago then sat in the opportunity set against a live Kalshi
+leg, which is precisely the false arbitrage the age check exists to prevent:
+our book held `tsc-nfl-ari-gb-…-total-48pt5` at 0.19/**0.50** while the venue
+was at 0.19/**0.23**.
+
+Two things follow, and both are now in the code:
+
+- **`Quote.source_age_s`** carries how stale the venue said the data already
+  was, and `QuoteBook.upsert` **back-dates its arrival stamp by it**. A
+  replayed snapshot can therefore be stale on arrival — which is the intended
+  outcome, because it is exactly the quote that must not be traded on. Ageing
+  now describes the data rather than the delivery.
+- **A `/bbo` backstop** (`ARBYS_POLYMARKET_US_BACKSTOP_S`) re-reads any market
+  the socket has not served in 120s. Nothing in a push-only feed can correct a
+  market the feed has abandoned; something has to go and ask. `/bbo` is public,
+  needs no credentials, and reported the correct price in every case checked.
+
+**In-play markets get a far tighter deadline, and the venue says which they
+are.** `/v2/leagues/<slug>/events` carries `live` and `ended` per event;
+discovery records them on `VenueGame` and the matcher resolves them onto
+`EventGroup.in_play`, which `AppState.in_play_slugs` reads. All three states
+matter and are real — verified 2026-08-25 on the ATP feed:
+
+| `live` | `ended` | `period` | meaning |
+| --- | --- | --- | --- |
+| `True` | `False` | `S3` | on court now |
+| `False` | `True` | `FT` | finished |
+| `False` | `False` | `` | scheduled, not started |
+| `None` | `None` | `NS` | venue not tracking it yet |
+
+**`None` is not `False`.** Kalshi publishes no live state at all, so a group
+seen only there reports `None`, and `CrossVenueMatch.in_play` therefore
+ignores venues that said nothing rather than counting them as "not playing".
+Where nobody said, `in_play_slugs` falls back to a start-time window bounded
+by `MAX_EVENT_DURATION_S` (6h). `EventGroup.in_play` is deliberately **not
+persisted**: it flips as games start and end, so a value rehydrated from the
+database would be a confident lie where `None` correctly means "ask again".
+
+Before this, "started" was inferred from `start_time` alone and was true
+forever — finished tennis matches were polled at in-play rates and
+re-subscribed every 15s for the life of the process, 13 per shard.
+
+**In-play markets get a far tighter deadline.** A market whose game is under
+way reprices on every point, so 120s is useless for it: measured 2026-08-25,
+three of thirty in-play markets were abandoned by the socket and rode the
+backstop from 39s to 122s stale, one of them 11¢ from the live book. Those
+markets are re-read after `DEFAULT_PRIORITY_BACKSTOP_AFTER_S` (6s) instead.
+`AppState.in_play_slugs` supplies the set and is called every sweep, so a game
+going in-play tightens its own deadline with no restart. Only ~30 markets are
+in-play at once, so this is nearly free — and the health warning counts only
+the *non*-priority share, since polling in-play hard is by design.
+
+**This is not the WS→REST fallback the adapter refuses to make.** That rule
+exists so a revoked credential cannot hide behind a silent downgrade, and it
+still holds: the backstop never replaces a live socket, only markets that
+socket has gone quiet on, and it logs at **warning** level once it is carrying
+more than half the book — the point at which the socket, not the market, is
+what is wrong. Each shard's report also counts `stale-on-arrival` frames, so
+the venue serving replays is visible rather than inferred.
+
+`/bbo` reports no sizes, so a backstopped quote carries size `None` —
+*unknown*, still fillable — instead of the real depth a ladder frame carries.
+A correct price with unknown depth beats a wrong price with precise depth.
+
+**A subscription is acknowledged as a whole, never per market — so verify it
+is actually arriving.** If the venue registers 97 of the 100 names in a
+subscribe, nothing says so, and those three stay dark for the life of the
+connection, because the adapter subscribes once at connect and never checks.
+Measured 2026-08-25: a market delivering 165 frames/30s subscribed *alone* —
+and 149 inside a fresh 100-slug shard — was getting nothing on the running
+backend's socket, and the dark set was the **same three markets** across a 90s
+sample. A venue shedding markets on throughput would churn; a subscription
+that silently failed to register would not, which is why this is read as a
+registration failure rather than the per-connection ceiling sharding
+addresses.
+
+`_repair_subscriptions` re-sends a subscribe for just those markets, on the
+existing connection — subscribing is additive, so it costs one small message
+and no reconnect. Two kinds qualify: **never delivered on this connection**
+(a subscribed market answers immediately, if only with a snapshot), and
+**in-play and silent past `REPAIR_AFTER_S`** (a book being played reprices
+constantly, so 20s of quiet is abnormal in a way it is not for next week's
+game). A merely quiet pre-game market is deliberately excluded — it answered
+at connect, it is behaving normally, and re-subscribing all of those every
+sweep would be hundreds of pointless messages a minute, each one making the
+venue replay a snapshot. `MAX_REPAIR_ATTEMPTS` bounds the cost for a market
+that is genuinely finished, since a settled book never streams again however
+often it is asked for.
+
+This is only safe because the quote book refuses to go backwards: a repair
+makes the venue replay a possibly hours-old snapshot, which on a live market
+would otherwise clobber current prices.
+
+**`close()` on the WS adapter must actually close the shards.** A shard runs
+in its own task, and the event loop holds a reference to a task, so dropping
+the `stream_quotes` generator does not end it. Cancelling the consumer happens
+to work — the `CancelledError` lands inside the generator's own `await` and
+runs its cleanup — but `_stop_ingest` calls `close()`, and `restart_ingest()`
+rebuilds the adapters on every discovery pass that changes anything, so a leak
+here compounds into sockets that hold markets subscribed against the very
+ceiling the sharding exists to respect. Both paths are pinned by tests, each
+verified to fail when its own cleanup is removed.
 
 A Polymarket US market is **one binary contract with a long and a short side**
 — structurally like a Kalshi market, not like international's two-token pair.
@@ -519,6 +694,28 @@ markets with 419,882 contracts offered and no bids at all. `paper_broker`
 refuses to fill against a known-empty side; without that guard the synthesised
 bid would let it report selling into a book with no buyers.
 
+### Rebuilding ingest costs the whole book, so don't
+
+`AppState.sync_ingest` is what discovery and the event-group endpoints call.
+**It rebuilds the venue adapters only when some venue needs a market it is not
+already subscribed to.** A retirement, a title change, a start time moving —
+none of those touch the sockets.
+
+Neither venue supports unsubscribing, so the only way to *drop* a market is to
+hang up every connection and redial with a shorter list. But dropping costs
+nothing if we simply stop caring: frames for markets we no longer hold are
+already ignored, and the group is gone from `event_groups` so nothing
+evaluates it. Redialing is what is expensive — the venue answers a fresh
+subscription by replaying a cached book that can be hours old, so every
+rebuild floods the quote book with stale prices and takes ~3 minutes to
+recover.
+
+Discovery retires a finished match on nearly every pass, so treating that as a
+reason to rebuild meant **all 569 subscriptions across both venues went stale
+for ~3 minutes every ~12 minutes**, in order to stop watching one tennis game
+that had ended. `restart_ingest` still exists for the unconditional rebuild;
+prefer `sync_ingest`.
+
 ## Only-tradeable invariants
 
 Three layers can each go stale independently, and each has bitten. A phantom
@@ -530,6 +727,34 @@ against a live Kalshi leg.
   `0` disables). Venue websockets push only on change, so a dead feed and a
   quiet market are indistinguishable without this. `get_with_age()` still
   returns stale entries so the UI can explain rather than blank.
+
+  **`/bbo` is not ground truth during fast play.** Measured 2026-08-25 on an
+  in-play ATP match, the WebSocket ladder led `/bbo` by a full tick for
+  seconds at a time (WS `0.55/0.56` while `/bbo` still read `0.60/0.61`,
+  converging a few seconds later). The socket is the faster, more granular
+  feed; `/bbo` is a periodic summary. Use `/bbo` to check whether a market is
+  *being served at all* — that is what it is good for — but do **not** grade
+  live prices against it and conclude the book is stale. A three-way read
+  (our book vs our own WS vs `/bbo`) settles it, and our book has matched our
+  own WS on every sample.
+
+  **The book never goes backwards.** `upsert` drops a quote whose effective
+  time is older than the entry it would replace. Frames do not arrive in book
+  order — every fresh subscription is answered with a *cached* book, so a
+  resubscribe can deliver an hours-old snapshot after live prices are already
+  flowing. Without the guard that snapshot overwrites good data and blanks a
+  market that was streaming fine, turning a routine reconnect into an outage.
+  `REGRESSION_TOLERANCE_S` (5s) keeps it aimed at that and not at ordinary
+  jitter: a venue's own `transactTime` lag wanders 0.15–0.45s frame to frame,
+  so a zero-tolerance guard discarded **24% of legitimate updates** — real
+  ticks thrown away on a fast in-play book.
+
+  **Arrival time is not always data time.** Where a quote carries
+  `source_age_s` — how far behind the venue said its own book already was —
+  `upsert` back-dates the arrival stamp by it, so an entry can be stale the
+  moment it lands. Without that, a replayed snapshot defeats this whole
+  invariant while satisfying it on paper: it genuinely *did* just arrive. See
+  **The feed abandons markets** under **Venues**.
 - **Groups are retired.** Discovery removes `source="discovery"` groups a
   *complete* pass no longer finds; `source="manual"` is never touched, and
   retirement is skipped when any sub-pass raised so a venue outage isn't read

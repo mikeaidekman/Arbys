@@ -13,6 +13,7 @@ import logging
 import os
 from collections import defaultdict
 from collections.abc import Callable
+from datetime import UTC, datetime
 from decimal import Decimal
 
 from ..adapters.base import MarketDataAdapter
@@ -117,6 +118,50 @@ def polymarket_us_poll_s() -> float:
         return DEFAULT_POLYMARKET_US_POLL_S
 
 
+DEFAULT_POLYMARKET_US_WS_SHARD_SIZE = 100
+
+
+def polymarket_us_ws_shard_size() -> int:
+    """Markets per Polymarket US WebSocket connection.
+
+    One connection silently stops streaming a large fraction of its markets
+    past some ceiling - measured 2026-08-25, 573 slugs on one socket shed
+    eight of nine slugs that were provably live - so the subscription is split
+    across connections. Lower this if a shard's ``live`` count in the feed
+    report sags; raise it to trade that safety margin for fewer sockets.
+    """
+    raw = os.environ.get("ARBYS_POLYMARKET_US_WS_SHARD_SIZE")
+    if raw is None:
+        return DEFAULT_POLYMARKET_US_WS_SHARD_SIZE
+    try:
+        return max(1, int(raw))
+    except ValueError:
+        return DEFAULT_POLYMARKET_US_WS_SHARD_SIZE
+
+
+DEFAULT_POLYMARKET_US_BACKSTOP_S = 120.0
+
+
+def polymarket_us_backstop_s() -> float:
+    """Seconds of socket silence before a market is re-read from ``/bbo``.
+
+    The Polymarket US WebSocket abandons a persistent subset of markets: it
+    pushes nothing for them and answers a resubscribe with a snapshot hours
+    out of date, regardless of shard size. A push-only feed cannot correct
+    that on its own, so the adapter re-reads those markets from the public
+    gateway. ``0`` disables the backstop, which restores the old behaviour of
+    serving whatever the socket last said - including a stale replay.
+    """
+    raw = os.environ.get("ARBYS_POLYMARKET_US_BACKSTOP_S")
+    if raw is None:
+        return DEFAULT_POLYMARKET_US_BACKSTOP_S
+    try:
+        value = float(raw)
+    except ValueError:
+        return DEFAULT_POLYMARKET_US_BACKSTOP_S
+    return max(0.0, value)
+
+
 DEFAULT_MAX_OUTCOME_QTY = Decimal("500")
 
 
@@ -187,7 +232,12 @@ def _default_adapter_factories() -> dict[str, AdapterFactory]:
         creds = polymarket_us_creds_from_env()
         if creds is not None:
             log.info("using Polymarket US WebSocket adapter (authenticated, real-time)")
-            return PolymarketUsWebSocketAdapter(outcome_ids=oids, creds=creds)
+            return PolymarketUsWebSocketAdapter(
+                outcome_ids=oids,
+                creds=creds,
+                shard_size=polymarket_us_ws_shard_size(),
+                backstop_after_s=polymarket_us_backstop_s(),
+            )
         # The REST path is the only one that works without KYC, so it stays.
         log.info("using Polymarket US REST poll adapter (no credentials set)")
         return PolymarketUsAdapter(
@@ -249,6 +299,10 @@ class AppState:
 
         self.adapter_factories: dict[str, AdapterFactory] = _default_adapter_factories()
         self._adapters: list[MarketDataAdapter] = []
+        # What each venue's live adapter was actually built to subscribe to.
+        # `sync_ingest` compares against this to decide whether a rebuild is
+        # needed at all.
+        self._subscribed: dict[str, set[str]] = {}
         self._ingest_worker: IngestWorker | None = None
         self._discovery_service = None
 
@@ -352,6 +406,7 @@ class AppState:
                 outcomes_by_venue[leg.venue_id].append(leg.outcome_id)
 
         adapters: list[MarketDataAdapter] = []
+        subscribed: dict[str, set[str]] = {}
         for venue_id, outcome_ids in outcomes_by_venue.items():
             factory = self.adapter_factories.get(venue_id)
             if factory is None:
@@ -362,7 +417,15 @@ class AppState:
                 )
                 continue
             dedup = sorted(set(outcome_ids))
-            adapters.append(factory(dedup))
+            adapter = factory(dedup)
+            # Duck-typed like `close` below: an adapter that can poll harder
+            # for in-play markets is told how to recognise them. Only AppState
+            # knows each group's start time.
+            set_priority = getattr(adapter, "set_priority_slugs", None)
+            if set_priority is not None:
+                set_priority(self.in_play_slugs)
+            adapters.append(adapter)
+            subscribed[venue_id] = set(dedup)
             log.info("ingest: %s adapter built for %d outcomes", venue_id, len(dedup))
 
         if not adapters:
@@ -370,6 +433,7 @@ class AppState:
             return
 
         self._adapters = adapters
+        self._subscribed = subscribed
         self._ingest_worker = IngestWorker(
             adapters=adapters,
             quotebook=self.quotebook,
@@ -388,9 +452,112 @@ class AppState:
                 with contextlib.suppress(Exception):
                     await close()
         self._adapters = []
+        self._subscribed = {}
+
+    # Longest a real event is assumed to still be running. A five-set match
+    # can pass five hours; nothing we list runs past six. Without an upper
+    # bound, "started" is true forever, so every finished game would be polled
+    # at in-play rates and re-subscribed for the life of the process -
+    # observed as 13 markets per shard being repaired every 15s, none of which
+    # could ever stream again because they had settled.
+    MAX_EVENT_DURATION_S = 6 * 60 * 60
+
+    def in_play_slugs(self) -> set[str]:
+        """Venue market ids whose real-world event is under way now.
+
+        Prefers the venue's own ``live``/``ended`` flags, recorded on the group
+        by discovery, and falls back to a start-time window only where no venue
+        reported. The flags are what make this exact rather than a guess: a
+        tennis match that ended an hour ago looks identical to one in its third
+        set if all you have is a kickoff time.
+
+        A market being played reprices constantly, so it earns a much tighter
+        freshness deadline than one for a game next week. Recomputed on demand
+        rather than cached, so a game going in-play tightens its own deadline
+        without an ingest restart - and drops back out once it is over.
+        """
+        now = datetime.now(UTC)
+        live: set[str] = set()
+        for group in self.event_groups.values():
+            if group.in_play is not None:
+                # The venue said. Believe it - it knows whether a match is on
+                # court, and the clock-based guess below cannot tell a game in
+                # progress from one that finished an hour ago.
+                if not group.in_play:
+                    continue
+            else:
+                # Nobody said. Kalshi never does, and a Polymarket event the
+                # venue has not started tracking reports None too, so fall
+                # back to the clock.
+                start = group.start_time
+                if start is None:
+                    continue
+                if start.tzinfo is None:
+                    start = start.replace(tzinfo=UTC)
+                elapsed = (now - start).total_seconds()
+                if not 0 <= elapsed <= self.MAX_EVENT_DURATION_S:
+                    continue
+            for leg in group.legs:
+                live.add(leg.outcome_id.rpartition(":")[0])
+        return live
+
+    async def sync_ingest(self) -> None:
+        """Make the live subscriptions cover the current event groups.
+
+        **Rebuilds only when some venue needs a market it is not already
+        subscribed to.** Everything else - a retirement, a title change, a
+        start time moving - leaves the sockets alone.
+
+        That distinction is the whole point. Neither venue supports
+        unsubscribing, so the only way to *drop* a market is to hang up every
+        connection and redial with a shorter list. But dropping costs nothing
+        if we simply stop caring: frames for markets we no longer hold are
+        already ignored, and the group is gone from `event_groups` so nothing
+        evaluates it. Redialing, by contrast, is expensive - the venue answers
+        a fresh subscription by replaying a cached book that can be hours old,
+        so every rebuild floods the quote book with stale prices and takes
+        minutes to recover.
+
+        Discovery retires a finished match on nearly every pass, so treating
+        that as a reason to rebuild meant all 569 subscriptions across both
+        venues went stale for ~3 minutes every ~12 minutes, to stop watching
+        one tennis game that had ended.
+        """
+        if not _ingest_enabled():
+            return
+        desired: dict[str, set[str]] = defaultdict(set)
+        for group in self.event_groups.values():
+            for leg in group.legs:
+                desired[leg.venue_id].add(leg.outcome_id)
+        added = {
+            venue_id: oids - self._subscribed.get(venue_id, set())
+            for venue_id, oids in desired.items()
+        }
+        added = {v: o for v, o in added.items() if o}
+        if not added and self._ingest_worker is not None:
+            dropped = sum(
+                len(self._subscribed.get(v, set()) - desired.get(v, set()))
+                for v in self._subscribed
+            )
+            log.info(
+                "ingest: subscriptions already cover every registered outcome "
+                "(%d now-unwanted market(s) left subscribed and ignored); "
+                "not rebuilding",
+                dropped,
+            )
+            return
+        log.info(
+            "ingest: rebuilding — %s",
+            ", ".join(f"{v}+{len(o)}" for v, o in sorted(added.items())) or "no worker",
+        )
+        await self.restart_ingest()
 
     async def restart_ingest(self) -> None:
-        """Public: stop and restart ingest to pick up new outcome subscriptions.
+        """Public: unconditionally stop and rebuild every venue adapter.
+
+        Prefer `sync_ingest`, which skips the rebuild when nothing new needs
+        subscribing — a rebuild costs a multi-minute window of stale prices
+        across every market on both venues.
 
         No-op when ``ARBYS_ENABLE_INGEST`` is off.
         """

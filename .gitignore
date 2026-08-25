@@ -62,3 +62,6 @@ frontend/dist/
 
 # Visual brainstorming companion scratch (mockups, session state)
 .superpowers/
+
+# Throwaway probe output (venue payload dumps, a few MB)
+.scratch/
