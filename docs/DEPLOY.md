@@ -382,12 +382,15 @@ Run the green-build bar before tagging — 128 tests and `ruff` must be clean.
 
 ## Part 9 — Fix the health check first
 
-`/health` at [app.py:47-49](../arbys/backend/app.py) returns a static
-`{"status": "ok"}` whenever the process is alive. That misses the actual
-observed failure mode: **on both restarts on 2026-08-10, both venue websockets
-timed out on the opening handshake while uvicorn happily served 200s.** The
-retry recovered, but a supervisor watching this endpoint would never notice a
-feed that stayed down.
+`/health` at [app.py:104-106](../arbys/backend/app.py) returns
+`{"status": "ok", "dropped_writes": ..., "last_dropped_write": ...}` — the
+trustworthy-ledger branch added the write-reliability counters, so a
+supervisor can now tell whether persistence is silently losing rows. It still
+unconditionally reports `"status": "ok"` whenever the process is alive, so it
+still misses the actual observed failure mode: **on both restarts on
+2026-08-10, both venue websockets timed out on the opening handshake while
+uvicorn happily served 200s.** The retry recovered, but a supervisor watching
+this endpoint would never notice a feed that stayed down.
 
 Behind a tunnel this is even harder to spot. Make `/health` assert quote
 freshness — the app already computes `is_stale` per leg, so "every leg stale"

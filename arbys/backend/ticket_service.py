@@ -1,8 +1,7 @@
-"""Submitting an arb ticket — the one path that writes trade history.
+"""Submitting an arb ticket — the one module that writes trade history.
 
-Everything that submits goes through here: the HTTP endpoint and the
-auto-trader alike. Three reasons it is a single function rather than logic in
-the endpoint:
+Everything that submits goes through here rather than through logic living in
+the endpoint, for three reasons:
 
 * The ARBYS_MAX_OUTCOME_QTY check used to live in `app.py`, so any non-HTTP
   caller bypassed it silently and stacked positions without bound.
@@ -11,9 +10,20 @@ the endpoint:
 * Rejected and missed tickets are the most valuable rows in the audit log and
   they have to be written somewhere both callers share.
 
-An attempt is logged only once it reaches this function. "The detector found
-nothing" is not an attempt and is never written — otherwise a bot writes
-thousands of rows a night saying nothing happened.
+There are two entry points, not one: `submit_arb_ticket` (what the
+auto-trader calls, with an opportunity already in hand) and
+`submit_arb_ticket_for_descriptor` (what `POST /paper/execute` calls, so a
+click can describe *what* to submit without having resolved a live
+opportunity itself). An attempt is logged once it reaches either one, even
+when that call finds no live opportunity to submit — `missed` is still a
+logged outcome, and `submit_arb_ticket_for_descriptor`'s own no-candidate
+branch writes one directly, without ever calling `submit_arb_ticket`. What is
+never logged is a background detector tick that finds nothing and never
+calls into this module at all: "the detector found nothing" during routine
+evaluation is not an attempt, and logging it would fill the ticket log with
+thousands of rows a night saying nothing happened. A human pressing a button
+always reaches one of these two functions and is always logged, whether or
+not an edge is still there when it does.
 """
 
 from __future__ import annotations

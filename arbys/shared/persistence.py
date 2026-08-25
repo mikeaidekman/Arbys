@@ -1,8 +1,13 @@
 """DB-backed implementation of `PaperPersistenceSink`.
 
-Mirrors every paper broker mutation into the paper_* tables. Failures are
-swallowed by the broker's `_emit` wrapper so DB flakiness never breaks the
-in-memory truth of the simulator; a real deployment would add retry + alerting.
+Mirrors every paper broker mutation into the paper_* tables. Every write here
+goes through `run_write`, which retries transient contention and never raises
+-- so DB flakiness never breaks the in-memory truth of the simulator, and a
+write it finally gives up on is retried, logged, and counted rather than
+swallowed silently. See `arbys.db.session.run_write` and
+`dropped_write_stats` for the retry/alerting this module relies on; a caller
+here has no `try/except` of its own to add because `run_write` already
+guarantees it cannot raise.
 """
 
 from __future__ import annotations
