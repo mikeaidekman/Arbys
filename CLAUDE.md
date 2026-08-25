@@ -555,7 +555,9 @@ groups its legs. Three things about it are deliberate:
 - **A manual click is always an attempt.**
   `submit_arb_ticket_for_descriptor` resolves the descriptor itself and writes
   a `missed` ticket when no live edge matches, so a click on a row whose edge
-  just died leaves a record. The endpoint no longer resolves anything. The
+  just died leaves a record. The endpoint no longer resolves anything on
+  the `event_group_id` path the UI actually uses (the legacy
+  `opportunity_index` branch still indexes `s.opportunities` itself). The
   narrower rule still holds for `submit_arb_ticket`, which the auto-trader
   calls: a detector finding nothing is not an attempt, or a bot would write
   thousands of rows a night saying nothing happened.
@@ -584,8 +586,9 @@ successful one**. On 2026-08-25 that left a ticket stuck at `pending` and
 `paper_position.realized_pnl` $132 adrift from the broker's own figure, with
 nothing anywhere saying rows had been lost.
 
-All of those writes now go through `db/session.py:run_write`, which retries
-`database is locked` three times and, if it still fails, counts it.
+All of those writes now go through `db/session.py:run_write`, which allows
+up to three attempts when it hits `database is locked` and, if it still
+fails, counts it.
 `GET /health` reports `dropped_writes` and `last_dropped_write`. **Non-zero
 means the ledger on screen is incomplete** — treat any figure derived from it
 as a lower bound until the count is back to zero.
@@ -595,7 +598,15 @@ logged as itself, so a real bug is never filed as contention.
 
 ## Known defects
 
-None currently tracked.
+**`paper_position.realized_pnl` is understated for rows written before
+2026-08-25.** Lock contention dropped an unknown number of `on_position`
+upserts while every write path swallowed its exception, so the stored
+figure sits $132 below the in-memory broker's own total — the whole gap on
+Polymarket, with Kalshi agreeing to the cent. `run_write` stops further
+loss but cannot reconstruct what was never written, and there is no record
+of what was lost. Treat realized PnL derived from `paper_position` on a
+pre-existing database as a lower bound. A resync from broker state would
+overwrite rather than reconstruct, so it is deliberately not done.
 
 Previously listed here and now fixed (migration `0002`): `paper_position` had no
 `venue_id`, so restart hydration fanned every row out to all three brokers and
