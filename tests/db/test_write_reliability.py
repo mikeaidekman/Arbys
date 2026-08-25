@@ -369,7 +369,7 @@ async def test_pnl_snapshot_write_counts_its_dropped_write(monkeypatch):
     assert "pnl.snapshot" in str(stats["last_dropped_write"])
 
 
-async def test_concurrent_write_burst_and_reads_drop_nothing_under_wal():
+async def test_concurrent_write_burst_and_reads_drop_nothing():
     """The test the spec called for and that was never written.
 
     Every other test in this module injects a synthetic `OperationalError`
@@ -391,6 +391,13 @@ async def test_concurrent_write_burst_and_reads_drop_nothing_under_wal():
     correctness and the discriminating check below is a manual timing
     comparison instead of an assertion (timing assertions in a shared-CI
     test are a flakiness trap).
+
+    So this test is NOT the WAL regression guard, despite driving the
+    contention WAL exists to fix -- it would pass unchanged after a revert to
+    `journal_mode=delete`. The guard is
+    `test_sqlite_connections_are_wal_with_a_busy_timeout`, which asserts the
+    pragma value directly. This one's job is to prove real concurrent writes
+    against a real file drop nothing, which no other test in the module does.
 
     Verified manually by forcing `_SQLITE_PRAGMAS` to `journal_mode=DELETE`
     and running this exact test 10x under each mode: mean 1.78s / median

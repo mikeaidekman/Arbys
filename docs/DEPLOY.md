@@ -375,7 +375,7 @@ jobs:
 
 Deploy with `git tag deploy-$(date +%Y%m%d-%H%M) && git push --tags`.
 
-Run the green-build bar before tagging — 128 tests and `ruff` must be clean.
+Run the green-build bar before tagging — 310 tests and `ruff` must be clean.
 (`mypy` is *not* part of the bar; it has known errors. See CLAUDE.md.)
 
 ---
