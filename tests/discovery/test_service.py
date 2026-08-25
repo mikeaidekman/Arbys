@@ -70,10 +70,6 @@ async def test_run_once_registers_new_groups_and_restarts_ingest(monkeypatch):
     monkeypatch.setattr(service_mod, "fetch_polymarket_us_totals", _empty)
 
     # Bypass DB.
-    fake_scope = MagicMock()
-    fake_scope.__aenter__ = AsyncMock(return_value=MagicMock())
-    fake_scope.__aexit__ = AsyncMock(return_value=None)
-    monkeypatch.setattr(service_mod, "session_scope", lambda: fake_scope)
     monkeypatch.setattr(service_mod, "run_write", _committing_run_write)
     monkeypatch.setattr(service_mod.repo, "upsert_event_group", AsyncMock())
 
@@ -131,10 +127,6 @@ async def test_run_once_noop_when_group_unchanged(monkeypatch):
     monkeypatch.setattr(service_mod, "fetch_polymarket_us_tennis", _empty)
     monkeypatch.setattr(service_mod, "fetch_kalshi_totals", _empty)
     monkeypatch.setattr(service_mod, "fetch_polymarket_us_totals", _empty)
-    fake_scope = MagicMock()
-    fake_scope.__aenter__ = AsyncMock(return_value=MagicMock())
-    fake_scope.__aexit__ = AsyncMock(return_value=None)
-    monkeypatch.setattr(service_mod, "session_scope", lambda: fake_scope)
     monkeypatch.setattr(service_mod, "run_write", _committing_run_write)
     monkeypatch.setattr(service_mod.repo, "upsert_event_group", AsyncMock())
 
@@ -181,10 +173,7 @@ async def test_run_once_retires_discovered_groups_that_vanish(monkeypatch):
                  "fetch_kalshi_totals", "fetch_polymarket_us_totals"):
         monkeypatch.setattr(service_mod, name, _empty)
 
-    fake_scope = MagicMock()
-    fake_scope.__aenter__ = AsyncMock(return_value=MagicMock())
-    fake_scope.__aexit__ = AsyncMock(return_value=None)
-    monkeypatch.setattr(service_mod, "session_scope", lambda: fake_scope)
+    monkeypatch.setattr(service_mod, "run_write", _committing_run_write)
     monkeypatch.setattr(service_mod.repo, "upsert_event_group", AsyncMock())
     deleted = AsyncMock()
     monkeypatch.setattr(service_mod.repo, "delete_event_group", deleted)
@@ -205,6 +194,49 @@ async def test_run_once_retires_discovered_groups_that_vanish(monkeypatch):
     # Its opportunities must go too: once unregistered the engine never
     # re-evaluates it, so nothing else would ever empty the set.
     state.clear_group_opportunities.assert_called_once_with(gone.id)
+
+
+@pytest.mark.asyncio
+async def test_dropped_retire_leaves_app_state_holding_the_group(monkeypatch):
+    """A retire whose DB delete fails to commit must not let AppState un-know
+    a group the database still has.
+
+    Mirrors `test_dropped_batch_leaves_app_state_untouched` for the retire
+    half of `run_once`: `_retire_missing` used to unregister from the engine,
+    clear opportunities, and pop from `AppState.event_groups` *before* the raw
+    DB delete, so a delete that failed left memory ahead of the database --
+    and the next `bootstrap()` rehydrated the "retired" group from the DB,
+    resurrecting the exact delisted-market phantom retirement exists to kill.
+    """
+    stale = EventGroup(
+        id="mlb-STALE-GONE-2026-08-11",
+        title="should have been retired",
+        source="discovery",
+        legs=(EventGroupLeg(outcome_id="x", venue_id="kalshi", is_yes_side=True),),
+    )
+
+    async def fake_discover_all():
+        return [], True  # nothing found this pass -> `stale` looks gone
+
+    monkeypatch.setattr(service_mod, "discover_all_event_groups", fake_discover_all)
+
+    async def _always_dropped(_context, _work):
+        return False
+
+    monkeypatch.setattr(service_mod, "run_write", _always_dropped)
+
+    state = MagicMock()
+    state.event_groups = {stale.id: stale}
+    state.engine = MagicMock()
+    state.restart_ingest = AsyncMock()
+
+    count = await DiscoveryService(state).run_once()
+
+    assert count == 0, "discovery still reports what it found"
+    assert stale.id in state.event_groups, "dropped retire must not un-know a live group"
+    state.engine.unregister_group.assert_not_called()
+    state.clear_group_opportunities.assert_not_called()
+    state.restart_ingest.assert_not_awaited()
 
 
 @pytest.mark.asyncio
@@ -229,10 +261,6 @@ async def test_failed_subpass_does_not_retire_anything(monkeypatch):
         monkeypatch.setattr(service_mod, name, _empty)
     monkeypatch.setattr(service_mod, "fetch_kalshi_team_games", _boom)
 
-    fake_scope = MagicMock()
-    fake_scope.__aenter__ = AsyncMock(return_value=MagicMock())
-    fake_scope.__aexit__ = AsyncMock(return_value=None)
-    monkeypatch.setattr(service_mod, "session_scope", lambda: fake_scope)
     monkeypatch.setattr(service_mod.repo, "upsert_event_group", AsyncMock())
     deleted = AsyncMock()
     monkeypatch.setattr(service_mod.repo, "delete_event_group", deleted)
@@ -274,10 +302,6 @@ async def test_polymarket_us_outage_does_not_retire_anything(monkeypatch):
         monkeypatch.setattr(service_mod, name, _empty)
     monkeypatch.setattr(service_mod, "fetch_polymarket_us_games", _boom)
 
-    fake_scope = MagicMock()
-    fake_scope.__aenter__ = AsyncMock(return_value=MagicMock())
-    fake_scope.__aexit__ = AsyncMock(return_value=None)
-    monkeypatch.setattr(service_mod, "session_scope", lambda: fake_scope)
     monkeypatch.setattr(service_mod.repo, "upsert_event_group", AsyncMock())
     monkeypatch.setattr(service_mod.repo, "delete_event_group", AsyncMock())
 
@@ -304,9 +328,9 @@ async def test_run_once_batches_group_writes():
     failure into every group lost, so the batch size is asserted here too.
     """
     groups = [_stub_group(f"eg-{i}") for i in range(120)]
-    # 120 groups in batches of 50 -> 3 transactions, not 120.
+    # 120 groups in batches of 5 -> 24 transactions, not 120.
     written = service_mod._batch(groups, service_mod.GROUP_WRITE_BATCH)
-    assert [len(b) for b in written] == [50, 50, 20]
+    assert [len(b) for b in written] == [5] * 24
 
 
 @pytest.mark.asyncio

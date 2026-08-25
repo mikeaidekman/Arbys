@@ -8,7 +8,7 @@ import logging
 import os
 
 from ..db import repositories as repo
-from ..db.session import run_write, session_scope
+from ..db.session import run_write
 from ..shared.types import EventGroup
 from .kalshi_sports import fetch_kalshi_team_games
 from .kalshi_tennis import UFC_SERIES, fetch_kalshi_tennis_matches
@@ -216,7 +216,22 @@ async def discover_all_event_groups() -> tuple[list[EventGroup], bool]:
 # after a restart a burst of ~567 lock acquisitions; one transaction for the
 # whole pass would instead hold the write lock for its entire duration and lose
 # every group on a single failure.
-GROUP_WRITE_BATCH = 50
+#
+# The size is chosen against a measurement, not "fewer lock acquisitions" —
+# under WAL + synchronous=NORMAL, per-commit fsync is gone, so many small
+# transactions are cheap and batch 50 sits on the *slow* side of the
+# throughput curve: measured on a 567-group pass, batch 5 finished in 8.8s
+# and batch 50 in 11.0s (batch 1 was 13.1s, one giant transaction 14.8s).
+# What batch 50 actually costs is lock-hold time in front of a concurrent
+# writer: with one competing trade-path write running at the same time,
+# p50 blocking was 64ms at batch 1, 4.7s at batch 10, and 8.4s at batch 50
+# -- roughly 130x worse than batch 1 for a slower pass. `submit_arb_ticket`
+# awaits its ticket insert through `run_write` before the router submits, so
+# an 8s stall there is 8 seconds of stale `limit_price` by the time the
+# router acts on it -- long enough for the broker to reject the fill as
+# `limit_exceeded`. Batch 5 keeps lock-hold time bounded and is on the fast
+# side of the pass-time curve too.
+GROUP_WRITE_BATCH = 5
 
 
 def _batch(items: list, size: int) -> list[list]:
@@ -321,6 +336,22 @@ class DiscoveryService:
 
         Only ``source="discovery"`` groups are eligible; anything registered by
         hand is left alone.
+
+        DB-first, mirroring the upsert half of `run_once`: a group is only
+        unregistered from the engine and dropped from `AppState` once its
+        delete has actually committed. This used to run the other way around
+        — mutate memory, then a raw `session_scope` delete — so a delete that
+        raised propagated past `run_once` into `_run`'s catch-all with memory
+        already retired and the DB not: `restart_ingest` was never reached
+        (for groups that *did* commit, either), and the next `bootstrap()`
+        rehydrated the "retired" group from the DB, resurrecting exactly the
+        delisted-market phantom this method exists to kill.
+
+        One `run_write` per group rather than a batch: retirements are rare
+        (unlike the upsert burst this mirrors, which can be hundreds of groups
+        on a cold start), so there is no throughput case to make for batching,
+        and one-per-group keeps a dropped delete scoped to the single group it
+        failed for instead of complicating which group in a batch to blame.
         """
         stale = [
             gid
@@ -329,15 +360,31 @@ class DiscoveryService:
         ]
         if not stale:
             return False
+        retired: list[str] = []
         for gid in stale:
+
+            async def _delete(session, gid=gid):
+                await repo.delete_event_group(session, gid)
+
+            if not await run_write("discovery.retire", _delete):
+                log.warning(
+                    "discovery: retiring group %s was dropped; leaving "
+                    "AppState holding it so it cannot resurrect a group the "
+                    "DB never lost",
+                    gid,
+                )
+                continue
             self._state.engine.unregister_group(gid)
             # Must come after unregistering: once unregistered the engine never
             # re-evaluates the group, so nothing else would ever empty its set.
             self._state.clear_group_opportunities(gid)
             self._state.event_groups.pop(gid, None)
-            async with session_scope() as session:
-                await repo.delete_event_group(session, gid)
-        log.info("discovery: retired %d group(s) no longer offered: %s", len(stale), stale[:5])
+            retired.append(gid)
+        if not retired:
+            return False
+        log.info(
+            "discovery: retired %d group(s) no longer offered: %s", len(retired), retired[:5]
+        )
         return True
 
     async def _run(self) -> None:
