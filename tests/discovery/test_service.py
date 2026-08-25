@@ -10,6 +10,25 @@ from arbys.discovery.teams import MLB_RESOLVER
 from arbys.shared.types import EventGroup, EventGroupLeg
 
 
+def _stub_group(group_id: str) -> EventGroup:
+    return EventGroup(
+        id=group_id,
+        title=f"stub {group_id}",
+        legs=(
+            EventGroupLeg(outcome_id=f"{group_id}-a", venue_id="kalshi", is_yes_side=True),
+            EventGroupLeg(
+                outcome_id=f"{group_id}-b", venue_id="polymarket_us", is_yes_side=False
+            ),
+        ),
+    )
+
+
+async def _committing_run_write(_context, work):
+    """Stand-in for `run_write` that always commits, against a fake session."""
+    await work(MagicMock())
+    return True
+
+
 @pytest.mark.asyncio
 async def test_run_once_registers_new_groups_and_restarts_ingest(monkeypatch):
     lad = MLB_RESOLVER.by_code("LAD")
@@ -55,6 +74,7 @@ async def test_run_once_registers_new_groups_and_restarts_ingest(monkeypatch):
     fake_scope.__aenter__ = AsyncMock(return_value=MagicMock())
     fake_scope.__aexit__ = AsyncMock(return_value=None)
     monkeypatch.setattr(service_mod, "session_scope", lambda: fake_scope)
+    monkeypatch.setattr(service_mod, "run_write", _committing_run_write)
     monkeypatch.setattr(service_mod.repo, "upsert_event_group", AsyncMock())
 
     state = MagicMock()
@@ -115,6 +135,7 @@ async def test_run_once_noop_when_group_unchanged(monkeypatch):
     fake_scope.__aenter__ = AsyncMock(return_value=MagicMock())
     fake_scope.__aexit__ = AsyncMock(return_value=None)
     monkeypatch.setattr(service_mod, "session_scope", lambda: fake_scope)
+    monkeypatch.setattr(service_mod, "run_write", _committing_run_write)
     monkeypatch.setattr(service_mod.repo, "upsert_event_group", AsyncMock())
 
     state = MagicMock()
@@ -268,3 +289,52 @@ async def test_polymarket_us_outage_does_not_retire_anything(monkeypatch):
     await DiscoveryService(state).run_once()
 
     assert existing.id in state.event_groups, "retired on a Polymarket US outage"
+
+
+async def test_run_once_batches_group_writes():
+    """One transaction per group starved the other writers.
+
+    The first pass after a restart rewrites every group — 567 of them live —
+    and each took the single SQLite write lock in turn while the PnL
+    snapshotter and the broker's sink tried to interleave. Batching cuts the
+    lock acquisitions by the batch size.
+
+    A single transaction for all of them would be the wrong end of the
+    trade-off: it holds the write lock for the whole pass and turns one
+    failure into every group lost, so the batch size is asserted here too.
+    """
+    groups = [_stub_group(f"eg-{i}") for i in range(120)]
+    # 120 groups in batches of 50 -> 3 transactions, not 120.
+    written = service_mod._batch(groups, service_mod.GROUP_WRITE_BATCH)
+    assert [len(b) for b in written] == [50, 50, 20]
+
+
+@pytest.mark.asyncio
+async def test_dropped_batch_leaves_app_state_untouched(monkeypatch):
+    """A batch that fails to commit must not let AppState claim a group the
+    database has never seen — that divergence is worse than the write burst
+    this batching exists to fix.
+    """
+    group = _stub_group("eg-dropped")
+
+    async def fake_discover_all():
+        return [group], True
+
+    monkeypatch.setattr(service_mod, "discover_all_event_groups", fake_discover_all)
+
+    async def _always_dropped(_context, _work):
+        return False
+
+    monkeypatch.setattr(service_mod, "run_write", _always_dropped)
+
+    state = MagicMock()
+    state.event_groups = {}
+    state.engine = MagicMock()
+    state.restart_ingest = AsyncMock()
+
+    count = await DiscoveryService(state).run_once()
+
+    assert count == 1, "discovery still reports what it found"
+    assert group.id not in state.event_groups, "dropped batch must not be applied"
+    state.engine.register_group.assert_not_called()
+    state.restart_ingest.assert_not_awaited()

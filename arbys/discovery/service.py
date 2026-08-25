@@ -8,7 +8,7 @@ import logging
 import os
 
 from ..db import repositories as repo
-from ..db.session import session_scope
+from ..db.session import run_write, session_scope
 from ..shared.types import EventGroup
 from .kalshi_sports import fetch_kalshi_team_games
 from .kalshi_tennis import UFC_SERIES, fetch_kalshi_tennis_matches
@@ -212,6 +212,17 @@ async def discover_all_event_groups() -> tuple[list[EventGroup], bool]:
     return groups, complete
 
 
+# Groups per upsert transaction. One transaction per group made the first pass
+# after a restart a burst of ~567 lock acquisitions; one transaction for the
+# whole pass would instead hold the write lock for its entire duration and lose
+# every group on a single failure.
+GROUP_WRITE_BATCH = 50
+
+
+def _batch(items: list, size: int) -> list[list]:
+    return [items[i : i + size] for i in range(0, len(items), size)]
+
+
 class DiscoveryService:
     """Periodically re-runs discovery and syncs event groups into AppState.
 
@@ -257,20 +268,35 @@ class DiscoveryService:
             log.exception("discovery pass failed")
             return 0
 
+        pending = [
+            (group, self._state.event_groups.get(group.id))
+            for group in groups
+            if self._state.event_groups.get(group.id) != group
+        ]
+
         changed = False
-        for group in groups:
-            existing = self._state.event_groups.get(group.id)
-            if existing == group:
+        for batch in _batch(pending, GROUP_WRITE_BATCH):
+
+            async def _write(session, batch=batch):
+                for group, _existing in batch:
+                    await repo.upsert_event_group(session, group)
+
+            if not await run_write("discovery.groups", _write):
+                log.warning(
+                    "discovery: a batch of %d group upserts was dropped; "
+                    "leaving AppState untouched for them so it cannot claim "
+                    "groups the DB has never seen",
+                    len(batch),
+                )
                 continue
-            async with session_scope() as session:
-                await repo.upsert_event_group(session, group)
-            self._state.event_groups[group.id] = group
-            if existing is None:
-                self._state.engine.register_group(group)
-            else:
-                self._state.engine.unregister_group(group.id)
-                self._state.engine.register_group(group)
-            changed = True
+            for group, existing in batch:
+                self._state.event_groups[group.id] = group
+                if existing is None:
+                    self._state.engine.register_group(group)
+                else:
+                    self._state.engine.unregister_group(group.id)
+                    self._state.engine.register_group(group)
+                changed = True
 
         if complete:
             changed |= await self._retire_missing({g.id for g in groups})
