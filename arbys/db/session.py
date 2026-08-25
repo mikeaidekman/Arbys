@@ -2,18 +2,23 @@
 
 from __future__ import annotations
 
+import asyncio
+import logging
 import os
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Awaitable, Callable
 from contextlib import asynccontextmanager
 
 from sqlalchemy import event
 from sqlalchemy.engine import make_url
+from sqlalchemy.exc import OperationalError
 from sqlalchemy.ext.asyncio import (
     AsyncEngine,
     AsyncSession,
     async_sessionmaker,
     create_async_engine,
 )
+
+log = logging.getLogger(__name__)
 
 DEFAULT_DB_URL = "sqlite+aiosqlite:///./arbys-local.db"
 
@@ -121,4 +126,75 @@ async def create_all() -> None:
     engine = get_engine()
     async with engine.begin() as conn:
         await conn.run_sync(Base.metadata.create_all)
+
+
+# ----------------------------------------------------------------------
+# Write reliability: retry lock contention, count what we finally abandon.
+#
+# Every write path in the paper broker and ticket service swallows its
+# exception on purpose -- persistence must never break a trade -- but that
+# made a lost row indistinguishable from a successful one. WAL (see the
+# pragmas above) substantially reduces lock contention but does not
+# eliminate it, so a retry still earns its keep.
+# ----------------------------------------------------------------------
+
+_WRITE_ATTEMPTS = 3
+_WRITE_BACKOFF_S = 0.05
+
+_dropped_writes = 0
+_last_dropped_write: str | None = None
+
+
+def dropped_write_stats() -> dict[str, object]:
+    """Counts of persistence writes this process gave up on.
+
+    Non-zero means the ledger is incomplete. Every write path in the paper
+    broker and ticket service swallows its exception on purpose -- persistence
+    must never break a trade -- so without this a lost row is invisible and the
+    audit page presents a partial history as the whole.
+    """
+    return {"dropped_writes": _dropped_writes, "last_dropped_write": _last_dropped_write}
+
+
+def reset_dropped_writes() -> None:
+    global _dropped_writes, _last_dropped_write
+    _dropped_writes = 0
+    _last_dropped_write = None
+
+
+def _record_dropped_write(context: str, exc: BaseException) -> None:
+    global _dropped_writes, _last_dropped_write
+    _dropped_writes += 1
+    _last_dropped_write = f"{context}: {type(exc).__name__}: {exc}"
+
+
+def _is_locked(exc: BaseException) -> bool:
+    return isinstance(exc, OperationalError) and "database is locked" in str(exc).lower()
+
+
+async def run_write(
+    context: str, work: Callable[[AsyncSession], Awaitable[None]]
+) -> bool:
+    """Run one write transaction, retrying lock contention. Never raises.
+
+    Returns True if it committed. Returns False -- and counts a dropped write
+    -- if it gave up. `context` names the write for the counter, e.g.
+    "ticket.status" or "sink.on_fill".
+
+    Only `database is locked` is retried. Anything else is a real bug and is
+    counted once rather than masked as contention.
+    """
+    for attempt in range(1, _WRITE_ATTEMPTS + 1):
+        try:
+            async with session_scope() as session:
+                await work(session)
+            return True
+        except Exception as exc:  # callers must never see this -- see run_write's docstring
+            if _is_locked(exc) and attempt < _WRITE_ATTEMPTS:
+                await asyncio.sleep(_WRITE_BACKOFF_S * attempt)
+                continue
+            log.exception("persistence write abandoned (%s)", context)
+            _record_dropped_write(context, exc)
+            return False
+    return False
 

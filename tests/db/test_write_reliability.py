@@ -78,3 +78,89 @@ async def test_memory_sqlite_still_configures():
     """
     engine = db_session.configure_engine("sqlite+aiosqlite:///:memory:")
     assert engine.dialect.name == "sqlite"
+
+
+async def test_run_write_commits_and_reports_success():
+    from arbys.db import repositories as repo
+    from arbys.db.session import create_all, run_write
+
+    await create_all()
+    ok = await run_write(
+        "test.account", lambda s: repo.ensure_paper_account(s, "acct-ok")
+    )
+    assert ok is True
+    assert db_session.dropped_write_stats()["dropped_writes"] == 0
+
+
+async def test_run_write_retries_a_locked_database_then_succeeds():
+    """`database is locked` is transient by nature: the point of retrying is
+    that the burst which caused it has usually passed a few milliseconds
+    later. A retried write must not be counted as dropped."""
+    from sqlalchemy.exc import OperationalError
+
+    from arbys.db.session import create_all, run_write
+
+    await create_all()
+    db_session.reset_dropped_writes()
+    attempts = {"n": 0}
+
+    async def work(_session):
+        attempts["n"] += 1
+        if attempts["n"] < 3:
+            raise OperationalError("stmt", {}, Exception("database is locked"))
+
+    ok = await run_write("test.retry", work)
+    assert ok is True
+    assert attempts["n"] == 3
+    assert db_session.dropped_write_stats()["dropped_writes"] == 0
+
+
+async def test_run_write_counts_a_write_it_finally_abandons():
+    """The defect this whole plan exists for: a swallowed write used to be
+    indistinguishable from a successful one."""
+    from sqlalchemy.exc import OperationalError
+
+    from arbys.db.session import create_all, run_write
+
+    await create_all()
+    db_session.reset_dropped_writes()
+
+    async def always_locked(_session):
+        raise OperationalError("stmt", {}, Exception("database is locked"))
+
+    ok = await run_write("test.always", always_locked)
+    assert ok is False
+    stats = db_session.dropped_write_stats()
+    assert stats["dropped_writes"] == 1
+    assert "test.always" in str(stats["last_dropped_write"])
+
+
+async def test_run_write_does_not_retry_a_non_lock_error():
+    """A genuine bug must not be retried three times and filed as
+    contention — it is counted once and logged as itself."""
+    from arbys.db.session import create_all, run_write
+
+    await create_all()
+    db_session.reset_dropped_writes()
+    attempts = {"n": 0}
+
+    async def boom(_session):
+        attempts["n"] += 1
+        raise ValueError("not a lock")
+
+    ok = await run_write("test.bug", boom)
+    assert ok is False
+    assert attempts["n"] == 1
+    assert db_session.dropped_write_stats()["dropped_writes"] == 1
+
+
+async def test_run_write_never_raises():
+    """Callers rely on this: a broken trade is worse than an unrecorded one."""
+    from arbys.db.session import create_all, run_write
+
+    await create_all()
+
+    async def boom(_session):
+        raise RuntimeError("anything")
+
+    assert await run_write("test.noraise", boom) is False

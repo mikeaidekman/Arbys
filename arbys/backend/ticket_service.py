@@ -18,23 +18,22 @@ thousands of rows a night saying nothing happened.
 
 from __future__ import annotations
 
-import logging
 import uuid
 from dataclasses import dataclass
 from decimal import Decimal
 from typing import TYPE_CHECKING
 
+from sqlalchemy.ext.asyncio import AsyncSession
+
 from ..adapters.base import ExecutionIntent, IntentLeg
 from ..db import repositories as repo
-from ..db.session import session_scope
+from ..db.session import run_write
 from ..shared.arb_engine import ArbOpportunity
 from ..shared.execution_router import InsufficientLegsError
 from .state import max_outcome_qty
 
 if TYPE_CHECKING:  # pragma: no cover - import cycle guard
     from .state import AppState
-
-log = logging.getLogger(__name__)
 
 
 @dataclass(frozen=True)
@@ -77,49 +76,55 @@ async def _write_ticket(
     source: str, status: str, reason: str | None,
     economics: ArbOpportunity | None,
 ) -> None:
-    """Persist the ticket. Never raises: an unrecorded ticket is acceptable,
-    a broken trade is not."""
-    try:
-        async with session_scope() as session:
-            # A non-default account_id may never have had a paper_account
-            # row created for it. On Postgres that makes the ticket's FK
-            # fail, which this try/except swallows -- so with no ticket row,
-            # the sink's paper_order.ticket_id FK then fails too (swallowed
-            # by _emit), and a trade executes in memory with zero database
-            # rows. ensure_paper_account is idempotent, so this is free on
-            # the common "default" path.
-            await repo.ensure_paper_account(session, account_id)
-            await repo.insert_paper_ticket(
-                session,
-                ticket_id=ticket_id,
-                account_id=account_id,
-                event_group_id=opp.event_group_id,
-                title_snapshot=title,
-                source=source,
-                status=status,
-                rejection_reason=reason,
-                total_stake=None if economics is None else economics.total_stake,
-                expected_profit=(
-                    None if economics is None else economics.guaranteed_profit
-                ),
-                expected_edge_bps=(
-                    None if economics is None else economics.guaranteed_profit_bps
-                ),
-            )
-    except Exception:
-        log.exception("ticket write failed for %s", ticket_id)
+    """Persist the ticket.
+
+    Never raises: an unrecorded ticket is acceptable, a broken trade is not.
+    A write abandoned here is counted in `dropped_write_stats()`.
+    """
+
+    async def work(session: AsyncSession) -> None:
+        # A non-default account_id may never have had a paper_account row
+        # created for it. On Postgres that makes the ticket's FK fail, which
+        # run_write's retry-then-count handles -- so with no ticket row, the
+        # sink's paper_order.ticket_id FK then fails too (also counted), and a
+        # trade executes in memory with zero database rows. ensure_paper_account
+        # is idempotent, so this is free on the common "default" path.
+        await repo.ensure_paper_account(session, account_id)
+        await repo.insert_paper_ticket(
+            session,
+            ticket_id=ticket_id,
+            account_id=account_id,
+            event_group_id=opp.event_group_id,
+            title_snapshot=title,
+            source=source,
+            status=status,
+            rejection_reason=reason,
+            total_stake=None if economics is None else economics.total_stake,
+            expected_profit=(
+                None if economics is None else economics.guaranteed_profit
+            ),
+            expected_edge_bps=(
+                None if economics is None else economics.guaranteed_profit_bps
+            ),
+        )
+
+    await run_write("ticket.insert", work)
 
 
 async def _set_status(ticket_id: str, *, status: str, reason: str | None) -> None:
-    """Move a pending ticket to its final status. Never raises: an unrecorded
-    ticket is acceptable, a broken trade is not."""
-    try:
-        async with session_scope() as session:
-            await repo.update_paper_ticket_status(
-                session, ticket_id, status=status, rejection_reason=reason
-            )
-    except Exception:
-        log.exception("ticket status update failed for %s", ticket_id)
+    """Move a pending ticket to its final status.
+
+    Never raises. A write abandoned here is counted in
+    `dropped_write_stats()` -- this is the path that left a ticket stuck at
+    `pending` on 2026-08-25, because the lock error was swallowed with no
+    trace.
+    """
+    await run_write(
+        "ticket.status",
+        lambda s: repo.update_paper_ticket_status(
+            s, ticket_id, status=status, rejection_reason=reason
+        ),
+    )
 
 
 async def _write_rejected_legs(
@@ -129,26 +134,27 @@ async def _write_rejected_legs(
     """One row per attempted leg, so the attempted prices are recorded.
 
     A leg that previewed fine still gets a row: the ticket failed as a whole
-    and no leg was submitted.
+    and no leg was submitted. All legs are written in a single `run_write`
+    call so the batch stays atomic -- one transaction, all legs or none.
     """
-    try:
-        async with session_scope() as session:
-            for leg in live.legs:
-                await repo.insert_paper_order(
-                    session,
-                    order_id=uuid.uuid4().hex,
-                    account_id=account_id,
-                    venue_id=leg.venue_id,
-                    outcome_id=leg.outcome_id,
-                    is_buy=leg.is_buy,
-                    qty=leg.qty,
-                    limit_price=leg.price,
-                    status="rejected",
-                    rejection_reason=reasons.get(leg.outcome_id, "ticket_rejected"),
-                    ticket_id=ticket_id,
-                )
-    except Exception:
-        log.exception("rejected-leg write failed for %s", ticket_id)
+
+    async def work(session: AsyncSession) -> None:
+        for leg in live.legs:
+            await repo.insert_paper_order(
+                session,
+                order_id=uuid.uuid4().hex,
+                account_id=account_id,
+                venue_id=leg.venue_id,
+                outcome_id=leg.outcome_id,
+                is_buy=leg.is_buy,
+                qty=leg.qty,
+                limit_price=leg.price,
+                status="rejected",
+                rejection_reason=reasons.get(leg.outcome_id, "ticket_rejected"),
+                ticket_id=ticket_id,
+            )
+
+    await run_write("ticket.rejected_legs", work)
 
 
 def _cap_breach(state: AppState, live: ArbOpportunity, account_id: str) -> str | None:

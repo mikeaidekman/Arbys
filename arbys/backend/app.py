@@ -14,7 +14,7 @@ from fastapi import FastAPI, HTTPException, WebSocket, WebSocketDisconnect
 load_dotenv()
 
 from ..db import repositories as repo  # noqa: E402
-from ..db.session import session_scope  # noqa: E402
+from ..db.session import dropped_write_stats, session_scope  # noqa: E402
 from ..shared.arb_engine import (  # noqa: E402
     DEFAULT_QTY_TICK,
     leg_unit_cost,
@@ -102,8 +102,8 @@ def create_app() -> FastAPI:
     app = FastAPI(title="Arbys", version="0.1.0", lifespan=lifespan)
 
     @app.get("/health")
-    async def health() -> dict[str, str]:
-        return {"status": "ok"}
+    async def health() -> dict[str, object]:
+        return {"status": "ok", **dropped_write_stats()}
 
     # ------------------------------------------------------------------
     # Event group management (v1 curated allowlist)

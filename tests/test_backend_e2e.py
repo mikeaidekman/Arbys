@@ -23,6 +23,11 @@ def _reset_state(tmp_path: Path):
     db_file = tmp_path / "arbys-test.db"
     os.environ["ARBYS_DB_URL"] = f"sqlite+aiosqlite:///{db_file}"
     db_session.reset_engine()
+    # `dropped_write_stats()` is a process-wide counter, not per-engine — an
+    # earlier file's retry tests (tests/db/test_write_reliability.py) leave it
+    # non-zero, which would make test_health_reports_dropped_writes flaky
+    # depending on run order rather than on anything this test does.
+    db_session.reset_dropped_writes()
     state_module.reset_state()
     yield
     db_session.reset_engine()
@@ -829,3 +834,13 @@ def test_position_event_group_id_survives_group_deletion():
         assert client.delete("/event-groups/eg-orphan").status_code == 204
         positions = client.get("/paper/default/positions").json()
         assert {p["event_group_id"] for p in positions} == {"eg-orphan"}
+
+
+def test_health_reports_dropped_writes():
+    """A non-zero count means the ledger on screen is incomplete. Surfacing it
+    is what turns silent data loss into something observable."""
+    with TestClient(create_app()) as client:
+        body = client.get("/health").json()
+        assert body["status"] == "ok"
+        assert body["dropped_writes"] == 0
+        assert body["last_dropped_write"] is None

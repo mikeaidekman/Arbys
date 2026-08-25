@@ -11,14 +11,16 @@ from decimal import Decimal
 
 from ..adapters.base import Fill, Order, OrderStatus
 from ..db import repositories as repo
-from ..db.session import session_scope
+from ..db.session import run_write
 
 
 class DbPaperPersistenceSink:
     async def on_order(self, order: Order, *, rejection_reason: str | None = None) -> None:
-        async with session_scope() as session:
-            await repo.insert_paper_order(
-                session,
+        status = order.status.value if isinstance(order.status, OrderStatus) else str(order.status)
+        await run_write(
+            "sink.on_order",
+            lambda s: repo.insert_paper_order(
+                s,
                 order_id=order.id,
                 account_id="",  # populated via wrapper below; sinks are per-account in v2
                 venue_id=order.venue_id,
@@ -26,22 +28,27 @@ class DbPaperPersistenceSink:
                 is_buy=order.is_buy,
                 qty=order.qty,
                 limit_price=order.limit_price,
-                status=order.status.value if isinstance(order.status, OrderStatus) else str(order.status),
+                status=status,
                 rejection_reason=rejection_reason,
                 ticket_id=order.ticket_id,
-            )
+            ),
+        )
 
     async def on_fill(self, order: Order, fill: Fill) -> None:
-        async with session_scope() as session:
-            await repo.insert_paper_fill(
-                session, order_id=order.id, qty=fill.qty, price=fill.price, fee=fill.fee
-            )
+        await run_write(
+            "sink.on_fill",
+            lambda s: repo.insert_paper_fill(
+                s, order_id=order.id, qty=fill.qty, price=fill.price, fee=fill.fee
+            ),
+        )
 
     async def on_balance(self, account_id: str, venue_id: str, amount: Decimal) -> None:
-        async with session_scope() as session:
-            await repo.upsert_paper_balance(
-                session, account_id=account_id, venue_id=venue_id, amount=amount
-            )
+        await run_write(
+            "sink.on_balance",
+            lambda s: repo.upsert_paper_balance(
+                s, account_id=account_id, venue_id=venue_id, amount=amount
+            ),
+        )
 
     async def on_position(
         self,
@@ -53,28 +60,32 @@ class DbPaperPersistenceSink:
         *,
         venue_id: str,
     ) -> None:
-        async with session_scope() as session:
-            await repo.upsert_paper_position(
-                session,
+        await run_write(
+            "sink.on_position",
+            lambda s: repo.upsert_paper_position(
+                s,
                 account_id=account_id,
                 venue_id=venue_id,
                 outcome_id=outcome_id,
                 qty=qty,
                 avg_price=avg_price,
                 realized_pnl=realized_pnl,
-            )
+            ),
+        )
 
     async def on_settlement(
         self, outcome_id: str, resolved_value: Decimal, *, venue_id: str, source: str
     ) -> None:
-        async with session_scope() as session:
-            await repo.insert_paper_settlement(
-                session,
+        await run_write(
+            "sink.on_settlement",
+            lambda s: repo.insert_paper_settlement(
+                s,
                 outcome_id=outcome_id,
                 venue_id=venue_id,
                 resolved_value=resolved_value,
                 source=source,
-            )
+            ),
+        )
 
 
 class AccountScopedSink:
@@ -86,9 +97,11 @@ class AccountScopedSink:
 
     async def on_order(self, order: Order, *, rejection_reason: str | None = None) -> None:
         # Route through the inner sink but inject account_id.
-        async with session_scope() as session:
-            await repo.insert_paper_order(
-                session,
+        status = order.status.value if isinstance(order.status, OrderStatus) else str(order.status)
+        await run_write(
+            "sink.on_order.scoped",
+            lambda s: repo.insert_paper_order(
+                s,
                 order_id=order.id,
                 account_id=self._account_id,
                 venue_id=order.venue_id,
@@ -96,10 +109,11 @@ class AccountScopedSink:
                 is_buy=order.is_buy,
                 qty=order.qty,
                 limit_price=order.limit_price,
-                status=order.status.value if isinstance(order.status, OrderStatus) else str(order.status),
+                status=status,
                 rejection_reason=rejection_reason,
                 ticket_id=order.ticket_id,
-            )
+            ),
+        )
 
     async def on_fill(self, order: Order, fill: Fill) -> None:
         await self._inner.on_fill(order, fill)
