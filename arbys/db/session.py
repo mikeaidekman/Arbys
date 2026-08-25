@@ -11,6 +11,7 @@ from contextlib import asynccontextmanager
 from sqlalchemy import event
 from sqlalchemy.engine import make_url
 from sqlalchemy.exc import OperationalError
+from sqlalchemy.exc import TimeoutError as SATimeoutError
 from sqlalchemy.ext.asyncio import (
     AsyncEngine,
     AsyncSession,
@@ -74,10 +75,19 @@ def configure_engine(url: str | None = None) -> AsyncEngine:
     global _engine, _session_factory
     resolved = url or _get_db_url()
     kwargs: dict[str, object] = {"pool_pre_ping": True, "future": True}
-    backend = make_url(resolved).get_backend_name()
+    parsed = make_url(resolved)
+    backend = parsed.get_backend_name()
     # An in-memory SQLite database uses a pool class that rejects these, and
     # sizing it would be meaningless anyway.
-    if ":memory:" not in resolved:
+    #
+    # `:memory:` is not the only spelling: `sqlite+aiosqlite://` (no database
+    # part at all) is also legal and also in-memory, and `make_url(...).database`
+    # is `None` for it rather than the literal string `":memory:"` -- so a
+    # substring check on the raw URL misses it and `create_async_engine` dies
+    # with `TypeError: Invalid argument(s) 'pool_size','max_overflow'`, which
+    # is exactly the crash this guard exists to prevent. Check the parsed
+    # database instead of the raw URL text.
+    if parsed.database not in (None, ":memory:"):
         kwargs["pool_size"] = 10
         kwargs["max_overflow"] = 20
     _engine = create_async_engine(resolved, **kwargs)
@@ -152,6 +162,12 @@ def dropped_write_stats() -> dict[str, object]:
     broker and ticket service swallows its exception on purpose -- persistence
     must never break a trade -- so without this a lost row is invisible and the
     audit page presents a partial history as the whole.
+
+    This counts **transactions abandoned, not rows lost**: one dropped
+    `discovery.groups` batch is up to `GROUP_WRITE_BATCH` missing groups
+    reported as 1, and one dropped `ticket.rejected_legs` write is N missing
+    leg rows reported as 1. Treat `dropped_writes` as a lower bound on how
+    much data is actually missing, not an exact row count.
     """
     return {"dropped_writes": _dropped_writes, "last_dropped_write": _last_dropped_write}
 
@@ -168,21 +184,39 @@ def _record_dropped_write(context: str, exc: BaseException) -> None:
     _last_dropped_write = f"{context}: {type(exc).__name__}: {exc}"
 
 
-def _is_locked(exc: BaseException) -> bool:
+def _is_transient(exc: BaseException) -> bool:
+    """Whether `exc` is worth retrying rather than counting as a dropped write.
+
+    Two shapes, both observed in a single day against this app: a `database
+    is locked` `OperationalError` from SQLite lock contention, and a
+    `sqlalchemy.exc.TimeoutError` from the QueuePool running out of
+    connections under load. `TimeoutError` is **not** a subclass of
+    `OperationalError` (verified against SQLAlchemy 2.0.51), so a naive
+    `isinstance(exc, OperationalError)` check silently abandons a pool
+    timeout on the first attempt -- despite it being the most transient of
+    the two: the pool drains as in-flight work finishes, with no lock to
+    wait out.
+
+    Anything else is a real bug and must not be retried three times and
+    filed as contention -- it is counted once and logged as itself.
+    """
+    if isinstance(exc, SATimeoutError):
+        return True
     return isinstance(exc, OperationalError) and "database is locked" in str(exc).lower()
 
 
 async def run_write(
     context: str, work: Callable[[AsyncSession], Awaitable[None]]
 ) -> bool:
-    """Run one write transaction, retrying lock contention. Never raises.
+    """Run one write transaction, retrying transient failures. Never raises.
 
     Returns True if it committed. Returns False -- and counts a dropped write
     -- if it gave up. `context` names the write for the counter, e.g.
     "ticket.status" or "sink.on_fill".
 
-    Only `database is locked` is retried. Anything else is a real bug and is
-    counted once rather than masked as contention.
+    Only a `database is locked` `OperationalError` or a QueuePool
+    `sqlalchemy.exc.TimeoutError` is retried (see `_is_transient`). Anything
+    else is a real bug and is counted once rather than masked as contention.
     """
     for attempt in range(1, _WRITE_ATTEMPTS + 1):
         try:
@@ -190,7 +224,7 @@ async def run_write(
                 await work(session)
             return True
         except Exception as exc:  # callers must never see this -- see run_write's docstring
-            if _is_locked(exc) and attempt < _WRITE_ATTEMPTS:
+            if _is_transient(exc) and attempt < _WRITE_ATTEMPTS:
                 await asyncio.sleep(_WRITE_BACKOFF_S * attempt)
                 continue
             log.exception("persistence write abandoned (%s)", context)

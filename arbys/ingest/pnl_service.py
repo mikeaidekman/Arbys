@@ -13,7 +13,7 @@ import contextlib
 import logging
 
 from ..db import repositories as repo
-from ..db.session import session_scope
+from ..db.session import run_write
 from ..shared.equity import account_equity
 from ..shared.paper_broker import PaperExecutionAdapter
 from ..shared.quotebook import QuoteBook
@@ -52,17 +52,16 @@ class PnlSnapshotService:
     async def snapshot_once(self) -> None:
         for account_id in self._account_ids:
             eq = account_equity(self._brokers, self._book, account_id)
-            try:
-                async with session_scope() as session:
-                    await repo.insert_paper_pnl_snapshot(
-                        session,
-                        account_id=account_id,
-                        cash=eq.cash,
-                        mtm_positions=eq.position_value,
-                        total_equity=eq.equity,
-                    )
-            except Exception:
-                log.exception("pnl snapshot write failed for %s", account_id)
+            await run_write(
+                "pnl.snapshot",
+                lambda s, account_id=account_id, eq=eq: repo.insert_paper_pnl_snapshot(
+                    s,
+                    account_id=account_id,
+                    cash=eq.cash,
+                    mtm_positions=eq.position_value,
+                    total_equity=eq.equity,
+                ),
+            )
 
     async def _run(self) -> None:
         while True:

@@ -10,6 +10,7 @@ one swallowed by a persistence path that must never break a trade.
 from __future__ import annotations
 
 import os
+from decimal import Decimal
 from pathlib import Path
 
 import pytest
@@ -80,6 +81,18 @@ async def test_memory_sqlite_still_configures():
     assert engine.dialect.name == "sqlite"
 
 
+async def test_memory_sqlite_bare_url_spelling_still_configures():
+    """`sqlite+aiosqlite://` (no database part at all) is a second legal
+    in-memory spelling. `make_url(url).database` is `None` for it, not the
+    literal string `":memory:"` -- so a `":memory:" not in resolved` substring
+    check on the raw URL text misses it, and it still gets `StaticPool`
+    (verified against SQLAlchemy 2.0.51), so it hits the exact
+    `pool_size`/`max_overflow` crash the guard exists to prevent.
+    """
+    engine = db_session.configure_engine("sqlite+aiosqlite://")
+    assert engine.dialect.name == "sqlite"
+
+
 async def test_run_write_commits_and_reports_success():
     from arbys.db import repositories as repo
     from arbys.db.session import create_all, run_write
@@ -111,6 +124,34 @@ async def test_run_write_retries_a_locked_database_then_succeeds():
             raise OperationalError("stmt", {}, Exception("database is locked"))
 
     ok = await run_write("test.retry", work)
+    assert ok is True
+    assert attempts["n"] == 3
+    assert db_session.dropped_write_stats()["dropped_writes"] == 0
+
+
+async def test_run_write_retries_a_pool_timeout_then_succeeds():
+    """`sqlalchemy.exc.TimeoutError` (the QueuePool timeout) is not a subclass
+    of `OperationalError` (verified against SQLAlchemy 2.0.51), so a predicate
+    that only checked `isinstance(exc, OperationalError)` abandoned this on
+    the first attempt with no retry -- despite it being one of the two
+    transient error classes the spec measured (6 occurrences in a day) and
+    the more transient of the two: the pool drains as in-flight work
+    finishes, with no lock to wait out.
+    """
+    from sqlalchemy.exc import TimeoutError as SATimeoutError
+
+    from arbys.db.session import create_all, run_write
+
+    await create_all()
+    db_session.reset_dropped_writes()
+    attempts = {"n": 0}
+
+    async def work(_session):
+        attempts["n"] += 1
+        if attempts["n"] < 3:
+            raise SATimeoutError("QueuePool limit exceeded")
+
+    ok = await run_write("test.pool_timeout", work)
     assert ok is True
     assert attempts["n"] == 3
     assert db_session.dropped_write_stats()["dropped_writes"] == 0
@@ -245,3 +286,185 @@ async def test_ticket_status_write_counts_its_dropped_write(monkeypatch):
     stats = db_session.dropped_write_stats()
     assert stats["dropped_writes"] == 1
     assert "ticket.status" in str(stats["last_dropped_write"])
+
+
+async def test_persist_opp_write_counts_its_dropped_write(monkeypatch):
+    """Proves `AppState._persist_opp` goes through `run_write`.
+
+    This used to be a bare `except Exception: pass` -- no log, no count, no
+    retry -- fired fire-and-forget from the engine's hot path on every new
+    opportunity fingerprint, making it the highest-frequency writer in the
+    app and the last fully silent one.
+    """
+    from sqlalchemy.exc import OperationalError
+
+    from arbys.backend import state as state_mod
+    from arbys.db import repositories as repo
+    from arbys.db.session import create_all
+    from arbys.shared.arb_engine import ArbLeg, ArbOpportunity
+
+    await create_all()
+    db_session.reset_dropped_writes()
+
+    async def boom(*_a, **_k):
+        raise OperationalError("stmt", {}, Exception("database is locked"))
+
+    monkeypatch.setattr(repo, "insert_opportunity", boom)
+
+    state = state_mod.AppState()
+    opp = ArbOpportunity(
+        event_group_id="eg",
+        legs=(
+            ArbLeg(
+                outcome_id="y", venue_id="poly", is_buy=True,
+                price=Decimal("0.45"), qty=Decimal("1"), fee=Decimal("0"),
+            ),
+            ArbLeg(
+                outcome_id="n", venue_id="kals", is_buy=True,
+                price=Decimal("0.50"), qty=Decimal("1"), fee=Decimal("0"),
+            ),
+        ),
+        total_stake=Decimal("0.95"),
+        guaranteed_profit=Decimal("0.05"),
+        guaranteed_profit_bps=Decimal("526.3"),
+    )
+
+    # Must not raise.
+    await state._persist_opp(opp)
+
+    stats = db_session.dropped_write_stats()
+    assert stats["dropped_writes"] == 1
+    assert "state.opportunity" in str(stats["last_dropped_write"])
+
+
+async def test_pnl_snapshot_write_counts_its_dropped_write(monkeypatch):
+    """Proves `PnlSnapshotService.snapshot_once` goes through `run_write`.
+
+    Previously this logged the exception and moved on without counting or
+    retrying -- a dropped snapshot is a hole in the equity curve that
+    `/health` had no way to reflect.
+    """
+    from sqlalchemy.exc import OperationalError
+
+    from arbys.db import repositories as repo
+    from arbys.db.session import create_all
+    from arbys.ingest.pnl_service import PnlSnapshotService
+    from arbys.shared.quotebook import QuoteBook
+
+    await create_all()
+    db_session.reset_dropped_writes()
+
+    async def boom(*_a, **_k):
+        raise OperationalError("stmt", {}, Exception("database is locked"))
+
+    monkeypatch.setattr(repo, "insert_paper_pnl_snapshot", boom)
+
+    svc = PnlSnapshotService(brokers={}, quotebook=QuoteBook(), account_ids=["acct-1"])
+
+    # Must not raise.
+    await svc.snapshot_once()
+
+    stats = db_session.dropped_write_stats()
+    assert stats["dropped_writes"] == 1
+    assert "pnl.snapshot" in str(stats["last_dropped_write"])
+
+
+async def test_concurrent_write_burst_and_reads_drop_nothing_under_wal():
+    """The test the spec called for and that was never written.
+
+    Every other test in this module injects a synthetic `OperationalError`
+    from a fake `work` -- proving `run_write`'s retry loop in isolation, but
+    passing byte-identically under `journal_mode=delete` too, because nothing
+    in it touches real SQLite contention. This one drives real concurrent
+    writes -- a discovery-shaped burst of small group upserts racing a
+    snapshot-shaped burst of pnl writes, all gated on an `asyncio.Event` so
+    they genuinely overlap rather than merely interleaving -- against a real
+    file-backed database, while a join-heavy read (`list_event_groups`'s
+    3-table join) holds its transaction open across the whole burst.
+
+    That held read is the one WAL exists to fix: under the pre-WAL `delete`
+    journal mode a writer must wait for every open reader to finish before it
+    can even begin, where under WAL a reader never blocks a writer and vice
+    versa. `busy_timeout=15000` means neither mode ever raises `database is
+    locked` at this scale -- the difference shows up as wall-clock time, not
+    as a dropped write, which is why this asserts `dropped_writes == 0` for
+    correctness and the discriminating check below is a manual timing
+    comparison instead of an assertion (timing assertions in a shared-CI
+    test are a flakiness trap).
+
+    Verified manually by forcing `_SQLITE_PRAGMAS` to `journal_mode=DELETE`
+    and running this exact test 10x under each mode: mean 1.78s / median
+    1.82s under WAL vs mean 2.22s / median 2.05s under DELETE -- individual
+    runs overlap (this machine's own scheduling noise is real), but DELETE
+    was slower in aggregate every time this was repeated, a ~20-25%
+    slowdown from forcing every one of the 30 concurrent writers to queue up
+    behind the held read instead of proceeding alongside it. Two
+    smaller-scale designs (a handful of short-held sequential reads instead
+    of one long-held read gated on all 30 writers at once) did NOT
+    discriminate at all -- their effect was too small relative to this
+    machine's timing noise -- before this one did; see the trustworthy-ledger
+    fix report for the full raw numbers from all three designs.
+    """
+    import asyncio
+
+    from arbys.db import repositories as repo
+    from arbys.db.session import create_all, get_session_factory, run_write
+    from arbys.shared.types import EventGroup, EventGroupLeg
+
+    await create_all()
+    db_session.reset_dropped_writes()
+    factory = get_session_factory()
+
+    def _group(i: int) -> EventGroup:
+        return EventGroup(
+            id=f"burst-eg-{i}",
+            title=f"burst {i}",
+            legs=(
+                EventGroupLeg(outcome_id=f"burst-{i}-a", venue_id="kalshi", is_yes_side=True),
+                EventGroupLeg(
+                    outcome_id=f"burst-{i}-b", venue_id="polymarket_us", is_yes_side=False
+                ),
+            ),
+        )
+
+    reader_ready = asyncio.Event()
+
+    async def held_read() -> None:
+        async with factory() as session:
+            await repo.list_event_groups(session)
+            reader_ready.set()
+            # Hold the read transaction open across the writer burst below --
+            # long enough that a writer under `delete` journal mode has to
+            # wait on it, which is exactly the blocking WAL removes.
+            await asyncio.sleep(1.0)
+
+    async def group_write(i: int) -> bool:
+        await reader_ready.wait()
+        group = _group(i)
+        return await run_write(
+            "discovery.groups", lambda s, group=group: repo.upsert_event_group(s, group)
+        )
+
+    async def snapshot_write(i: int) -> bool:
+        await reader_ready.wait()
+        return await run_write(
+            "pnl.snapshot",
+            lambda s, i=i: repo.insert_paper_pnl_snapshot(
+                s,
+                account_id="acct-burst",
+                cash=Decimal(i),
+                mtm_positions=Decimal("0"),
+                total_equity=Decimal(i),
+            ),
+        )
+
+    # 15 group upserts + 15 snapshot writes, all released the instant the
+    # read has its snapshot -- genuine overlap, not just interleaving.
+    await asyncio.gather(
+        held_read(),
+        *(group_write(i) for i in range(15)),
+        *(snapshot_write(i) for i in range(15)),
+    )
+
+    stats = db_session.dropped_write_stats()
+    assert stats["dropped_writes"] == 0, stats

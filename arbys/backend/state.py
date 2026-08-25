@@ -23,7 +23,7 @@ from ..adapters.polymarket_us import PolymarketUsAdapter
 from ..adapters.polymarket_us_auth import creds_from_env as polymarket_us_creds_from_env
 from ..adapters.polymarket_us_ws import PolymarketUsWebSocketAdapter
 from ..db import repositories as repo
-from ..db.session import session_scope
+from ..db.session import run_write, session_scope
 from ..ingest.auto_settle_service import AutoSettleService
 from ..ingest.engine_runtime import EngineRuntime
 from ..ingest.pnl_service import PnlSnapshotService
@@ -462,11 +462,7 @@ class AppState:
                     q.put_nowait(opp)
 
     async def _persist_opp(self, opp: ArbOpportunity) -> None:
-        try:
-            async with session_scope() as session:
-                await repo.insert_opportunity(session, opp)
-        except Exception:
-            pass
+        await run_write("state.opportunity", lambda s: repo.insert_opportunity(s, opp))
 
     @property
     def opportunities(self) -> list[ArbOpportunity]:
