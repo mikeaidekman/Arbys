@@ -265,3 +265,77 @@ async def submit_arb_ticket(
     return TicketResult(
         ticket_id, "filled", tuple(o.id for o in orders), None
     )
+
+
+async def submit_arb_ticket_for_descriptor(
+    state: AppState,
+    *,
+    event_group_id: str,
+    outcome_ids: set[str] | None,
+    source: str,
+    account_id: str | None = None,
+) -> TicketResult:
+    """Submit the ticket a caller *described*, recording it even if it cannot.
+
+    `POST /paper/execute` used to resolve the opportunity itself and raise 409
+    before reaching this module, so a click on a row whose edge had just died
+    left no record — the single most common real failure, and the one
+    measurement that tells you whether latency work is worth anything.
+
+    The "a detector finding nothing is not an attempt" rule still holds for
+    `submit_arb_ticket` itself, which is what the auto-trader calls: a bot
+    evaluating every tick would otherwise write thousands of rows a night
+    saying nothing happened. A human pressing a button is unambiguously an
+    attempt.
+    """
+    account_id = account_id or state.default_account_id
+    for candidate in state.live_opportunities_for(event_group_id):
+        if candidate.event_group_id != event_group_id:
+            continue
+        if outcome_ids is not None:
+            buy_legs = {leg.outcome_id for leg in candidate.legs if leg.is_buy}
+            if buy_legs != outcome_ids:
+                continue
+        return await submit_arb_ticket(
+            state, candidate, source=source, account_id=account_id
+        )
+
+    ticket_id = uuid.uuid4().hex
+    reason = (
+        "edge no longer available at live quotes for "
+        f"event_group_id={event_group_id!r}"
+    )
+    await _write_missed_descriptor(
+        ticket_id=ticket_id,
+        account_id=account_id,
+        event_group_id=event_group_id,
+        title=_title(state, event_group_id),
+        source=source,
+        reason=reason,
+    )
+    return TicketResult(ticket_id, "missed", (), reason)
+
+
+async def _write_missed_descriptor(
+    *, ticket_id: str, account_id: str, event_group_id: str, title: str,
+    source: str, reason: str,
+) -> None:
+    """A missed ticket with no opportunity object behind it, so no economics.
+
+    Null rather than zero: a `missed` ticket has nothing to record, and zero
+    would read as a free ticket that made nothing.
+    """
+    async def _work(session: AsyncSession) -> None:
+        await repo.ensure_paper_account(session, account_id)
+        await repo.insert_paper_ticket(
+            session,
+            ticket_id=ticket_id,
+            account_id=account_id,
+            event_group_id=event_group_id,
+            title_snapshot=title,
+            source=source,
+            status="missed",
+            rejection_reason=reason,
+        )
+
+    await run_write("ticket.missed", _work)

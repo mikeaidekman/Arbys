@@ -271,3 +271,68 @@ async def test_ticket_row_exists_as_pending_before_the_router_runs(monkeypatch):
     result = await submit_arb_ticket(s, opp, source="manual")
     assert result.status == "filled"
     assert seen == ["pending"]
+
+
+async def test_descriptor_with_no_live_edge_writes_a_missed_ticket():
+    """The gap this closes.
+
+    /paper/execute used to resolve the opportunity itself and raise 409 before
+    ever reaching the ticket service, so the most common real failure — the
+    edge dying between the row rendering and the click landing — wrote nothing
+    at all. Six manual fills and several visible failures on 2026-08-24
+    produced zero `missed` tickets.
+    """
+    from arbys.backend.ticket_service import submit_arb_ticket_for_descriptor
+    from arbys.db import repositories as repo
+
+    s, _ = await _arb_group()
+    # Reprice both sides so no edge exists, then describe the group anyway —
+    # exactly what a click on a stale row does.
+    for oid in ("p-yes", "k-no"):
+        s.quotebook.upsert(
+            Quote(outcome_id=oid, bid=Decimal("0.60"), ask=Decimal("0.60"))
+        )
+
+    result = await submit_arb_ticket_for_descriptor(
+        s, event_group_id="eg-1", outcome_ids={"p-yes", "k-no"}, source="manual"
+    )
+    assert result.status == "missed"
+    assert result.order_ids == ()
+    async with session_scope() as session:
+        tickets = await repo.list_paper_tickets(session, s.default_account_id)
+    assert len(tickets) == 1
+    assert tickets[0]["status"] == "missed"
+    assert tickets[0]["title_snapshot"] == "MLB: ATL @ LAD"
+    assert tickets[0]["total_stake"] is None
+    assert tickets[0]["legs"] == []
+
+
+async def test_descriptor_with_a_live_edge_still_fills():
+    from arbys.backend.ticket_service import submit_arb_ticket_for_descriptor
+    from arbys.db import repositories as repo
+
+    s, _ = await _arb_group()
+    result = await submit_arb_ticket_for_descriptor(
+        s, event_group_id="eg-1", outcome_ids={"p-yes", "k-no"}, source="manual"
+    )
+    assert result.status == "filled"
+    assert len(result.order_ids) == 2
+    async with session_scope() as session:
+        tickets = await repo.list_paper_tickets(session, s.default_account_id)
+    assert tickets[0]["status"] == "filled"
+
+
+async def test_descriptor_missed_ticket_names_an_unknown_group():
+    """A descriptor for a group AppState has never heard of still gets a row,
+    titled with the id rather than crashing on the lookup."""
+    from arbys.backend.ticket_service import submit_arb_ticket_for_descriptor
+    from arbys.db import repositories as repo
+
+    s, _ = await _arb_group()
+    result = await submit_arb_ticket_for_descriptor(
+        s, event_group_id="eg-nonexistent", outcome_ids=None, source="manual"
+    )
+    assert result.status == "missed"
+    async with session_scope() as session:
+        tickets = await repo.list_paper_tickets(session, s.default_account_id)
+    assert tickets[0]["title_snapshot"] == "eg-nonexistent"

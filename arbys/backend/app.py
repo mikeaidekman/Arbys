@@ -37,7 +37,7 @@ from .schemas import (  # noqa: E402
     TicketOut,
 )
 from .state import get_state, max_ticket_stake, reset_state  # noqa: E402
-from .ticket_service import submit_arb_ticket  # noqa: E402
+from .ticket_service import submit_arb_ticket, submit_arb_ticket_for_descriptor  # noqa: E402
 
 
 class _PairCandidate(NamedTuple):
@@ -452,36 +452,21 @@ def create_app() -> FastAPI:
     async def paper_execute(body: ExecuteArbIn) -> list[str]:
         s = get_state()
         if body.event_group_id is not None:
-            # Pick the published opportunity the caller is describing. The
-            # re-detect against live quotes happens inside submit_arb_ticket.
-            wanted = set(body.outcome_ids) if body.outcome_ids else None
-            opp = None
-            for candidate in s.live_opportunities_for(body.event_group_id):
-                if candidate.event_group_id != body.event_group_id:
-                    continue
-                if wanted is not None:
-                    buy_legs = {leg.outcome_id for leg in candidate.legs if leg.is_buy}
-                    if buy_legs != wanted:
-                        continue
-                opp = candidate
-                break
-            if opp is None:
-                raise HTTPException(
-                    status_code=409,
-                    detail=(
-                        "edge no longer available at live quotes for "
-                        f"event_group_id={body.event_group_id!r}"
-                    ),
-                )
+            result = await submit_arb_ticket_for_descriptor(
+                s,
+                event_group_id=body.event_group_id,
+                outcome_ids=set(body.outcome_ids) if body.outcome_ids else None,
+                source="manual",
+                account_id=body.account_id,
+            )
         else:
             opportunities = list(s.opportunities)
             if body.opportunity_index < 0 or body.opportunity_index >= len(opportunities):
                 raise HTTPException(status_code=404, detail="opportunity_index out of range")
-            opp = opportunities[body.opportunity_index]
-
-        result = await submit_arb_ticket(
-            s, opp, source="manual", account_id=body.account_id
-        )
+            result = await submit_arb_ticket(
+                s, opportunities[body.opportunity_index], source="manual",
+                account_id=body.account_id,
+            )
         if result.status != "filled":
             raise HTTPException(status_code=409, detail=result.reason or result.status)
         return list(result.order_ids)

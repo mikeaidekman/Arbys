@@ -368,6 +368,26 @@ def test_execute_by_event_group_rejects_unknown_descriptor(tmp_path):
         assert client.get("/paper/default").json()["positions"] == {}
 
 
+def test_execute_records_a_missed_ticket_when_the_edge_is_gone():
+    """The endpoint keeps returning 409 — the UI's "failed" button is
+    unchanged — but a row now exists for the attempt."""
+    with TestClient(create_app()) as client:
+        _register(client, "eg-miss", "p-yes-ms", "k-no-ms")
+        client.post("/quotes", json={"outcome_id": "p-yes-ms", "bid": "0.60", "ask": "0.60"})
+        client.post("/quotes", json={"outcome_id": "k-no-ms", "bid": "0.60", "ask": "0.60"})
+
+        r = client.post(
+            "/paper/execute",
+            json={"event_group_id": "eg-miss", "outcome_ids": ["p-yes-ms", "k-no-ms"]},
+        )
+        assert r.status_code == 409
+
+        tickets = client.get("/paper/default/tickets").json()
+        assert len(tickets) == 1
+        assert tickets[0]["status"] == "missed"
+        assert tickets[0]["legs"] == []
+
+
 def test_open_positions_hydrate_once_per_venue(tmp_path):
     """Regression: an open position must not fan out to every paper broker.
 
