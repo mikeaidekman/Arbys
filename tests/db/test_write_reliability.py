@@ -85,6 +85,7 @@ async def test_run_write_commits_and_reports_success():
     from arbys.db.session import create_all, run_write
 
     await create_all()
+    db_session.reset_dropped_writes()
     ok = await run_write(
         "test.account", lambda s: repo.ensure_paper_account(s, "acct-ok")
     )
@@ -164,3 +165,83 @@ async def test_run_write_never_raises():
         raise RuntimeError("anything")
 
     assert await run_write("test.noraise", boom) is False
+
+
+async def test_a_routed_sink_site_counts_its_dropped_write(monkeypatch):
+    """Proves `DbPaperPersistenceSink.on_fill` goes through `run_write`, not a
+    raw `session_scope`.
+
+    `run_write` itself is well covered above, but nothing exercised the sink
+    by name -- so a later "simplification" reverting this one call back to
+    `async with session_scope(): ...` would pass every existing test (rows
+    still land on the happy path) while silently restoring invisible data
+    loss on failure. A raw `session_scope` write here would leave
+    `dropped_writes` at 0 and let the exception vanish into
+    `paper_broker._emit`'s `contextlib.suppress(Exception)`; only routing
+    through `run_write` counts it.
+    """
+    from decimal import Decimal
+
+    from sqlalchemy.exc import OperationalError
+
+    from arbys.adapters.base import Fill, Order, OrderStatus
+    from arbys.db import repositories as repo
+    from arbys.db.session import create_all
+    from arbys.shared.persistence import DbPaperPersistenceSink
+
+    await create_all()
+    db_session.reset_dropped_writes()
+
+    async def boom(*_a, **_k):
+        raise OperationalError("stmt", {}, Exception("database is locked"))
+
+    monkeypatch.setattr(repo, "insert_paper_fill", boom)
+
+    sink = DbPaperPersistenceSink()
+    order = Order(
+        id="ord-1",
+        venue_id="kalshi",
+        outcome_id="k-yes",
+        is_buy=True,
+        qty=Decimal("10"),
+        limit_price=Decimal("0.50"),
+        status=OrderStatus.FILLED,
+    )
+    fill = Fill(order_id="ord-1", qty=Decimal("10"), price=Decimal("0.50"), fee=Decimal("0"))
+
+    # Must not raise: a broken trade is worse than an unrecorded one.
+    await sink.on_fill(order, fill)
+
+    stats = db_session.dropped_write_stats()
+    assert stats["dropped_writes"] == 1
+    assert "sink.on_fill" in str(stats["last_dropped_write"])
+
+
+async def test_ticket_status_write_counts_its_dropped_write(monkeypatch):
+    """Proves `ticket_service._set_status` goes through `run_write`.
+
+    This is the exact path that left a real ticket stuck at `pending` on
+    2026-08-25: the lock error was swallowed with no trace. Only a test that
+    forces the underlying repository call to fail and checks the counter can
+    tell this site apart from one still using a raw `session_scope`.
+    """
+    from sqlalchemy.exc import OperationalError
+
+    from arbys.backend.ticket_service import _set_status
+    from arbys.db import repositories as repo
+    from arbys.db.session import create_all
+
+    await create_all()
+    db_session.reset_dropped_writes()
+
+    async def boom(*_a, **_k):
+        raise OperationalError("stmt", {}, Exception("database is locked"))
+
+    monkeypatch.setattr(repo, "update_paper_ticket_status", boom)
+
+    # Must not raise.
+    await _set_status("ticket-1", status="filled", reason=None)
+
+    stats = db_session.dropped_write_stats()
+    assert stats["dropped_writes"] == 1
+    assert "ticket.status" in str(stats["last_dropped_write"])
