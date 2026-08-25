@@ -319,6 +319,12 @@ async def test_descriptor_with_a_live_edge_still_fills():
     assert len(result.order_ids) == 2
     async with session_scope() as session:
         tickets = await repo.list_paper_tickets(session, s.default_account_id)
+    # Exactly one row -- not just "the newest one is filled". Guards against
+    # a regression where the descriptor path logs its own row before
+    # delegating to submit_arb_ticket, which would still show tickets[0]
+    # filled with a duplicate sitting underneath (list_paper_tickets is
+    # newest-first). Matches the pattern in test_filled_ticket_groups_its_legs.
+    assert len(tickets) == 1
     assert tickets[0]["status"] == "filled"
 
 

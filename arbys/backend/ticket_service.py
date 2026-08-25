@@ -197,7 +197,11 @@ async def submit_arb_ticket(
 
     live = _match_live(state, opp)
     if live is None:
-        reason = "edge_no_longer_available"
+        # Same `edge_no_longer_available:<group>` prefix as the descriptor
+        # path below, so both land in the same shape in `rejection_reason`
+        # and a query can group on it to answer "how often does an edge die
+        # between publication and submission" across both entry points.
+        reason = f"edge_no_longer_available:{opp.event_group_id}"
         await _write_ticket(
             ticket_id=ticket_id, account_id=account_id, opp=opp, title=title,
             source=source, status="missed", reason=reason, economics=None,
@@ -292,18 +296,22 @@ async def submit_arb_ticket_for_descriptor(
     for candidate in state.live_opportunities_for(event_group_id):
         if candidate.event_group_id != event_group_id:
             continue
-        if outcome_ids is not None:
-            buy_legs = {leg.outcome_id for leg in candidate.legs if leg.is_buy}
-            if buy_legs != outcome_ids:
-                continue
+        if outcome_ids is not None and _buy_legs(candidate) != outcome_ids:
+            continue
         return await submit_arb_ticket(
             state, candidate, source=source, account_id=account_id
         )
 
     ticket_id = uuid.uuid4().hex
+    # Same `edge_no_longer_available:<group>` prefix `submit_arb_ticket` uses
+    # for the same conceptual state, plus prose that keeps the "live quotes"
+    # substring the endpoint's 409 detail is pinned on
+    # (test_execute_prices_against_live_quotes_not_the_recorded_opportunity).
+    # No `!r` here -- this lands in a column a human reads in the ticket log,
+    # not a repr a developer reads in a traceback.
     reason = (
-        "edge no longer available at live quotes for "
-        f"event_group_id={event_group_id!r}"
+        f"edge_no_longer_available:{event_group_id} "
+        "(no edge at live quotes for this pair)"
     )
     await _write_missed_descriptor(
         ticket_id=ticket_id,
