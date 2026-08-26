@@ -23,11 +23,21 @@ interface Props {
   now: number;
 }
 
+/** Contracts as #,###.## — grouped and always two decimals.
+ *
+ *  Deliberately not abbreviated. These columns exist to show *magnitude*, and
+ *  the old "224k" collapsed 224,111.10 and 224,499 to the same four
+ *  characters — exactly the distinction the Book column is there to draw. The
+ *  fractional part is load-bearing too: contracts are not whole units on
+ *  these venues (DEFAULT_QTY_TICK is 0.01, and both venues report fractional
+ *  ask_size), so trailing digits are real size rather than noise. */
 function fmtQty(n: number | null): string {
   if (n == null) return "?";
-  if (n >= 10_000) return `${Math.round(n / 1000)}k`;
-  if (n >= 1_000) return `${(n / 1000).toFixed(1)}k`;
-  return String(Math.round(n * 100) / 100);
+  if (!Number.isFinite(n)) return "?";
+  return n.toLocaleString("en-US", {
+    minimumFractionDigits: 2,
+    maximumFractionDigits: 2,
+  });
 }
 
 function fmtCents(v: string | null): string {
