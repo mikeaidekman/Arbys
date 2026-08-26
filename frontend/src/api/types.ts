@@ -49,6 +49,12 @@ export interface MonitoredGroup {
   net_max_profit: string | null;
   /** Total stake to open that position. */
   capital_required: string | null;
+  /** What the book alone would allow on that same pair, ignoring the
+   *  ARBYS_MAX_TICKET_STAKE budget, and the capital it would take. The gap
+   *  against max_tradeable_qty is what the cap is holding back. null means
+   *  *unknown* (neither leg reported depth), never unlimited. */
+  uncapped_qty: string | null;
+  uncapped_capital: string | null;
   /** The pair the backend chose, by leg outcome_id. */
   best_pair_yes_outcome_id: string | null;
   best_pair_no_outcome_id: string | null;

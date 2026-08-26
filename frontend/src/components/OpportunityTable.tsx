@@ -4,7 +4,7 @@ import type { PriceMove } from "../hooks/usePriceMoves";
 import { bestPair, categoryOf, compareGroups, groupStartDate, splitTitle } from "../lib/combo";
 import { OpportunityRow } from "./OpportunityRow";
 
-type SortKey = "start" | "cat" | "matchup" | "size" | "edge" | "profit";
+type SortKey = "start" | "cat" | "matchup" | "size" | "depth" | "edge" | "profit";
 type SortDir = "asc" | "desc";
 
 interface Props {
@@ -24,6 +24,7 @@ const COLUMNS: { key: SortKey | null; label: string; numeric?: boolean }[] = [
   { key: "start", label: "Start" },
   { key: null, label: "Best pair" },
   { key: "size", label: "Size", numeric: true },
+  { key: "depth", label: "Book", numeric: true },
   { key: "edge", label: "Edge", numeric: true },
   { key: "profit", label: "Net $", numeric: true },
   { key: null, label: "" },
@@ -78,6 +79,8 @@ export function OpportunityTable({
           );
         case "size":
           return cmpNullable(bestPair(a).size, bestPair(b).size, dir);
+        case "depth":
+          return cmpNullable(num(a.uncapped_qty), num(b.uncapped_qty), dir);
         case "edge":
           return cmpNullable(num(a.net_edge), num(b.net_edge), dir);
         case "profit":

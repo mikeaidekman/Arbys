@@ -86,6 +86,16 @@ class MonitoredGroupOut(BaseModel):
     # Which pair the four fields above describe. The frontend has no fee model
     # of its own and cannot re-derive the ranking, so the backend names the
     # pair explicitly -- match on leg outcome_id against a published opportunity.
+    # What the book alone would allow on that same pair, ignoring
+    # ARBYS_MAX_TICKET_STAKE, and the capital it would take. The gap against
+    # max_tradeable_qty is exactly what the cap is holding back, which is the
+    # question "how much size is really there?" -- ranking is unchanged and
+    # still uses the capped figure, because that is what is actually tradeable.
+    # None means *unknown* rather than unlimited: neither leg reported depth,
+    # and sizing without a cap would otherwise fall back to a placeholder that
+    # reads as a real hundred contracts.
+    uncapped_qty: Decimal | None
+    uncapped_capital: Decimal | None
     best_pair_yes_outcome_id: str | None
     best_pair_no_outcome_id: str | None
 

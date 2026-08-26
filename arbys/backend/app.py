@@ -47,6 +47,14 @@ class _PairCandidate(NamedTuple):
     """Guaranteed profit per contract after fees. May be negative."""
     qty: Decimal
     """Contracts tradeable at those prices. 0 means a leg is known empty."""
+    uncapped_qty: Decimal | None
+    """What the book alone would allow, ignoring ``ARBYS_MAX_TICKET_STAKE``.
+
+    ``None`` when neither leg reported depth. That case is *unknown*, not
+    unlimited: with no depth and no stake cap ``tradeable_qty`` falls back to
+    ``LEGACY_UNBOUNDED_QTY``, a placeholder that would read on screen as a
+    real hundred contracts the venue never offered.
+    """
     unit_cost: Decimal
     """All-in cost of one contract across both legs (asks plus per-unit fees)."""
     yes_outcome_id: str
@@ -283,15 +291,30 @@ def create_app() -> FastAPI:
                         continue
                     y_unit = leg_unit_cost(yq.ask, y_fm, is_buy=True)
                     n_unit = leg_unit_cost(nq.ask, n_fm, is_buy=True)
+                    depths = [yq.ask_size, nq.ask_size]
+                    # Same sizing call minus the budget, so the two numbers
+                    # differ only by the cap and the gap between them is
+                    # exactly what the cap is leaving on the table.
+                    uncapped = (
+                        tradeable_qty(
+                            unit_cost=y_unit + n_unit,
+                            depths=depths,
+                            max_stake=None,
+                            tick=DEFAULT_QTY_TICK,
+                        )
+                        if any(d is not None for d in depths)
+                        else None
+                    )
                     candidates.append(
                         _PairCandidate(
                             net_edge=net_edge_per_contract([y_unit, n_unit]),
                             qty=tradeable_qty(
                                 unit_cost=y_unit + n_unit,
-                                depths=[yq.ask_size, nq.ask_size],
+                                depths=depths,
                                 max_stake=max_ticket_stake(),
                                 tick=DEFAULT_QTY_TICK,
                             ),
+                            uncapped_qty=uncapped,
                             unit_cost=y_unit + n_unit,
                             yes_outcome_id=y.outcome_id,
                             no_outcome_id=n.outcome_id,
@@ -303,6 +326,8 @@ def create_app() -> FastAPI:
             max_qty: Decimal | None = None
             net_max_profit: Decimal | None = None
             capital_required: Decimal | None = None
+            uncapped_qty: Decimal | None = None
+            uncapped_capital: Decimal | None = None
             best_pair_yes_id: str | None = None
             best_pair_no_id: str | None = None
             if best is not None:
@@ -310,6 +335,9 @@ def create_app() -> FastAPI:
                 max_qty = best.qty
                 net_max_profit = best.net_edge * best.qty
                 capital_required = best.unit_cost * best.qty
+                uncapped_qty = best.uncapped_qty
+                if best.uncapped_qty is not None:
+                    uncapped_capital = best.unit_cost * best.uncapped_qty
                 best_pair_yes_id = best.yes_outcome_id
                 best_pair_no_id = best.no_outcome_id
 
@@ -330,6 +358,8 @@ def create_app() -> FastAPI:
                     max_tradeable_qty=max_qty,
                     net_max_profit=net_max_profit,
                     capital_required=capital_required,
+                    uncapped_qty=uncapped_qty,
+                    uncapped_capital=uncapped_capital,
                     best_pair_yes_outcome_id=best_pair_yes_id,
                     best_pair_no_outcome_id=best_pair_no_id,
                 )

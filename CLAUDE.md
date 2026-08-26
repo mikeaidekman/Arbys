@@ -391,7 +391,20 @@ either, but the paper broker always takes, so it would never apply.
 
 `/monitored` gained six pair-level fields: `net_edge`, `max_tradeable_qty`,
 `net_max_profit`, `capital_required`, `best_pair_yes_outcome_id`,
-`best_pair_no_outcome_id`. `best_yes_ask`/`best_no_ask` above are each the
+`best_pair_no_outcome_id` — plus `uncapped_qty` / `uncapped_capital`, which
+answer "how much size is really there?" by sizing the **same winning pair**
+with `max_stake=None`. The terminal shows that as the **Book** column beside
+**Size**, so the gap between them is exactly what `ARBYS_MAX_TICKET_STAKE` is
+holding back — measured 2026-08-26, binding on 258 of 548 groups and by as
+much as 1165x (192 contracts allowed against 224,111 resting).
+
+**Ranking still uses the capped figure and must keep doing so** — it is what
+is actually tradeable, and the objective is shared with
+`detect_cross_venue_two_leg` (see below). `uncapped_qty` is display only.
+`None` there means *unknown*, never unlimited: with neither leg reporting
+depth and no stake cap, `tradeable_qty` falls back to `LEGACY_UNBOUNDED_QTY`,
+a placeholder that would read on screen as a real hundred contracts the venue
+never offered. `best_yes_ask`/`best_no_ask` above are each the
 cheapest ask **independently** across venues — they can both come from the
 same venue, in which case they name no single tradeable pair. The six new
 fields instead evaluate every real (yes, no) leg combination and report the

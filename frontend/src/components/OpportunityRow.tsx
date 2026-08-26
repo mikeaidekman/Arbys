@@ -110,6 +110,10 @@ export function OpportunityRow({
   const stale =
     pair.combo?.yesLeg?.is_stale === true || pair.combo?.noLeg?.is_stale === true;
   const noSize = pair.size === 0;
+  const uncapped = numOrNull(group.uncapped_qty);
+  // Highlighted only when the cap is actually binding — otherwise the two
+  // columns agree and the second is just noise.
+  const capped = uncapped != null && pair.size != null && uncapped > pair.size;
 
   const opportunity =
     pair.combo && !stale && !noSize
@@ -185,6 +189,21 @@ export function OpportunityRow({
       </td>
       <td className={`vt-mono vt-num ${noSize ? "vt-size-zero" : ""}`}>
         {fmtQty(pair.size)}
+      </td>
+      {/* What the book would allow if ARBYS_MAX_TICKET_STAKE were not
+          binding. Shown beside Size so the gap between them is the cap. */}
+      <td
+        className={`vt-mono vt-num ${capped ? "" : "vt-muted"}`}
+        title={
+          uncapped == null
+            ? "neither leg reported depth — size unknown, not unlimited"
+            : capped
+              ? `book holds ${fmtQty(uncapped)} (${fmtUsd(group.uncapped_capital)}); ` +
+                `the ticket cap is limiting this to ${fmtQty(pair.size)}`
+              : "the whole book is within the ticket cap"
+        }
+      >
+        {fmtQty(uncapped)}
       </td>
       <td
         className="vt-mono vt-num"
