@@ -442,6 +442,9 @@ class AppState:
             set_priority = getattr(adapter, "set_priority_slugs", None)
             if set_priority is not None:
                 set_priority(self.in_play_slugs)
+            set_confirmed = getattr(adapter, "set_confirmed_in_play", None)
+            if set_confirmed is not None:
+                set_confirmed(self.confirmed_in_play_slugs)
             adapters.append(adapter)
             subscribed[venue_id] = set(dedup)
             log.info("ingest: %s adapter built for %d outcomes", venue_id, len(dedup))
@@ -479,6 +482,25 @@ class AppState:
     # observed as 13 markets per shard being repaired every 15s, none of which
     # could ever stream again because they had settled.
     MAX_EVENT_DURATION_S = 6 * 60 * 60
+
+    def confirmed_in_play_slugs(self) -> set[str]:
+        """Only markets a venue has *positively said* are under way.
+
+        Distinct from `in_play_slugs`, which falls back to a start-time window
+        where nobody reported. That guess is fine for tightening a cheap
+        deadline, but it must never drive an expensive action: dropping a
+        healthy connection on a guess is how last night's finished games came
+        to force 19 reconnects across four shards, each one flagged in-play
+        only because it had started within `MAX_EVENT_DURATION_S`.
+
+        Escalation therefore requires evidence, not the absence of it.
+        """
+        return {
+            leg.outcome_id.rpartition(":")[0]
+            for group in self.event_groups.values()
+            if group.in_play
+            for leg in group.legs
+        }
 
     def in_play_slugs(self) -> set[str]:
         """Venue market ids whose real-world event is under way now.

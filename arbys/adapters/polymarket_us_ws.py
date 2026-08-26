@@ -189,6 +189,7 @@ class PolymarketUsWebSocketAdapter(MarketDataAdapter):
         priority_dark_after_s: float = DEFAULT_PRIORITY_DARK_AFTER_S,
         repair_sweep_s: float = REPAIR_SWEEP_S,
         priority_slugs: Callable[[], set[str]] | None = None,
+        confirmed_in_play: Callable[[], set[str]] | None = None,
     ) -> None:
         self._outcome_ids = outcome_ids or []
         self._creds = creds
@@ -203,6 +204,10 @@ class PolymarketUsWebSocketAdapter(MarketDataAdapter):
         # venue's live/ended flags. Re-read every sweep, so a game going
         # in-play tightens its own deadline with no restart.
         self._priority_slugs = priority_slugs
+        # Escalation needs a stronger signal than the tighter deadline does:
+        # reconnecting is expensive, so it requires a venue positively saying
+        # the game is on, never a fallback guess from a start time.
+        self._confirmed_in_play = confirmed_in_play
         self._slugs = sorted({split_outcome_id(o)[0] for o in self._outcome_ids})
         self._slug_set = set(self._slugs)
         self._shard_tasks: list[asyncio.Task[None]] = []
@@ -212,6 +217,13 @@ class PolymarketUsWebSocketAdapter(MarketDataAdapter):
         self._last_ws_at: dict[str, float] = {}
         # Per shard, when it last reconnected because of dark markets.
         self._last_reconnect_at: dict[int, float] = {}
+
+    def set_confirmed_in_play(self, fn: Callable[[], set[str]] | None) -> None:
+        """Markets a venue has positively confirmed are under way.
+
+        Only these justify dropping a connection; see `_maybe_escalate`.
+        """
+        self._confirmed_in_play = fn
 
     def set_priority_slugs(self, fn: Callable[[], set[str]] | None) -> None:
         """Tell the adapter which markets need the tighter deadline.
@@ -544,10 +556,17 @@ class PolymarketUsWebSocketAdapter(MarketDataAdapter):
         Cooldown-limited because a reconnect makes the venue replay cached
         snapshots for the whole shard, so it must stay the last resort.
         """
+        confirmed: set[str] = set()
+        if self._confirmed_in_play is not None:
+            with contextlib.suppress(Exception):
+                confirmed = self._confirmed_in_play()
+        # `priority` includes games merely *guessed* to be under way from their
+        # start time. Reconnecting on a guess drops healthy sockets for games
+        # that finished hours ago, so escalation reads the confirmed set only.
         stuck = [
             slug
             for slug in slugs
-            if slug in priority
+            if slug in confirmed
             and attempts.get(slug, 0) >= MAX_REPAIR_ATTEMPTS
             and now - self._last_ws_at.get(slug, now) > self._priority_dark_after_s
         ]

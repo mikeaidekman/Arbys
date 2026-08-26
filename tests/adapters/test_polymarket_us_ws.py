@@ -601,6 +601,9 @@ async def test_an_in_play_market_that_stays_dark_forces_a_reconnect():
             dark_after_s=0.02,
             priority_dark_after_s=0.02,
             priority_slugs=lambda: {"dark"},  # the game is under way
+            # and a venue positively says so - the only thing that may
+            # justify dropping a healthy connection
+            confirmed_in_play=lambda: {"dark"},
             initial_backoff_s=0.01,
             max_backoff_s=0.05,
         )
@@ -684,4 +687,71 @@ async def test_a_dark_pregame_market_does_not_force_a_reconnect():
 
     assert len(connections) == 1, (
         f"a dark pre-game market thrashed the connection ({len(connections)} connects)"
+    )
+
+
+@pytest.mark.asyncio
+async def test_a_guessed_in_play_market_does_not_force_a_reconnect():
+    """Escalation needs evidence, not the absence of it.
+
+    `in_play_slugs` falls back to a start-time window where no venue reported,
+    which is fine for tightening a cheap deadline. Letting that guess drop a
+    healthy connection is what had last night's finished games forcing 19
+    reconnects across four shards - each flagged in-play only because it had
+    started within MAX_EVENT_DURATION_S and nobody had said otherwise.
+    """
+    connections: list[int] = []
+
+    async def handler(ws):
+        connections.append(id(ws))
+        while True:
+            try:
+                await asyncio.wait_for(ws.recv(), timeout=0.01)
+            except TimeoutError:
+                pass
+            except Exception:
+                return
+            try:
+                await ws.send(
+                    _frame(
+                        "chatty",
+                        [{"px": {"value": "0.4000"}, "qty": "5"}],
+                        [{"px": {"value": "0.4200"}, "qty": "7"}],
+                    )
+                )
+            except Exception:
+                return
+            await asyncio.sleep(0.01)
+
+    creds, _ = _creds()
+    async with websockets.serve(handler, "127.0.0.1", 0) as server:
+        port = server.sockets[0].getsockname()[1]
+        adapter = PolymarketUsWebSocketAdapter(
+            outcome_ids=["chatty:LONG", "dark:LONG"],
+            creds=creds,
+            url=f"ws://127.0.0.1:{port}",
+            repair_sweep_s=0.02,
+            dark_after_s=0.02,
+            priority_dark_after_s=0.02,
+            priority_slugs=lambda: {"dark"},  # merely *guessed* to be on
+            confirmed_in_play=set,            # no venue actually said so
+            initial_backoff_s=0.01,
+        )
+
+        async def drain():
+            async for _q in adapter.stream_quotes():
+                pass
+
+        task = asyncio.create_task(drain())
+        try:
+            await asyncio.sleep(1.5)  # far longer than the repair budget
+        finally:
+            task.cancel()
+            with contextlib.suppress(asyncio.CancelledError):
+                await task
+            await adapter.close()
+
+    assert len(connections) == 1, (
+        f"a guessed in-play market dropped a healthy socket "
+        f"({len(connections)} connects)"
     )
