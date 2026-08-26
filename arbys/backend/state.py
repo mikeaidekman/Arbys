@@ -60,7 +60,12 @@ def _opp_fingerprint(opp: ArbOpportunity) -> tuple:
         ),
     )
 
-DEFAULT_STARTING_BALANCE = Decimal("1000")
+# Seeded per venue on `bootstrap` for a new account and on every
+# `reset_paper_account`. Raised from 1000 on 2026-08-26 so a fresh paper
+# account has room to hold several concurrent tickets: ARBYS_MAX_TICKET_STAKE
+# is 200, so 1000 bound the account at five open tickets on one venue before
+# cash ran out - and a two-leg arb draws on both venues at once.
+DEFAULT_STARTING_BALANCE = Decimal("2000")
 
 
 def _ingest_enabled() -> bool:
