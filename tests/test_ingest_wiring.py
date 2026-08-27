@@ -41,18 +41,15 @@ class StubAdapter(MarketDataAdapter):
 
 
 @pytest.fixture(autouse=True)
-async def _reset(tmp_path: Path):
+def _reset(tmp_path: Path):
     db_file = tmp_path / "arbys-test.db"
     os.environ["ARBYS_DB_URL"] = f"sqlite+aiosqlite:///{db_file}"
-    os.environ["ARBYS_ENABLE_INGEST"] = "1"
     db_session.reset_engine()
     state_module.reset_state()
-    await db_session.create_all()
     yield
     db_session.reset_engine()
     state_module.reset_state()
     os.environ.pop("ARBYS_DB_URL", None)
-    os.environ.pop("ARBYS_ENABLE_INGEST", None)
 
 
 def _install_stub_factories(created: dict[str, StubAdapter]) -> None:
@@ -79,7 +76,8 @@ def _install_stub_factories(created: dict[str, StubAdapter]) -> None:
     return original_init
 
 
-def test_ingest_starts_and_delivers_quotes_to_engine():
+def test_ingest_starts_and_delivers_quotes_to_engine(monkeypatch):
+    monkeypatch.setenv("ARBYS_ENABLE_INGEST", "1")
     created: dict[str, StubAdapter] = {}
     original_init = _install_stub_factories(created)
     try:
@@ -143,8 +141,9 @@ def test_ingest_disabled_by_default(tmp_path: Path):
         state_module.AppState.__init__ = original_init
 
 
-def test_ingest_pumps_stub_quotes_into_engine():
+def test_ingest_pumps_stub_quotes_into_engine(monkeypatch):
     """End-to-end: adapter yields quotes → worker → quotebook → engine → opportunity."""
+    monkeypatch.setenv("ARBYS_ENABLE_INGEST", "1")
     q1 = Quote(outcome_id="poly-y", bid=Decimal("0.40"), ask=Decimal("0.40"))
     q2 = Quote(outcome_id="kals-n", bid=Decimal("0.50"), ask=Decimal("0.50"))
 
@@ -265,7 +264,7 @@ def _group(gid: str, *outcome_ids: str):
 
 
 @pytest.mark.asyncio
-async def test_sync_ingest_does_not_rebuild_when_a_group_is_only_retired():
+async def test_sync_ingest_does_not_rebuild_when_a_group_is_only_retired(monkeypatch):
     """Dropping a market needs no socket change; adding one does.
 
     Neither venue supports unsubscribing, so a rebuild is the only way to
@@ -275,6 +274,7 @@ async def test_sync_ingest_does_not_rebuild_when_a_group_is_only_retired():
     that reason meant the whole book went stale every ~12 minutes to stop
     watching one game that had ended.
     """
+    monkeypatch.setenv("ARBYS_ENABLE_INGEST", "1")
     st = state_module.AppState()
     built: list[_CountingAdapter] = []
 
@@ -472,7 +472,19 @@ def test_match_in_play_ignores_venues_that_report_nothing():
 
 
 async def _live_edge():
-    """An eg-1 group quoted 0.40 / 0.50 — a live net-positive edge, funded."""
+    """An eg-1 group quoted 0.40 / 0.50 — a live net-positive edge.
+
+    Balance is whatever ``bootstrap()`` seeds per venue (``DEFAULT_STARTING_BALANCE``,
+    $2000 as of this writing): it runs after this helper and ``hydrate_balance``
+    overwrites rather than adds, so depositing here would be silently discarded.
+
+    Every caller of this helper writes to the DB before its own ``bootstrap()``
+    call runs, so schema has to exist already — ``_reset`` no longer creates it
+    for every test (see ``test_reset_clears_the_auto_trade_cooldowns``), so this
+    helper creates it itself. ``create_all()`` is checkfirst-idempotent, so a
+    caller's later ``bootstrap()`` calling it again is harmless.
+    """
+    await db_session.create_all()
     s = get_state()
     group = EventGroup(
         id="eg-1",
@@ -488,8 +500,6 @@ async def _live_edge():
         await repo.ensure_paper_account(session, s.default_account_id)
     for oid, px in (("p-yes", Decimal("0.40")), ("k-no", Decimal("0.50"))):
         s.quotebook.upsert(Quote(outcome_id=oid, bid=px, ask=px))
-    for broker in s.paper_brokers.values():
-        broker.deposit(s.default_account_id, Decimal("10000"))
     return s
 
 
@@ -507,21 +517,17 @@ async def test_auto_trader_starts_when_enabled_and_stops_on_shutdown(monkeypatch
     monkeypatch.setenv("ARBYS_ENABLE_AUTO_TRADE", "1")
     s = get_state()
     await s.bootstrap()
-    assert s.auto_trade_service._task is not None
-    await s.shutdown()
+    try:
+        assert s.auto_trade_service._task is not None
+    finally:
+        await s.shutdown()
     assert s.auto_trade_service._task is None
+    assert s._opp_subscribers == []
 
 
 async def test_auto_trader_fills_a_published_edge_end_to_end(monkeypatch):
     """The broadcast path AppState already uses, straight into a ticket."""
     monkeypatch.setenv("ARBYS_ENABLE_AUTO_TRADE", "1")
-    # This file's own _reset fixture turns ingest on for its stub-adapter
-    # tests above; here eg-1's legs are registered before bootstrap() runs,
-    # so a real ingest pass would build live REST adapters and reach out to
-    # the actual venues (observed: a genuine GET to gateway.polymarket.us).
-    # This test only cares about the opportunity broadcast -> auto-trade
-    # path, so keep ingest off, per "tests never hit a real venue".
-    monkeypatch.setenv("ARBYS_ENABLE_INGEST", "0")
     s = await _live_edge()
     await s.bootstrap()
     tickets: list[dict] = []
@@ -547,7 +553,54 @@ async def test_auto_trader_fills_a_published_edge_end_to_end(monkeypatch):
     assert tickets[0]["status"] == "filled"
 
 
+async def test_auto_trader_skips_silently_when_the_cap_would_be_breached(monkeypatch):
+    """AppState._auto_would_breach_cap has to actually stop a submission.
+
+    `tests/test_auto_trade_service.py` injects `would_breach_cap` as a plain
+    boolean, so it never touches this wiring; every other cap test reaches
+    `cap_breach` through `submit_arb_ticket`, bypassing the pre-check
+    entirely. This is the only test that runs the real AppState-level
+    pre-check end to end.
+
+    Zero ticket rows is the assertion that matters: it pins both "does not
+    exceed the cap" and "skips silently rather than writing a rejected
+    ticket" — the pre-check exists precisely so a capped-out group does not
+    write a rejected row on every fingerprint change all night.
+    """
+    monkeypatch.setenv("ARBYS_ENABLE_AUTO_TRADE", "1")
+    monkeypatch.setenv("ARBYS_MAX_OUTCOME_QTY", "1")
+    s = await _live_edge()
+    await s.bootstrap()
+    tickets: list[dict] = []
+    try:
+        opps = s.engine.evaluate_now("eg-1")
+        assert opps, "fixture must produce a live net-positive opportunity"
+        assert opps[0].legs[0].qty > 1, "fixture must actually exceed the cap under test"
+        # _set_group_opportunities is what broadcasts to subscribers.
+        s._set_group_opportunities("eg-1", opps)
+        # There is no positive signal for "deliberately did nothing", so poll
+        # for a ticket that should never arrive; a broken pre-check would
+        # still show up within this window, since it reaches the DB no
+        # slower than the fill test above does.
+        for _ in range(200):
+            async with session_scope() as session:
+                tickets = await repo.list_paper_tickets(session, s.default_account_id)
+            if tickets:
+                break
+            await asyncio.sleep(0.005)
+    finally:
+        await s.shutdown()
+    assert tickets == [], "the cap pre-check must skip the submission, not write a ticket"
+
+
 async def test_reset_clears_the_auto_trade_cooldowns():
+    # This is the only test in the file that touches the DB (via
+    # reset_paper_account) without ever bootstrapping and without going
+    # through _live_edge() (which creates schema itself — see its
+    # docstring), so it is the one place left that has to create the schema
+    # directly. Everything else gets it for free from AppState.bootstrap()'s
+    # own create_all() call.
+    await db_session.create_all()
     s = get_state()
     s.auto_trade_service._cooldown_until["eg-1"] = 1e9
     await s.reset_paper_account(s.default_account_id)

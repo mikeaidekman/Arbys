@@ -22,7 +22,7 @@ Run everything from the repo root with the venv Python — `venv\Scripts\python.
 — rather than a bare `python`.
 
 ```powershell
-venv\Scripts\python.exe -m pytest -q            # 304 tests, must stay green
+venv\Scripts\python.exe -m pytest -q            # 359 tests, must stay green
 venv\Scripts\python.exe -m ruff check .         # must stay clean
 venv\Scripts\python.exe -m mypy arbys           # see caveat below — NOT clean today
 ```
@@ -840,6 +840,15 @@ dust: a fill of 0.01 contracts starts the same 60s cooldown as a real one, so a
 half-cent fill can mask a genuine edge on that group. Measured 2026-08-27, 5 of
 496 groups were net-positive worth ~18c in total, three of them sized 0.01-0.03
 contracts against off-market orders — so this is not hypothetical.
+
+**The cooldown key is the published opportunity id, not the real-world
+game.** It keys on `opp.event_group_id`, and `engine_runtime` publishes a
+synthetic `<group>:<venue>` id for each venue's intra-venue complementary edge
+alongside the cross-venue one on the same evaluation — so a single pass on
+`eg-1` can yield `eg-1`, `eg-1:kalshi` and `eg-1:polymarket_us`, three
+independent cooldowns on the same game. Up to three tickets can therefore land
+back to back on a shared leg; the position cap, not the cooldown, is what
+bounds total exposure.
 
 **The service must not import `arbys/backend/`.** `backend/state.py` imports
 `ingest`, and `backend/ticket_service.py` imports `backend/state.py`, so the

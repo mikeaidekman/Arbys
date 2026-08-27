@@ -125,7 +125,15 @@ class AutoTradeService:
             with contextlib.suppress(asyncio.CancelledError):
                 await task
         except asyncio.CancelledError:
-            pass
+            # `asyncio.shield` means this cannot be the shielded task's own
+            # cancellation - it can only be this `wait_for` await itself
+            # being cancelled from outside (e.g. uvicorn's forced-shutdown
+            # deadline cancelling the lifespan task). That cancellation must
+            # keep propagating so the caller (AppState.shutdown()) knows
+            # shutdown was interrupted, rather than silently carrying on to
+            # stop auto_settle_service and pnl_service as though this step
+            # had completed normally.
+            raise
         except Exception:
             log.exception("auto-trade consumer task ended with an unhandled exception")
         finally:

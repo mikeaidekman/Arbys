@@ -11,6 +11,8 @@ import asyncio
 import logging
 from decimal import Decimal
 
+import pytest
+
 from arbys.ingest.auto_trade_service import BACKPRESSURE_WARN_QSIZE, AutoTradeService
 from arbys.shared.arb_engine import ArbLeg, ArbOpportunity
 
@@ -242,6 +244,52 @@ async def test_stop_lets_an_in_flight_submit_finish():
     await asyncio.wait_for(stop_task, timeout=2.0)
 
     assert len(h.submitted) == 1, "the in-flight submit must complete, not be abandoned"
+
+
+async def test_stop_propagates_a_cancellation_aimed_at_itself():
+    """stop() must not absorb a cancellation aimed at stop() itself.
+
+    `asyncio.shield` means the only CancelledError this can catch is *not*
+    the shielded consumer's own cancellation - it can only be an external
+    cancellation of the `stop()` call itself (e.g. uvicorn's forced-shutdown
+    deadline cancelling the lifespan task while stop() is mid-wait).
+    Swallowing that would let a caller like AppState.shutdown() wrongly
+    believe shutdown completed cleanly and carry on to the next service.
+    """
+    h = _Harness()
+    started = asyncio.Event()
+    release = asyncio.Event()
+
+    async def slow_submit(opp: ArbOpportunity) -> str:
+        started.set()
+        await release.wait()
+        h.submitted.append(opp)
+        return "filled"
+
+    h.submit = slow_submit  # type: ignore[method-assign]
+    svc = h.service(cooldown_s=0.0)
+    await svc.start()
+    inner_task = svc._task
+    h.queue.put_nowait(_opp())
+    await asyncio.wait_for(started.wait(), timeout=2.0)
+
+    stop_task = asyncio.create_task(svc.stop())
+    await asyncio.sleep(0.02)
+    stop_task.cancel()
+
+    with pytest.raises(asyncio.CancelledError):
+        await stop_task
+
+    # Cleanup still ran on the way out, despite the cancellation propagating.
+    assert svc._task is None
+    assert h.unsubscribed == [h.queue]
+
+    # The shielded submit was never touched by any of the above - let it
+    # finish so the test doesn't leak a running task.
+    release.set()
+    assert inner_task is not None
+    await asyncio.wait_for(inner_task, timeout=2.0)
+    assert len(h.submitted) == 1, "the shielded submit must not have been cancelled"
 
 
 async def test_stop_logs_when_the_consumer_died_of_a_real_bug(caplog):
