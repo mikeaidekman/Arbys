@@ -167,8 +167,14 @@ async def _write_rejected_legs(
     await run_write("ticket.rejected_legs", work)
 
 
-def _cap_breach(state: AppState, live: ArbOpportunity, account_id: str) -> str | None:
-    """The outcome that would exceed ARBYS_MAX_OUTCOME_QTY, or None."""
+def cap_breach(state: AppState, live: ArbOpportunity, account_id: str) -> str | None:
+    """The outcome that would exceed ARBYS_MAX_OUTCOME_QTY, or None.
+
+    Public because the auto-trader pre-checks the same condition before
+    submitting. Duplicating this logic there would mean two implementations of
+    one safety rule, free to drift apart; this stays the single source and
+    `submit_arb_ticket` stays the authoritative enforcement point.
+    """
     cap = max_outcome_qty()
     if cap is None:
         return None
@@ -218,7 +224,7 @@ async def submit_arb_ticket(
         )
         return TicketResult(ticket_id, "missed", (), reason)
 
-    breach = _cap_breach(state, live, account_id)
+    breach = cap_breach(state, live, account_id)
     if breach is not None:
         await _write_ticket(
             ticket_id=ticket_id, account_id=account_id, opp=live, title=title,
