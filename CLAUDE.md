@@ -42,9 +42,9 @@ before changing ingest, discovery, or the paper broker.
 
 ### mypy caveat
 
-`pyproject.toml` sets `strict = true`, but the codebase currently has **47 errors
-across 17 files** and mypy is not part of the green-build bar. Do not claim
-"mypy clean", and do not embark on a 47-error cleanup as a side effect of an
+`pyproject.toml` sets `strict = true`, but the codebase currently has **71 errors
+across 24 files** and mypy is not part of the green-build bar. Do not claim
+"mypy clean", and do not embark on a 71-error cleanup as a side effect of an
 unrelated task. Adding annotations to code you're already touching is welcome.
 
 Known false positive: `arbys/backend/state.py:191-194` reports `PaperBalance has
@@ -177,7 +177,7 @@ Layers, strictly inward-depending:
   which is what `event_group.start_time` and the card countdown use.
 - `arbys/ingest/` — async services: quote `worker`, `engine_runtime` (arb
   detection, triggered only on affected event groups), `pnl_service`,
-  `auto_settle_service`.
+  `auto_settle_service`, `auto_trade_service`.
 
   `engine_runtime` runs **two** detectors per evaluation:
   `detect_cross_venue_two_leg` across venues, and `detect_complementary_set`
@@ -814,6 +814,62 @@ previously did not — a settled winner was indistinguishable from a position
 sold out at market. A ticket's realized profit is computed at read time from
 its **own** fills, because settlement uses an `avg_price` blended across every
 ticket on that outcome.
+
+## The auto-trader fills what the engine published
+
+`ARBYS_ENABLE_AUTO_TRADE` (**0 by default**) starts `AutoTradeService`, which
+consumes `AppState.subscribe_opportunities()` and calls `submit_arb_ticket`
+with `source="auto"` for every opportunity it receives. There is no separate
+threshold: both detectors already refuse to publish anything with
+`net_edge_per_contract(...) <= 0`, so everything on that queue is net-positive
+of fees. **Do not add an edge floor or a gross-edge mode** — they are explicit
+non-goals, and the honest gate being quiet is the finding, not a bug.
+
+It adds no sizing logic. `ARBYS_MAX_TICKET_STAKE` (detection) and
+`ARBYS_MAX_OUTCOME_QTY` (execution) both still bind, and `submit_arb_ticket`
+stays the authoritative enforcement point for the latter. The service
+*additionally* pre-checks the cap via the shared `cap_breach` and skips
+**silently** when it would bind: opportunities republish on fingerprint change,
+so a capped-out group would otherwise write a `rejected` ticket on every tick
+all night, filling the audit log with rows saying only "still capped".
+
+`ARBYS_AUTO_TRADE_COOLDOWN_S` (default 60) ignores a group for a window after a
+**fill**. Rejects and misses deliberately do not start one — a miss means the
+edge was gone, which is no reason to stop watching. Beware the interaction with
+dust: a fill of 0.01 contracts starts the same 60s cooldown as a real one, so a
+half-cent fill can mask a genuine edge on that group. Measured 2026-08-27, 5 of
+496 groups were net-positive worth ~18c in total, three of them sized 0.01-0.03
+contracts against off-market orders — so this is not hypothetical.
+
+**The service must not import `arbys/backend/`.** `backend/state.py` imports
+`ingest`, and `backend/ticket_service.py` imports `backend/state.py`, so the
+reverse is a cycle. Submission and the cap pre-check are injected as callables
+by `AppState`, whose own `ticket_service` imports sit inside the method bodies
+for the same reason. That boundary is also why the service's tests need no
+database.
+
+Backpressure is a known, bounded limitation: `subscribe_opportunities` returns a
+queue of `maxsize=100` and publishers drop with `put_nowait` under
+`suppress(QueueFull)`, so a slow consumer loses opportunities with no error.
+The service logs `auto-trade backpressure` above 50 queued. Processing is
+serial on purpose — concurrent tickets would race on both the cash balance and
+the position cap, and a lost race there is a real oversized position rather
+than a missed trade.
+
+**`stop()` does not cancel an in-flight `handle()` — it waits for it.** The
+plan as written called for a straight `task.cancel()`, but an in-flight call is
+a submission already past the cap pre-check, and `CancelledError` is a
+`BaseException` that every layer built to notice a dropped write (see **A
+dropped write is counted, not silent** below) catches as `Exception` and so
+never sees — cancelling there could leave a `paper_ticket` row stuck at
+`pending` with nothing logged and nothing counted. `stop()` instead sets an
+event the run loop checks before picking up its next item, then waits up to
+`STOP_TIMEOUT_S` (5s) for the current iteration to finish on its own, and only
+cancels as a last resort if that grace period is exceeded. It also logs rather
+than swallows a consumer task that ended on a real exception, and `start()`
+checks whether the previous task actually finished before deciding whether a
+restart is needed — otherwise a crashed consumer would look identical to a
+running one and never come back.
 
 Account-level equity is computed by `shared/equity.py:account_equity`.
 `PnlSnapshotService` and `GET /paper/{account_id}` both call it; if they diverged, the

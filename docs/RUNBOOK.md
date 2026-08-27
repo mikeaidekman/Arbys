@@ -305,6 +305,27 @@ heuristic calls a game wrong, the tell is a ticket whose `realized_profit`
 (computed at read time from that ticket's own fills) looks nothing like its
 `expected_profit` from detection.
 
+### Turning the auto-trader on
+
+Set `ARBYS_ENABLE_AUTO_TRADE=1` in `.env` and restart the backend. There is no
+UI toggle by design. It trades paper only — `PaperExecutionAdapter` is the only
+`ExecutionAdapter` in the repo, and paper fills are atomic, so it cannot end up
+holding one naked leg.
+
+To see what it did:
+
+    select source, status, count(*) from paper_ticket group by source, status;
+
+`source='auto'` rows are the bot's. The `filled` / `missed` / `rejected` split
+is the point: `missed` counts edges that died between publication and
+submission, which is what decides whether latency work is worth anything.
+Cross-check `GET /health` for `dropped_writes` first — non-zero makes every
+count above a lower bound.
+
+To stop it, set the flag back to 0 and restart. To clear its cooldowns without
+a restart, reset the paper account (`POST /paper/{account_id}/reset`), which
+calls `clear_cooldowns()`.
+
 ## 5. Troubleshooting
 
 | Symptom | Likely cause | Fix |

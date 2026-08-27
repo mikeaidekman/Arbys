@@ -1,7 +1,7 @@
 # The auto-trader — design
 
 **Date:** 2026-08-23
-**Status:** approved, not yet implemented
+**Status:** implemented 2026-08-27 (live venue verification pending)
 **Depends on:** [the account page design](2026-08-23-account-page-design.md)
 
 ## Why now
@@ -39,6 +39,20 @@ This is the honest baseline, and it will be quiet. Measured 2026-08-22, 12 of
 245 groups had a gross-positive pair and **zero** had a net-positive one. An
 empty ticket log is the bot working correctly, not a bug, and is not a reason
 to loosen the gate.
+
+**Update 2026-08-27.** The prediction above — that the honest gate would be
+near-silent — held on 2026-08-22 and does not hold now. Measured on 496 live
+groups: 8 gross-positive and **5 net-positive**, together worth about 18c.
+Three of the five were sized at 0.01-0.03 contracts, carrying implausible
+25-36c "edges" that come from dust orders resting at off-market prices on thin
+pre-season books.
+
+The gate stays as specified. But the non-goals below anticipated the wrong
+failure mode: the risk is not that the bot is too quiet to learn from, it is
+that a log of penny fills pollutes the fill-versus-miss ratio this spec exists
+to measure, and that a dust fill spends a full cooldown window blinding the bot
+to a real edge on that group. Revisit an edge floor only with a week of data in
+hand.
 
 ## Service
 
