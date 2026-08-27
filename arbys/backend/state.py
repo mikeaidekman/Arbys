@@ -86,6 +86,34 @@ def _discovery_interval_s() -> float:
         return 600.0
 
 
+def _auto_trade_enabled() -> bool:
+    """Auto-trader master switch. Off by default, like ingest and discovery.
+
+    There is deliberately no runtime UI toggle: the env flag plus the cooldown
+    plus the two existing caps are the whole agreed control set.
+    """
+    return os.environ.get("ARBYS_ENABLE_AUTO_TRADE", "0") == "1"
+
+
+DEFAULT_AUTO_TRADE_COOLDOWN_S = 60.0
+
+
+def _auto_trade_cooldown_s() -> float:
+    """Seconds a group is ignored after the auto-trader fills it.
+
+    An edge stays published for as long as it exists, so without this one edge
+    becomes a burst of tickets on consecutive ticks until the position cap
+    stops it. 0 disables the cooldown.
+    """
+    raw = os.environ.get("ARBYS_AUTO_TRADE_COOLDOWN_S")
+    if raw is None:
+        return DEFAULT_AUTO_TRADE_COOLDOWN_S
+    try:
+        return max(0.0, float(raw))
+    except ValueError:
+        return DEFAULT_AUTO_TRADE_COOLDOWN_S
+
+
 def quote_max_age_s() -> float | None:
     """How old a quote may be before it stops counting as tradeable.
 
