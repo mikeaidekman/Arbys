@@ -35,6 +35,19 @@ log = logging.getLogger(__name__)
 # whether either is ever needed.
 BACKPRESSURE_WARN_QSIZE = 50
 
+# How long stop() gives an in-flight handle() to finish on its own before
+# falling back to cancel(). An in-flight call is a submission already past
+# the position-cap pre-check: cancelling it mid-await can land inside
+# `submit_arb_ticket` after it has written a `pending` paper_ticket row and
+# applied fills to the in-memory broker, leaving that row stuck at `pending`
+# forever with nothing on `/health` pointing at it — the same end state
+# CLAUDE.md records for the 2026-08-25 dropped-write incident, reached by a
+# path the retry-and-count machinery in db/session.py cannot see, because
+# `CancelledError` is a `BaseException` that its `except Exception` does not
+# catch. Letting the current iteration finish avoids that; the timeout exists
+# so a genuinely wedged submit cannot block shutdown forever.
+STOP_TIMEOUT_S = 5.0
+
 
 class AutoTradeService:
     def __init__(
@@ -57,25 +70,69 @@ class AutoTradeService:
         self._clock = clock
         self._task: asyncio.Task | None = None
         self._queue: asyncio.Queue[ArbOpportunity] | None = None
+        self._stop_event: asyncio.Event | None = None
         # group id -> monotonic deadline before which that group is ignored.
         self._cooldown_until: dict[str, float] = {}
 
     async def start(self) -> None:
         if self._task is not None:
-            return
+            if not self._task.done():
+                return
+            # The previous run ended without stop() ever being called to
+            # notice — most likely a crash (see stop()'s docstring for the
+            # normal path). Refusing to restart here would strand the
+            # service permanently; unsubscribe the dead run's queue first so
+            # restarting doesn't also leak a subscription.
+            if self._queue is not None:
+                self._unsubscribe(self._queue)
+                self._queue = None
+        self._stop_event = asyncio.Event()
         self._queue = self._subscribe()
         self._task = asyncio.create_task(self._run())
 
     async def stop(self) -> None:
+        """Ask the consumer to finish its current iteration, then wait for it.
+
+        An in-flight `handle()` call is a submission already past the
+        position-cap pre-check, so it is signalled to stop rather than
+        cancelled outright: cancelling it mid-await can land inside
+        `submit_arb_ticket` after a `pending` paper_ticket row is written and
+        fills are applied to the in-memory broker, abandoning that ticket
+        with nothing anywhere recording it happened (see `STOP_TIMEOUT_S`).
+        `asyncio.shield` keeps the wait's own timeout from reaching into the
+        task; only the explicit `task.cancel()` below does that, and only
+        once the grace period has passed.
+
+        A task that ended with a real exception is logged here rather than
+        swallowed — a consumer that died from a bug must be visible, and
+        `start()` needs the task to actually be done (not merely thought to
+        be running) to know it may restart.
+        """
         if self._task is None:
             return
-        self._task.cancel()
-        with contextlib.suppress(asyncio.CancelledError, Exception):
-            await self._task
-        self._task = None
-        if self._queue is not None:
-            self._unsubscribe(self._queue)
-            self._queue = None
+        task = self._task
+        if self._stop_event is not None:
+            self._stop_event.set()
+        try:
+            await asyncio.wait_for(asyncio.shield(task), timeout=STOP_TIMEOUT_S)
+        except TimeoutError:
+            log.error(
+                "auto-trade consumer did not stop within %.1fs; cancelling "
+                "what may be an in-flight submit",
+                STOP_TIMEOUT_S,
+            )
+            task.cancel()
+            with contextlib.suppress(asyncio.CancelledError):
+                await task
+        except asyncio.CancelledError:
+            pass
+        except Exception:
+            log.exception("auto-trade consumer task ended with an unhandled exception")
+        finally:
+            self._task = None
+            if self._queue is not None:
+                self._unsubscribe(self._queue)
+                self._queue = None
 
     def clear_cooldowns(self) -> None:
         """Forget every group's cooldown; used after a portfolio reset."""
@@ -114,20 +171,47 @@ class AutoTradeService:
 
     async def _run(self) -> None:
         queue = self._queue
+        stop_event = self._stop_event
         assert queue is not None  # set by start() before the task is created
-        while True:
-            opp = await queue.get()
-            depth = queue.qsize()
-            if depth > BACKPRESSURE_WARN_QSIZE:
-                log.warning(
-                    "auto-trade backpressure: %d opportunities queued "
-                    "(max 100, excess is dropped silently)",
-                    depth,
+        assert stop_event is not None  # set by start() before the task is created
+        # A separate task, not just a coroutine to await inline: it has to
+        # keep progressing (so stop() setting the event resolves it promptly)
+        # regardless of which line below is currently suspended.
+        stop_wait = asyncio.create_task(stop_event.wait())
+        try:
+            while True:
+                # Checked before blocking on the queue, not just raced against
+                # it: once stop() has been asked for, an item already resting
+                # in the queue is not "in-flight" and must not be picked up.
+                if stop_event.is_set():
+                    return
+                get_next = asyncio.create_task(queue.get())
+                done, _pending = await asyncio.wait(
+                    {get_next, stop_wait}, return_when=asyncio.FIRST_COMPLETED
                 )
-            # Serial on purpose. Concurrent tickets would race each other on
-            # both the cash balance and the position cap, and a lost race there
-            # is a real oversized position rather than a missed trade.
-            try:
-                await self.handle(opp)
-            except Exception:
-                log.exception("auto-trade failed for group=%s", opp.event_group_id)
+                if get_next not in done:
+                    get_next.cancel()
+                    with contextlib.suppress(asyncio.CancelledError):
+                        await get_next
+                    return
+                opp = get_next.result()
+                depth = queue.qsize()
+                if depth > BACKPRESSURE_WARN_QSIZE:
+                    log.warning(
+                        "auto-trade backpressure: %d opportunities queued "
+                        "(max 100, excess is dropped silently)",
+                        depth,
+                    )
+                # Serial on purpose, and deliberately not interrupted by
+                # stop() partway through (see stop()'s docstring). Concurrent
+                # tickets would also race each other on both the cash balance
+                # and the position cap, and a lost race there is a real
+                # oversized position rather than a missed trade.
+                try:
+                    await self.handle(opp)
+                except Exception:
+                    log.exception("auto-trade failed for group=%s", opp.event_group_id)
+        finally:
+            stop_wait.cancel()
+            with contextlib.suppress(asyncio.CancelledError):
+                await stop_wait
