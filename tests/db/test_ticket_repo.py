@@ -216,6 +216,38 @@ async def test_partially_settled_ticket_still_scores_null():
     assert tickets[0]["realized_profit"] is None
 
 
+async def test_legs_carry_their_own_resolved_value():
+    """Per-leg settlement, so capital returned can be split by venue.
+
+    The partial case is the point: `realized_profit` is null here because one
+    leg is unsettled, but the Kalshi leg has genuinely resolved and its
+    returned capital is known. A ticket-level figure cannot express that, and
+    a per-venue breakdown derived by pro-rating one would be invented.
+    """
+    await create_all()
+    async with session_scope() as session:
+        await _two_leg_filled_ticket(session, ticket_id="tkt-1")
+        await repo.insert_paper_settlement(
+            session, outcome_id="k-yes", venue_id="kalshi",
+            resolved_value=Decimal("1"), source="heuristic",
+        )
+    async with session_scope() as session:
+        tickets = await repo.list_paper_tickets(session, "default")
+    legs = {leg["outcome_id"]: leg for leg in tickets[0]["legs"]}
+    assert legs["k-yes"]["resolved_value"] == Decimal("1")
+    assert legs["p-no"]["resolved_value"] is None
+    assert tickets[0]["realized_profit"] is None
+
+
+async def test_unsettled_legs_report_no_resolved_value():
+    await create_all()
+    async with session_scope() as session:
+        await _two_leg_filled_ticket(session, ticket_id="tkt-1")
+    async with session_scope() as session:
+        tickets = await repo.list_paper_tickets(session, "default")
+    assert all(leg["resolved_value"] is None for leg in tickets[0]["legs"])
+
+
 async def test_title_survives_event_group_deletion():
     """Discovery retires groups routinely. The snapshot is why history keeps
     its name for exactly the games that have finished."""

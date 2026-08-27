@@ -150,6 +150,11 @@ class TicketLegOut(BaseModel):
     limit_price: Decimal
     fill_price: Decimal | None
     fee: Decimal
+    # Settled value of this leg's outcome, or None while it is unresolved.
+    # Carried per leg, not per ticket, because capital deployed and returned
+    # are reported per venue: a ticket-level realized figure cannot be split
+    # across its legs after the fact without inventing the ratio.
+    resolved_value: Decimal | None
     status: str
     rejection_reason: str | None
 

@@ -533,6 +533,7 @@ async def list_paper_tickets(
                 "limit_price": o.limit_price,
                 "fill_price": fill_price,
                 "fee": fee,
+                "resolved_value": settled.get(o.outcome_id),
                 "status": o.status,
                 "rejection_reason": o.rejection_reason,
             }

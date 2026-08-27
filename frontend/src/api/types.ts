@@ -100,6 +100,9 @@ export interface TicketLeg {
   /** Null for a leg that never filled. */
   fill_price: string | null;
   fee: string;
+  /** Settled value of this leg's outcome, null while unresolved. Per leg, not
+   *  per ticket, so capital returned can be split by venue. */
+  resolved_value: string | null;
   status: string;
   rejection_reason: string | null;
 }
