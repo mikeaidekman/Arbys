@@ -26,6 +26,7 @@ from ..adapters.polymarket_us_ws import PolymarketUsWebSocketAdapter
 from ..db import repositories as repo
 from ..db.session import run_write, session_scope
 from ..ingest.auto_settle_service import AutoSettleService
+from ..ingest.auto_trade_service import AutoTradeService
 from ..ingest.engine_runtime import EngineRuntime
 from ..ingest.pnl_service import PnlSnapshotService
 from ..ingest.worker import IngestWorker
@@ -347,6 +348,16 @@ class AppState:
             brokers=self.paper_brokers,
             quotebook=self.quotebook,
         )
+        # Callables rather than `self`: this service lives in `arbys/ingest/`,
+        # which must not import `arbys/backend/`. See its module docstring.
+        self.auto_trade_service = AutoTradeService(
+            subscribe=self.subscribe_opportunities,
+            unsubscribe=self.unsubscribe_opportunities,
+            submit=self._auto_submit_ticket,
+            would_breach_cap=self._auto_would_breach_cap,
+            enabled=_auto_trade_enabled,
+            cooldown_s=_auto_trade_cooldown_s(),
+        )
 
         self.adapter_factories: dict[str, AdapterFactory] = _default_adapter_factories()
         self._adapters: list[MarketDataAdapter] = []
@@ -434,6 +445,14 @@ class AppState:
 
         await self.pnl_service.start()
         await self.auto_settle_service.start()
+
+        if _auto_trade_enabled():
+            await self.auto_trade_service.start()
+            log.info(
+                "ARBYS_ENABLE_AUTO_TRADE=1; the auto-trader will fill "
+                "net-positive opportunities into paper account %s",
+                self.default_account_id,
+            )
 
         if _ingest_enabled():
             await self._start_ingest()
@@ -644,6 +663,7 @@ class AppState:
             await self._discovery_service.stop()
             self._discovery_service = None
         await self._stop_ingest()
+        await self.auto_trade_service.stop()
         await self.auto_settle_service.stop()
         await self.pnl_service.stop()
 
@@ -669,6 +689,7 @@ class AppState:
                     amount=DEFAULT_STARTING_BALANCE,
                 )
         self.auto_settle_service.clear_settled()
+        self.auto_trade_service.clear_cooldowns()
         log.info("paper account %s reset to $%s per venue", account_id, DEFAULT_STARTING_BALANCE)
 
     def _set_group_opportunities(
@@ -734,6 +755,32 @@ class AppState:
         """
         base_id = event_group_id.split(":", 1)[0]
         return self.engine.evaluate_now(base_id)
+
+    async def _auto_submit_ticket(self, opp: ArbOpportunity) -> str:
+        """Submit an auto-trader ticket, returning just its status.
+
+        Imported inside the method: `ticket_service` imports `max_outcome_qty`
+        from this module at module level, so a module-level import here is a
+        genuine cycle.
+        """
+        from .ticket_service import submit_arb_ticket
+
+        result = await submit_arb_ticket(self, opp, source="auto")
+        return result.status
+
+    def _auto_would_breach_cap(self, opp: ArbOpportunity) -> bool:
+        """Whether the position cap would reject this ticket, checked cheaply.
+
+        Reuses `cap_breach` so there is one implementation of the rule, not
+        two. This reads the *published* opportunity while `submit_arb_ticket`
+        re-checks the re-detected live one, so the two can disagree at the
+        margin — which is fine and intended: this one only decides whether
+        submitting is worth an audit row, and the authoritative check still
+        runs inside the ticket service.
+        """
+        from .ticket_service import cap_breach
+
+        return cap_breach(self, opp, self.default_account_id) is not None
 
     def subscribe_opportunities(self) -> asyncio.Queue[ArbOpportunity]:
         q: asyncio.Queue[ArbOpportunity] = asyncio.Queue(maxsize=100)

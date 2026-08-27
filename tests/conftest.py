@@ -14,6 +14,9 @@ same file passes in 20 seconds with ingest off. It had passed earlier the same
 day, which is what makes this so easy to misdiagnose as "the change I just
 made": the test is only as reliable as an external venue's mood.
 
+The auto-trader submits tickets the moment it is on, so a suite run on a
+live-configured machine would otherwise write real paper history.
+
 Credentials are cleared for the same reason. With them present an adapter
 factory selects the authenticated WebSocket, and a test that merely bootstraps
 ``AppState`` would open a real socket to the venue.
@@ -34,6 +37,7 @@ _OFFLINE_ENV: dict[str, str] = {
     "ARBYS_ENABLE_INGEST": "0",
     "ARBYS_ENABLE_DISCOVERY": "0",
     "ARBYS_ENABLE_DRAFTKINGS": "0",
+    "ARBYS_ENABLE_AUTO_TRADE": "0",
 }
 
 # Credential vars are removed rather than blanked: the loaders treat empty

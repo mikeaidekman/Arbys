@@ -13,8 +13,11 @@ from fastapi.testclient import TestClient
 from arbys.adapters.base import MarketDataAdapter
 from arbys.backend import state as state_module
 from arbys.backend.app import create_app
+from arbys.backend.state import get_state
+from arbys.db import repositories as repo
 from arbys.db import session as db_session
-from arbys.shared.types import Outcome, Quote
+from arbys.db.session import session_scope
+from arbys.shared.types import EventGroup, EventGroupLeg, Outcome, Quote
 
 
 class StubAdapter(MarketDataAdapter):
@@ -38,12 +41,13 @@ class StubAdapter(MarketDataAdapter):
 
 
 @pytest.fixture(autouse=True)
-def _reset(tmp_path: Path):
+async def _reset(tmp_path: Path):
     db_file = tmp_path / "arbys-test.db"
     os.environ["ARBYS_DB_URL"] = f"sqlite+aiosqlite:///{db_file}"
     os.environ["ARBYS_ENABLE_INGEST"] = "1"
     db_session.reset_engine()
     state_module.reset_state()
+    await db_session.create_all()
     yield
     db_session.reset_engine()
     state_module.reset_state()
@@ -462,3 +466,89 @@ def test_match_in_play_ignores_venues_that_report_nothing():
     # Nobody said -> unknown, so callers fall back to the clock.
     m = match({"kalshi": game("kalshi", None, None)})
     assert m.in_play() is None
+
+
+# --- auto-trader wiring: constructed, started/stopped, cleared on reset ----
+
+
+async def _live_edge():
+    """An eg-1 group quoted 0.40 / 0.50 — a live net-positive edge, funded."""
+    s = get_state()
+    group = EventGroup(
+        id="eg-1",
+        title="MLB: ATL @ LAD",
+        legs=(
+            EventGroupLeg(outcome_id="p-yes", venue_id="polymarket_us", is_yes_side=True),
+            EventGroupLeg(outcome_id="k-no", venue_id="kalshi", is_yes_side=False),
+        ),
+    )
+    s.event_groups[group.id] = group
+    s.engine.register_group(group)
+    async with session_scope() as session:
+        await repo.ensure_paper_account(session, s.default_account_id)
+    for oid, px in (("p-yes", Decimal("0.40")), ("k-no", Decimal("0.50"))):
+        s.quotebook.upsert(Quote(outcome_id=oid, bid=px, ask=px))
+    for broker in s.paper_brokers.values():
+        broker.deposit(s.default_account_id, Decimal("10000"))
+    return s
+
+
+async def test_auto_trader_is_not_started_by_default(monkeypatch):
+    monkeypatch.delenv("ARBYS_ENABLE_AUTO_TRADE", raising=False)
+    s = get_state()
+    await s.bootstrap()
+    try:
+        assert s.auto_trade_service._task is None
+    finally:
+        await s.shutdown()
+
+
+async def test_auto_trader_starts_when_enabled_and_stops_on_shutdown(monkeypatch):
+    monkeypatch.setenv("ARBYS_ENABLE_AUTO_TRADE", "1")
+    s = get_state()
+    await s.bootstrap()
+    assert s.auto_trade_service._task is not None
+    await s.shutdown()
+    assert s.auto_trade_service._task is None
+
+
+async def test_auto_trader_fills_a_published_edge_end_to_end(monkeypatch):
+    """The broadcast path AppState already uses, straight into a ticket."""
+    monkeypatch.setenv("ARBYS_ENABLE_AUTO_TRADE", "1")
+    # This file's own _reset fixture turns ingest on for its stub-adapter
+    # tests above; here eg-1's legs are registered before bootstrap() runs,
+    # so a real ingest pass would build live REST adapters and reach out to
+    # the actual venues (observed: a genuine GET to gateway.polymarket.us).
+    # This test only cares about the opportunity broadcast -> auto-trade
+    # path, so keep ingest off, per "tests never hit a real venue".
+    monkeypatch.setenv("ARBYS_ENABLE_INGEST", "0")
+    s = await _live_edge()
+    await s.bootstrap()
+    tickets: list[dict] = []
+    try:
+        opps = s.engine.evaluate_now("eg-1")
+        assert opps, "fixture must produce a live net-positive opportunity"
+        # _set_group_opportunities is what broadcasts to subscribers.
+        s._set_group_opportunities("eg-1", opps)
+        for _ in range(400):
+            async with session_scope() as session:
+                tickets = await repo.list_paper_tickets(session, s.default_account_id)
+            # submit_arb_ticket writes the row as "pending" before the router
+            # runs (the ticket must exist first: paper_order.ticket_id is an
+            # FK to it) and only sets a terminal status afterward, so a bare
+            # `if tickets: break` reliably catches the row mid-flight.
+            if tickets and tickets[0]["status"] != "pending":
+                break
+            await asyncio.sleep(0.005)
+    finally:
+        await s.shutdown()
+    assert len(tickets) == 1
+    assert tickets[0]["source"] == "auto"
+    assert tickets[0]["status"] == "filled"
+
+
+async def test_reset_clears_the_auto_trade_cooldowns():
+    s = get_state()
+    s.auto_trade_service._cooldown_until["eg-1"] = 1e9
+    await s.reset_paper_account(s.default_account_id)
+    assert s.auto_trade_service._cooldown_until == {}
