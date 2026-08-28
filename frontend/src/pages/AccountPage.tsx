@@ -334,6 +334,21 @@ export function AccountPage() {
     ? shown.reduce((a, r) => a + (r.net ?? 0), 0)
     : null;
 
+  // Unrealized is deliberately NOT windowed by `range`, unlike every other
+  // tile in the row. A position is open now or it is not; asking what it was
+  // worth "in the last 7 days" has no meaning. Computed from the positions
+  // query rather than the ticket ledger because the backend marks each leg
+  // there — the ledger only knows what a ticket cost, not what it is worth.
+  const openLegs = (positions.data ?? []).filter((x) => Number(x.qty) !== 0);
+  const unrealizedValue = openLegs.length
+    ? openLegs.reduce((a, x) => a + Number(x.unrealized), 0)
+    : null;
+  const markValue = openLegs.reduce(
+    (a, x) => a + Number(x.qty) * Number(x.mark ?? x.avg_price),
+    0,
+  );
+  const unquotedLegs = openLegs.filter((x) => x.mark === null).length;
+
   const maxBucket = Math.max(...d.edgeBuckets.map((b) => b.count), 1);
   const loading = tickets.isLoading || pnl.isLoading;
 
@@ -474,9 +489,18 @@ export function AccountPage() {
             color={pnlColor(d.returnOnCapital)}
           />
           <Kpi
-            label="Hit rate"
-            value={pct(d.hitRate, 0)}
-            sub={`${d.wonCount} of ${d.settledCount} settled`}
+            label="Unrealized value"
+            value={
+              unrealizedValue === null ? "—" : amount(unrealizedValue, { sign: true })
+            }
+            sub={
+              openLegs.length === 0
+                ? "no open positions"
+                : `mark ${amount(markValue)} · ${openLegs.length} leg${
+                    openLegs.length === 1 ? "" : "s"
+                  }${unquotedLegs > 0 ? ` · ${unquotedLegs} unquoted` : ""}`
+            }
+            color={pnlColor(unrealizedValue)}
           />
           <Kpi
             label="Open exposure"

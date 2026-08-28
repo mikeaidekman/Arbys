@@ -243,9 +243,13 @@ with Kalshi-NO on the same question.
 Single-page terminal at `/`, with `/admin` and `/account` as secondary routes.
 `/account` replaced the old sidebar — `AccountPanel.tsx` no longer exists,
 and neither does `TicketHistory` (the performance dashboard took its place in
-`770c57e`). `AccountStrip` — full-width, above the opportunity table, and
-reused as the header of `/account` so the two cannot drift — is what survives
-of it. The UI is built on an external design system copied in
+`770c57e`). `AccountStrip` — full-width, above the opportunity table — is what
+survives of it, and it is rendered on the **terminal only**. `/account` has
+its own KPI tile row, fed from the ticket ledger and the positions endpoint
+rather than from the account summary, so the two show overlapping figures from
+different sources and *can* drift. (An earlier version of this note and the
+component's own docstring both claimed the strip was reused as `/account`'s
+header. Neither was true.) The UI is built on an external design system copied in
 verbatim at `frontend/public/design/industry/styles.css`.
 
 Style via that system's semantic classes (`.btn.btn-primary`, `.tag`, `.table`,

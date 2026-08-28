@@ -79,8 +79,10 @@ function Cell({
 }
 
 /**
- * The account summary that replaces the old right-hand sidebar. Reused as the
- * header of /account so the two views cannot drift apart.
+ * The account summary that replaces the old right-hand sidebar. Rendered on
+ * the terminal only — /account has its own KPI tile row fed from the ticket
+ * ledger and the positions endpoint, so the two are separate components
+ * showing overlapping figures from different sources.
  *
  * Figures come from the live summary endpoint, not from pnl_snapshots: those
  * are written every 30s and do not exist at all until the first one lands
@@ -106,7 +108,7 @@ export function AccountStrip() {
     flexWrap: "wrap",
   } as const;
 
-  // This strip sits at the top of both / and /account, so a failed fetch is
+  // This strip is the first thing on the terminal, so a failed fetch is
   // the most visible thing on screen — render it as an error, not as a
   // quietly wiped $0.00 account (which is indistinguishable from a reset one).
   if (summary.isError) {
