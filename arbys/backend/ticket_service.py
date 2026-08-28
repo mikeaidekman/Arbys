@@ -40,7 +40,7 @@ from ..db import repositories as repo
 from ..db.session import run_write
 from ..shared.arb_engine import ArbOpportunity
 from ..shared.execution_router import InsufficientLegsError
-from .state import max_outcome_qty
+from .state import max_leg_age_skew_s, max_outcome_qty
 
 if TYPE_CHECKING:  # pragma: no cover - import cycle guard
     from .state import AppState
@@ -167,6 +167,67 @@ async def _write_rejected_legs(
     await run_write("ticket.rejected_legs", work)
 
 
+def stale_leg_skew(state: AppState, live: ArbOpportunity) -> str | None:
+    """The reason this ticket's legs describe different moments, or None.
+
+    An arbitrage is a claim that two venues disagree *right now*. If one leg's
+    quote arrived seconds ago and the other's is minutes old, the "divergence"
+    may just be the market having moved while one feed was not answering --
+    and a paper broker fills against the stale price as happily as the live
+    one, booking profit that was never there.
+
+    Measured over 2026-08-27: 23 of 260 auto fills (8.8%) had one leg stale
+    and the other live, and those 23 carried **$34.55 of the day's $97.71**
+    expected profit -- 35%. The clearest was `atp-BONZI-ZANDSCHULP`, where our
+    Polymarket leg sat pinned at 0.86 for seven minutes while Kalshi ran
+    0.15 -> 0.02 toward resolution; it produced the single richest fill of the
+    day and five more besides. The skew distribution over those fills is
+    bimodal with a clean gap -- 0, 1, 2, 4, 22, 28 seconds, then nothing until
+    36 -- so the 30s default sits in observed empty space rather than on a
+    guess.
+
+    Skew, not absolute age, is the discriminating signal. Two legs both quiet
+    for ten minutes are a pre-game market whose price genuinely has not moved
+    (28 such fills, $1.63 between them); one quiet leg against one busy leg is
+    a feed that stopped answering. `ARBYS_QUOTE_MAX_AGE_S` already handles the
+    case where *everything* is too old.
+
+    Ages come from `get_with_age`, which counts from the back-dated arrival
+    stamp -- so a snapshot the venue replayed hours late is old the moment it
+    lands, which is exactly the leg this must catch.
+    """
+    limit = max_leg_age_skew_s()
+    if limit is None:
+        return None
+    ages: dict[str, float] = {}
+    for leg in live.legs:
+        if not leg.is_buy:
+            continue
+        entry = state.quotebook.get_with_age(leg.outcome_id)
+        if entry is None:
+            # No quote at all for a leg we are about to buy. Detection cannot
+            # have used one either, so there is nothing to compare; the
+            # execution path rejects this on its own merits.
+            return None
+        ages[leg.outcome_id] = entry[1]
+    if len(ages) < 2:
+        return None
+    skew = max(ages.values()) - min(ages.values())
+    if skew <= limit:
+        return None
+    detail = ", ".join(f"{oid} {age:.1f}s" for oid, age in sorted(ages.items()))
+    # `stale_leg_skew:` prefix is a machine-matchable marker, matching how
+    # `position_cap:` and `edge_no_longer_available:` mark their own reasons,
+    # so the ticket log can be grouped on it. The per-leg ages ride along in
+    # the prose because nothing else records them -- `paper_order` has no age
+    # column, so without this the evidence for a phantom fill exists only for
+    # as long as the process that saw it.
+    return (
+        f"stale_leg_skew:{skew:.1f}s between legs exceeds {limit:.0f}s "
+        f"({detail})"
+    )[:256]
+
+
 def cap_breach(state: AppState, live: ArbOpportunity, account_id: str) -> str | None:
     """The outcome that would exceed ARBYS_MAX_OUTCOME_QTY, or None.
 
@@ -206,7 +267,23 @@ async def submit_arb_ticket(
     *,
     source: str,
     account_id: str | None = None,
+    record_nonfill: bool = True,
 ) -> TicketResult:
+    """Submit one opportunity, recording the attempt.
+
+    `record_nonfill=False` runs the attempt identically but skips the audit
+    row when the outcome is a miss or a *pre-execution* rejection. Only the
+    auto-trader passes it, and only for a group it has already logged a
+    non-fill for inside its window -- a live book republishes on every depth
+    tick, so without it one dying edge writes a row per tick (1,149 missed
+    tickets across 116 groups on 2026-08-27, 74% of the repeats in the same
+    second). A human click is always an attempt and always recorded.
+
+    It cannot suppress a rejection raised *after* execution begins: that
+    ticket's row is already written, because `paper_order.ticket_id` is an FK
+    to it. That is the right split anyway -- a ticket that reached the router
+    and failed there is a real event, not a repeat of a pre-flight refusal.
+    """
     account_id = account_id or state.default_account_id
     ticket_id = uuid.uuid4().hex
     title = _title(state, opp.event_group_id)
@@ -218,18 +295,31 @@ async def submit_arb_ticket(
         # and a query can group on it to answer "how often does an edge die
         # between publication and submission" across both entry points.
         reason = f"edge_no_longer_available:{opp.event_group_id}"
-        await _write_ticket(
-            ticket_id=ticket_id, account_id=account_id, opp=opp, title=title,
-            source=source, status="missed", reason=reason, economics=None,
-        )
+        if record_nonfill:
+            await _write_ticket(
+                ticket_id=ticket_id, account_id=account_id, opp=opp, title=title,
+                source=source, status="missed", reason=reason, economics=None,
+            )
         return TicketResult(ticket_id, "missed", (), reason)
+
+    # Before the cap, because a ticket priced off a leg the venue abandoned
+    # should not be judged on whether we could afford it.
+    skew = stale_leg_skew(state, live)
+    if skew is not None:
+        if record_nonfill:
+            await _write_ticket(
+                ticket_id=ticket_id, account_id=account_id, opp=live, title=title,
+                source=source, status="rejected", reason=skew, economics=live,
+            )
+        return TicketResult(ticket_id, "rejected", (), skew)
 
     breach = cap_breach(state, live, account_id)
     if breach is not None:
-        await _write_ticket(
-            ticket_id=ticket_id, account_id=account_id, opp=live, title=title,
-            source=source, status="rejected", reason=breach, economics=live,
-        )
+        if record_nonfill:
+            await _write_ticket(
+                ticket_id=ticket_id, account_id=account_id, opp=live, title=title,
+                source=source, status="rejected", reason=breach, economics=live,
+            )
         return TicketResult(ticket_id, "rejected", (), breach)
 
     intent = ExecutionIntent(

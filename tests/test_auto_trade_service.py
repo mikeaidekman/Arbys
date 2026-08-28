@@ -56,23 +56,35 @@ class _Harness:
         self.status = status
         self.enabled = enabled
         self.breach = False
+        self.cross_venue_only = True
         self.submitted: list[ArbOpportunity] = []
+        # (opportunity, record_nonfill) for every submission, so a test can
+        # assert on whether the audit row was asked for as well as on whether
+        # the attempt happened at all - the two are deliberately separable.
+        self.recorded: list[bool] = []
         self.now = 1000.0
         self.queue: asyncio.Queue[ArbOpportunity] = asyncio.Queue(maxsize=100)
         self.unsubscribed: list[asyncio.Queue[ArbOpportunity]] = []
 
-    async def submit(self, opp: ArbOpportunity) -> str:
+    async def submit(self, opp: ArbOpportunity, *, record_nonfill: bool = True) -> str:
         self.submitted.append(opp)
+        self.recorded.append(record_nonfill)
         return self.status
 
-    def service(self, *, cooldown_s: float = 60.0) -> AutoTradeService:
+    def service(
+        self, *, cooldown_s: float = 60.0, nonfill_log_s: float = 0.0
+    ) -> AutoTradeService:
+        """`nonfill_log_s=0` by default so the pre-existing tests, which are
+        about the *fill* cooldown, keep seeing every attempt recorded."""
         return AutoTradeService(
             subscribe=lambda: self.queue,
             unsubscribe=self.unsubscribed.append,
-            submit=lambda opp: self.submit(opp),
+            submit=self.submit,
             would_breach_cap=lambda _opp: self.breach,
             enabled=lambda: self.enabled,
             cooldown_s=cooldown_s,
+            cross_venue_only=lambda: self.cross_venue_only,
+            nonfill_log_s=nonfill_log_s,
             clock=lambda: self.now,
         )
 
@@ -169,7 +181,7 @@ async def test_the_run_loop_drains_the_queue_and_survives_a_failure():
     h = _Harness()
     calls = {"n": 0}
 
-    async def flaky(opp: ArbOpportunity) -> str:
+    async def flaky(opp: ArbOpportunity, *, record_nonfill: bool = True) -> str:
         calls["n"] += 1
         if calls["n"] == 1:
             raise RuntimeError("submit blew up")
@@ -224,7 +236,7 @@ async def test_stop_lets_an_in_flight_submit_finish():
     started = asyncio.Event()
     release = asyncio.Event()
 
-    async def slow_submit(opp: ArbOpportunity) -> str:
+    async def slow_submit(opp: ArbOpportunity, *, record_nonfill: bool = True) -> str:
         started.set()
         await release.wait()
         h.submitted.append(opp)
@@ -260,7 +272,7 @@ async def test_stop_propagates_a_cancellation_aimed_at_itself():
     started = asyncio.Event()
     release = asyncio.Event()
 
-    async def slow_submit(opp: ArbOpportunity) -> str:
+    async def slow_submit(opp: ArbOpportunity, *, record_nonfill: bool = True) -> str:
         started.set()
         await release.wait()
         h.submitted.append(opp)
@@ -303,7 +315,7 @@ async def test_stop_logs_when_the_consumer_died_of_a_real_bug(caplog):
     queue: asyncio.Queue[ArbOpportunity] = _ExplodingQueue()
     unsubscribed: list[asyncio.Queue[ArbOpportunity]] = []
 
-    async def submit(opp: ArbOpportunity) -> str:
+    async def submit(opp: ArbOpportunity, *, record_nonfill: bool = True) -> str:
         return "filled"
 
     svc = AutoTradeService(
@@ -350,7 +362,7 @@ async def test_start_restarts_after_the_consumer_previously_died():
     unsubscribed: list[asyncio.Queue[ArbOpportunity]] = []
     submitted: list[ArbOpportunity] = []
 
-    async def submit(opp: ArbOpportunity) -> str:
+    async def submit(opp: ArbOpportunity, *, record_nonfill: bool = True) -> str:
         submitted.append(opp)
         return "filled"
 
@@ -379,3 +391,147 @@ async def test_start_restarts_after_the_consumer_previously_died():
 
     assert len(submitted) == 1, "start() must actually restart the consumer after a crash"
     assert queue in unsubscribed, "the dead run's subscription must not leak on restart"
+
+
+def _intra_opp(group_id: str = "eg-1:kalshi") -> ArbOpportunity:
+    """A complementary edge: both legs on one venue.
+
+    This is what `engine_runtime` publishes under a synthetic `<group>:<venue>`
+    id, but the service reads the legs rather than the id, so the id here is
+    incidental.
+    """
+    return ArbOpportunity(
+        event_group_id=group_id,
+        legs=(
+            ArbLeg(
+                outcome_id="k-a:YES",
+                venue_id="kalshi",
+                is_buy=True,
+                price=Decimal("0.47"),
+                qty=Decimal("10"),
+                fee=Decimal("0"),
+            ),
+            ArbLeg(
+                outcome_id="k-b:YES",
+                venue_id="kalshi",
+                is_buy=True,
+                price=Decimal("0.48"),
+                qty=Decimal("10"),
+                fee=Decimal("0"),
+            ),
+        ),
+        total_stake=Decimal("9.5"),
+        guaranteed_profit=Decimal("0.5"),
+        guaranteed_profit_bps=Decimal("526"),
+    )
+
+
+async def test_an_intra_venue_edge_is_not_traded():
+    """One venue's own book crossed against itself is not an arbitrage we can
+    win: a co-located taker clears it in milliseconds, and the large ones are
+    one-sided stale quotes. 5 fills of 244 attempts worth $0.41 over a day."""
+    h = _Harness()
+    assert await h.service().handle(_intra_opp()) is None
+    assert h.submitted == []
+
+
+async def test_intra_venue_is_judged_by_leg_venues_not_by_the_group_id():
+    """The `<group>:<venue>` id is a naming convention; what makes a ticket
+    unwinnable is that both legs rest on the same book. A cross-venue edge
+    must still trade even if something publishes it under a suffixed id."""
+    h = _Harness()
+    cross_under_suffixed_id = _opp(group_id="eg-1:kalshi")
+    assert await h.service().handle(cross_under_suffixed_id) == "filled"
+    assert len(h.submitted) == 1
+
+
+async def test_intra_venue_can_be_switched_back_on():
+    h = _Harness()
+    h.cross_venue_only = False
+    assert await h.service().handle(_intra_opp()) == "filled"
+    assert len(h.submitted) == 1
+
+
+async def test_a_repeat_miss_is_reattempted_but_not_logged_twice():
+    """The attempt must continue at full rate — a vanished edge is no reason
+    to stop watching — while the duplicate audit row is suppressed. Without
+    this, one dying edge wrote a row per depth tick: 1,149 missed tickets
+    describing 116 groups, 74% of the repeats inside the same second."""
+    h = _Harness(status="missed")
+    svc = h.service(nonfill_log_s=60.0)
+
+    assert await svc.handle(_opp()) == "missed"
+    assert h.recorded == [True]
+
+    assert await svc.handle(_opp()) == "missed"
+    assert len(h.submitted) == 2, "the edge must still be re-attempted"
+    assert h.recorded == [True, False], "the second row must be suppressed"
+
+
+async def test_the_nonfill_log_window_expires():
+    h = _Harness(status="missed")
+    svc = h.service(nonfill_log_s=60.0)
+    await svc.handle(_opp())
+    h.now += 59
+    await svc.handle(_opp())
+    h.now += 2
+    await svc.handle(_opp())
+    assert h.recorded == [True, False, True]
+
+
+async def test_the_nonfill_log_window_is_per_group():
+    h = _Harness(status="missed")
+    svc = h.service(nonfill_log_s=60.0)
+    await svc.handle(_opp(group_id="eg-1"))
+    await svc.handle(_opp(group_id="eg-2"))
+    assert h.recorded == [True, True]
+
+
+async def test_a_rejection_shares_the_nonfill_window_with_a_miss():
+    """Rejections duplicate for the same reason misses do — 365 tickets across
+    61 groups — so one window governs both rather than two mechanisms."""
+    h = _Harness(status="rejected")
+    svc = h.service(nonfill_log_s=60.0)
+    await svc.handle(_opp())
+    await svc.handle(_opp())
+    assert h.recorded == [True, False]
+
+
+async def test_a_fill_reopens_the_nonfill_window():
+    """A group that just filled has done something new, so the next miss on it
+    is news rather than more of the burst the window exists to collapse.
+
+    The flag passed on the *filling* call is not asserted: a fill's row is
+    written before the router runs whatever this says, so the value is
+    meaningless there. What matters is the miss that follows it.
+    """
+    h = _Harness(status="missed")
+    svc = h.service(cooldown_s=0.0, nonfill_log_s=60.0)
+    await svc.handle(_opp())
+    await svc.handle(_opp())
+    assert h.recorded == [True, False], "the burst is collapsed"
+
+    h.status = "filled"
+    await svc.handle(_opp())
+    h.status = "missed"
+    await svc.handle(_opp())
+    assert h.recorded[-1] is True, "the miss after a fill is news again"
+
+
+async def test_a_zero_nonfill_window_records_every_attempt():
+    h = _Harness(status="missed")
+    svc = h.service(nonfill_log_s=0.0)
+    await svc.handle(_opp())
+    await svc.handle(_opp())
+    assert h.recorded == [True, True]
+
+
+async def test_clear_cooldowns_also_reopens_the_nonfill_window():
+    """A reset wipes the ticket log, so suppressing the next miss as a
+    duplicate of a row that no longer exists would lose it for nothing."""
+    h = _Harness(status="missed")
+    svc = h.service(nonfill_log_s=60.0)
+    await svc.handle(_opp())
+    svc.clear_cooldowns()
+    await svc.handle(_opp())
+    assert h.recorded == [True, True]

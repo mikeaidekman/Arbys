@@ -115,6 +115,58 @@ def _auto_trade_cooldown_s() -> float:
         return DEFAULT_AUTO_TRADE_COOLDOWN_S
 
 
+DEFAULT_AUTO_TRADE_NONFILL_LOG_S = 60.0
+
+
+def _auto_trade_cross_venue_only() -> bool:
+    """Whether the auto-trader ignores same-venue (complementary) edges.
+
+    On by default. See `AutoTradeService`'s module docstring for the
+    measurement: 5 fills of 244 attempts worth $0.41, against 537 of 1,149
+    missed tickets and half the forgone edge, with the large ones being
+    one-sided stale quotes rather than arbitrage. Set to 0 to trade them again.
+    """
+    return os.environ.get("ARBYS_AUTO_TRADE_CROSS_VENUE_ONLY", "1") == "1"
+
+
+def _auto_trade_nonfill_log_s() -> float:
+    """Seconds before the auto-trader logs another non-fill on the same group.
+
+    Suppresses only the audit row; the attempt still runs, so an edge that
+    comes back is still filled. 0 records every attempt, which is what the
+    service did before and what produced 882 duplicate rows in a day.
+    """
+    raw = os.environ.get("ARBYS_AUTO_TRADE_NONFILL_LOG_S")
+    if raw is None:
+        return DEFAULT_AUTO_TRADE_NONFILL_LOG_S
+    try:
+        return max(0.0, float(raw))
+    except ValueError:
+        return DEFAULT_AUTO_TRADE_NONFILL_LOG_S
+
+
+DEFAULT_MAX_LEG_AGE_SKEW_S = 30.0
+
+
+def max_leg_age_skew_s() -> float | None:
+    """How far apart two legs' quote ages may be before a ticket is refused.
+
+    An arb is a claim about a single moment, so legs priced minutes apart are
+    not evidence of one. See `ticket_service.stale_leg_skew` for the
+    measurement behind the 30s default -- briefly, the observed skew on real
+    fills is bimodal with nothing at all between 28s and 36s, and everything
+    above that gap was a feed that had stopped answering. 0 disables the gate.
+    """
+    raw = os.environ.get("ARBYS_MAX_LEG_AGE_SKEW_S")
+    if raw is None:
+        return DEFAULT_MAX_LEG_AGE_SKEW_S
+    try:
+        value = float(raw)
+    except ValueError:
+        return DEFAULT_MAX_LEG_AGE_SKEW_S
+    return None if value <= 0 else value
+
+
 def quote_max_age_s() -> float | None:
     """How old a quote may be before it stops counting as tradeable.
 
@@ -357,6 +409,8 @@ class AppState:
             would_breach_cap=self._auto_would_breach_cap,
             enabled=_auto_trade_enabled,
             cooldown_s=_auto_trade_cooldown_s(),
+            cross_venue_only=_auto_trade_cross_venue_only,
+            nonfill_log_s=_auto_trade_nonfill_log_s(),
         )
 
         self.adapter_factories: dict[str, AdapterFactory] = _default_adapter_factories()
@@ -756,7 +810,9 @@ class AppState:
         base_id = event_group_id.split(":", 1)[0]
         return self.engine.evaluate_now(base_id)
 
-    async def _auto_submit_ticket(self, opp: ArbOpportunity) -> str:
+    async def _auto_submit_ticket(
+        self, opp: ArbOpportunity, *, record_nonfill: bool = True
+    ) -> str:
         """Submit an auto-trader ticket, returning just its status.
 
         Imported inside the method: `ticket_service` imports `max_outcome_qty`
@@ -765,7 +821,9 @@ class AppState:
         """
         from .ticket_service import submit_arb_ticket
 
-        result = await submit_arb_ticket(self, opp, source="auto")
+        result = await submit_arb_ticket(
+            self, opp, source="auto", record_nonfill=record_nonfill
+        )
         return result.status
 
     def _auto_would_breach_cap(self, opp: ArbOpportunity) -> bool:

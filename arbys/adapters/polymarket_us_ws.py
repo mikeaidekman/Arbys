@@ -100,6 +100,18 @@ REPAIR_SWEEP_S = 15.0
 # rebuilding the connection instead.
 MAX_REPAIR_ATTEMPTS = 5
 
+# How many times one market may cost its shard a reconnect before it stops
+# being allowed to. `MAX_REPAIR_ATTEMPTS` lives in a dict scoped to a single
+# connection, and escalation *destroys that connection* -- so the give-up
+# budget was rebuilt empty by the very act of giving up, and a market that
+# could never answer looped forever at RECONNECT_COOLDOWN_S. Measured
+# 2026-08-27/28: 165 escalations between 21:00 and 01:10, every stuck slug a
+# game from that evening's slate that had already finished. A settled market
+# never streams again however often it is asked, so the budget that bounds
+# that cost has to outlive the connection. It is cleared the moment the slug
+# delivers anything, so a genuinely broken socket still gets its reconnects.
+MAX_ESCALATIONS_PER_SLUG = 2
+
 # A shard reconnects for dark markets at most this often. Reconnecting costs a
 # burst of replayed snapshots, so it is the escalation of last resort and must
 # not become a loop when a market is simply finished.
@@ -217,6 +229,9 @@ class PolymarketUsWebSocketAdapter(MarketDataAdapter):
         self._last_ws_at: dict[str, float] = {}
         # Per shard, when it last reconnected because of dark markets.
         self._last_reconnect_at: dict[int, float] = {}
+        # Per slug, how many reconnects it has already cost. Deliberately on
+        # the adapter and not on the connection: see MAX_ESCALATIONS_PER_SLUG.
+        self._escalations: dict[str, int] = {}
 
     def set_confirmed_in_play(self, fn: Callable[[], set[str]] | None) -> None:
         """Markets a venue has positively confirmed are under way.
@@ -405,6 +420,10 @@ class PolymarketUsWebSocketAdapter(MarketDataAdapter):
                     slug = split_outcome_id(quote.outcome_id)[0]
                     delivered.add(slug)
                     attempts.pop(slug, None)  # it answered; restore its budget
+                    # Same reasoning, across connections: a market that is
+                    # streaming again has earned back the right to justify a
+                    # reconnect if it later goes dark for real.
+                    self._escalations.pop(slug, None)
                     await queue.put(quote)
                 self._maybe_report(index, len(slugs), stats)
                 now = time.monotonic()
@@ -554,7 +573,10 @@ class PolymarketUsWebSocketAdapter(MarketDataAdapter):
         that invents an arbitrage against the other venue when it goes stale.
 
         Cooldown-limited because a reconnect makes the venue replay cached
-        snapshots for the whole shard, so it must stay the last resort.
+        snapshots for the whole shard, so it must stay the last resort — and
+        budget-limited per slug across connections, because the cooldown alone
+        only paces the loop rather than ending it. See
+        `MAX_ESCALATIONS_PER_SLUG`.
         """
         confirmed: set[str] = set()
         if self._confirmed_in_play is not None:
@@ -569,6 +591,13 @@ class PolymarketUsWebSocketAdapter(MarketDataAdapter):
             if slug in confirmed
             and attempts.get(slug, 0) >= MAX_REPAIR_ATTEMPTS
             and now - self._last_ws_at.get(slug, now) > self._priority_dark_after_s
+            # Spent its cross-connection budget: reconnecting has already been
+            # tried for this market and did not bring it back, so it is a
+            # settled or delisted book rather than a broken socket. Its quotes
+            # age out and are withheld, which is the safe outcome; what must
+            # not continue is dropping every *other* market on the shard for
+            # it, every RECONNECT_COOLDOWN_S, for the rest of the night.
+            and self._escalations.get(slug, 0) < MAX_ESCALATIONS_PER_SLUG
         ]
         if not stuck:
             return
@@ -576,6 +605,8 @@ class PolymarketUsWebSocketAdapter(MarketDataAdapter):
         if last is not None and now - last < RECONNECT_COOLDOWN_S:
             return
         self._last_reconnect_at[index] = now
+        for slug in stuck:
+            self._escalations[slug] = self._escalations.get(slug, 0) + 1
         raise DarkMarkets(
             f"{len(stuck)} in-play market(s) still dark after "
             f"{MAX_REPAIR_ATTEMPTS} repairs: {stuck[:3]}"

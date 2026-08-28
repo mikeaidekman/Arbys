@@ -22,7 +22,7 @@ Run everything from the repo root with the venv Python — `venv\Scripts\python.
 — rather than a bare `python`.
 
 ```powershell
-venv\Scripts\python.exe -m pytest -q            # 361 tests, must stay green
+venv\Scripts\python.exe -m pytest -q            # 382 tests, must stay green
 venv\Scripts\python.exe -m ruff check .         # must stay clean
 venv\Scripts\python.exe -m mypy arbys           # see caveat below — NOT clean today
 ```
@@ -630,6 +630,30 @@ that silently failed to register would not, which is why this is read as a
 registration failure rather than the per-connection ceiling sharding
 addresses.
 
+**A market's reconnect budget must outlive the connection it is spent on.**
+`MAX_REPAIR_ATTEMPTS` lives in a dict scoped to a single connection, and
+escalation *destroys that connection* — so the give-up budget was rebuilt
+empty by the very act of giving up, and `RECONNECT_COOLDOWN_S` only paced the
+resulting loop rather than ending it. A settled market never streams again
+however often it is asked, so it cycled forever: measured 2026-08-27/28,
+**165 escalations between 21:00 and 01:10, every stuck slug a game from that
+evening's slate that had already finished** — `nfl-lar-lac-2026-08-27` was
+still forcing shard rebuilds at 01:10 the next morning. Each rebuild costs the
+*whole shard* a burst of replayed, hours-old snapshots.
+
+`MAX_ESCALATIONS_PER_SLUG` (2) bounds it on the adapter rather than the
+connection, and is cleared the moment the slug delivers anything — so a
+genuinely broken socket still gets its reconnects, while a delisted book stops
+dropping every other market on its shard. Its quotes then age out and are
+withheld, which is the safe outcome.
+
+The upstream contributor is that `EventGroup.in_play` is **sticky**: it is
+refreshed only when a discovery pass rediscovers the group, Polymarket drops
+finished events from its league feed, and retirement is skipped whenever any
+sub-pass raised — which Kalshi's 429s make routine. So a finished game keeps
+`in_play=True` until something else retires it. The adapter-level budget is the
+fix that does not depend on discovery being timely.
+
 `_repair_subscriptions` re-sends a subscribe for just those markets, on the
 existing connection — subscribing is additive, so it costs one small message
 and no reconnect. Two kinds qualify: **never delivered on this connection**
@@ -777,6 +801,36 @@ against a live Kalshi leg.
   moment it lands. Without that, a replayed snapshot defeats this whole
   invariant while satisfying it on paper: it genuinely *did* just arrive. See
   **The feed abandons markets** under **Venues**.
+- **An arb's legs must describe the same moment.** `ticket_service.stale_leg_skew`
+  refuses a ticket whose buy legs' quote ages differ by more than
+  `ARBYS_MAX_LEG_AGE_SKEW_S` (default 30s, `0` disables). An arbitrage is a
+  claim that two venues disagree *right now*; a leg from five minutes ago
+  against one from half a second ago is not evidence of that, and the paper
+  broker fills against the stale price as happily as the live one.
+
+  Measured over 2026-08-27's 260 auto fills: **23 (8.8%) had one leg stale and
+  one live, and those 23 carried $34.55 of the day's $97.71 expected profit —
+  35%.** The clearest is `atp-BONZI-ZANDSCHULP`, where our Polymarket leg sat
+  pinned at **0.86 for seven minutes** while Kalshi ran 0.15 → 0.02 toward
+  resolution; it produced the single richest fill of the day and five more
+  besides. Corroborating: 22.8% of published cross-venue opportunities that
+  day summed to an ask under 0.95 — a >5c gross edge, against the 2.75c
+  maximum divergence measured on 2026-08-11.
+
+  **30s is not a guess.** The observed skew on real fills is bimodal with a
+  clean gap: 0, 1, 2, 4, 22, 28 seconds, then nothing at all until 36.
+
+  **Skew, not absolute age, is the discriminating signal** — and this is why
+  the check is not just a tighter `ARBYS_QUOTE_MAX_AGE_S`. Two legs both quiet
+  for ten minutes are a pre-game market whose price genuinely has not moved
+  (28 such fills, $1.63 between them); one quiet leg against one busy leg is a
+  feed that stopped answering. Ages come from `get_with_age`, which counts from
+  the **back-dated** arrival stamp, so a snapshot the venue replayed hours late
+  is old the moment it lands.
+
+  The rejection reason carries each leg's age, because **nothing else records
+  it** — `paper_order` has no age column, so without that string the evidence
+  for a phantom fill lives only as long as the process that saw it.
 - **Groups are retired.** Discovery removes `source="discovery"` groups a
   *complete* pass no longer finds; `source="manual"` is never touched, and
   retirement is skipped when any sub-pass raised so a venue outage isn't read
@@ -824,6 +878,35 @@ threshold: both detectors already refuse to publish anything with
 `net_edge_per_contract(...) <= 0`, so everything on that queue is net-positive
 of fees. **Do not add an edge floor or a gross-edge mode** — they are explicit
 non-goals, and the honest gate being quiet is the finding, not a bug.
+
+**Two filters narrow what reaches a ticket, and both are measurements rather
+than profitability judgements.** The spec's "no loosening of the trigger"
+non-goal is about edge floors and gross-edge modes; these have mechanisms
+behind them and are individually switchable.
+
+- **Cross-venue only** (`ARBYS_AUTO_TRADE_CROSS_VENUE_ONLY`, 1 by default).
+  A complementary (same-venue) edge is one venue's own book crossed against
+  itself, which someone co-located takes in milliseconds. Measured 2026-08-27:
+  5 fills of 244 attempts worth **$0.41**, against **537 of 1,149** missed
+  tickets and half the forgone edge. The large ones are not arbitrage at all —
+  Kalshi quoting `LAR:YES` at 0.87 beside `LAC:YES` at 0.05, or a 1002bps
+  "edge" — they are one-sided stale quotes. The rule reads the legs'
+  `venue_id`s, **not** the `<group>:<venue>` id, so it follows what the ticket
+  would actually do rather than a naming convention.
+- **One non-fill row per group per window**
+  (`ARBYS_AUTO_TRADE_NONFILL_LOG_S`, 60s). A miss deliberately starts no
+  cooldown, but `_opp_fingerprint` includes depth-derived `qty`, so a live book
+  republishes on nearly every tick and each republish missed again: **1,149
+  missed tickets describing 116 distinct groups**, 74% of the repeats landing
+  in the *same second*, plus 365 rejections across 61 groups — **882 of 1,808
+  tickets (49%) were duplicates**, which read out as a 16% per-ticket fill rate
+  against a 94% per-group one. The attempt still runs at full rate; only the
+  duplicate row is suppressed, via `submit_arb_ticket(..., record_nonfill=False)`.
+  A fill always writes its row — it has to exist before the router runs, since
+  `paper_order.ticket_id` is an FK to it — and a **manual click is still always
+  recorded**. Nothing counts the suppressed attempts, deliberately: every
+  published opportunity is already in `arb_opportunity`, so attempt volume
+  stays recoverable from that tape.
 
 It adds no sizing logic. `ARBYS_MAX_TICKET_STAKE` (detection) and
 `ARBYS_MAX_OUTCOME_QTY` (execution) both still bind, and `submit_arb_ticket`

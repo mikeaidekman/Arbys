@@ -342,3 +342,134 @@ async def test_descriptor_missed_ticket_names_an_unknown_group():
     async with session_scope() as session:
         tickets = await repo.list_paper_tickets(session, s.default_account_id)
     assert tickets[0]["title_snapshot"] == "eg-nonexistent"
+
+
+async def _arb_group_with_a_stale_leg(stale_age_s: float = 400.0):
+    """The same eg-1 edge, but Polymarket's leg arrived already stale.
+
+    Built via `source_age_s` rather than by re-upserting later, because
+    `QuoteBook.upsert` refuses to replace a newer book with an older one — the
+    guard that stops a replayed snapshot clobbering live prices. This is the
+    real shape of the failure anyway: Polymarket US answers a subscribe with a
+    cached book that can be hours old, and it lands looking brand new.
+    """
+    s = get_state()
+    group = EventGroup(
+        id="eg-1",
+        title="ATP: Bonzi v Zandschulp",
+        legs=(
+            EventGroupLeg(outcome_id="p-yes", venue_id="polymarket_us", is_yes_side=True),
+            EventGroupLeg(outcome_id="k-no", venue_id="kalshi", is_yes_side=False),
+        ),
+    )
+    s.event_groups[group.id] = group
+    s.engine.register_group(group)
+    async with session_scope() as session:
+        await repo.ensure_paper_account(session, s.default_account_id)
+    s.quotebook.upsert(
+        Quote(
+            outcome_id="p-yes",
+            bid=Decimal("0.40"),
+            ask=Decimal("0.40"),
+            source_age_s=stale_age_s,
+        )
+    )
+    s.quotebook.upsert(
+        Quote(outcome_id="k-no", bid=Decimal("0.50"), ask=Decimal("0.50"))
+    )
+    for broker in s.paper_brokers.values():
+        broker.deposit(s.default_account_id, Decimal("10000"))
+    return s, group
+
+
+async def test_a_ticket_whose_legs_describe_different_moments_is_refused():
+    """An arb is a claim that two venues disagree *right now*. One leg minutes
+    behind the other is not evidence of that, and the paper broker fills
+    against the stale price as happily as the live one — which is how 23 of
+    260 auto fills on 2026-08-27 came to carry 35% of the day's profit."""
+    s, _ = await _arb_group_with_a_stale_leg()
+    opps = s.engine.evaluate_now("eg-1")
+    assert opps, "the stale leg must still produce an edge — that is the problem"
+    result = await submit_arb_ticket(s, opps[0], source="auto")
+    assert result.status == "rejected"
+    assert result.reason is not None
+    assert result.reason.startswith("stale_leg_skew:")
+    # The per-leg ages ride along in the reason because nothing else records
+    # them; paper_order has no age column.
+    assert "p-yes" in result.reason and "k-no" in result.reason
+
+
+async def test_the_stale_leg_rejection_is_recorded_with_its_economics():
+    s, _ = await _arb_group_with_a_stale_leg()
+    opp = s.engine.evaluate_now("eg-1")[0]
+    await submit_arb_ticket(s, opp, source="auto")
+    async with session_scope() as session:
+        tickets = await repo.list_paper_tickets(session, s.default_account_id)
+    assert tickets[0]["status"] == "rejected"
+    assert tickets[0]["rejection_reason"].startswith("stale_leg_skew:")
+    assert tickets[0]["total_stake"] is not None, "a refused ticket still says how big it would have been"
+
+
+async def test_two_equally_quiet_legs_are_not_refused():
+    """Skew, not absolute age, is the signal. Two legs both quiet for minutes
+    are a pre-game market whose price genuinely has not moved — 28 such fills
+    over the measured day, worth $1.63 between them. `ARBYS_QUOTE_MAX_AGE_S`
+    is what handles everything being too old."""
+    s = get_state()
+    group = EventGroup(
+        id="eg-1",
+        title="NCAAF: ALBY @ BUFF",
+        legs=(
+            EventGroupLeg(outcome_id="p-yes", venue_id="polymarket_us", is_yes_side=True),
+            EventGroupLeg(outcome_id="k-no", venue_id="kalshi", is_yes_side=False),
+        ),
+    )
+    s.event_groups[group.id] = group
+    s.engine.register_group(group)
+    async with session_scope() as session:
+        await repo.ensure_paper_account(session, s.default_account_id)
+    for oid, px in (("p-yes", Decimal("0.40")), ("k-no", Decimal("0.50"))):
+        s.quotebook.upsert(
+            Quote(outcome_id=oid, bid=px, ask=px, source_age_s=400.0)
+        )
+    for broker in s.paper_brokers.values():
+        broker.deposit(s.default_account_id, Decimal("10000"))
+    result = await submit_arb_ticket(s, s.engine.evaluate_now("eg-1")[0], source="auto")
+    assert result.status == "filled"
+
+
+async def test_the_skew_gate_can_be_disabled(monkeypatch):
+    monkeypatch.setenv("ARBYS_MAX_LEG_AGE_SKEW_S", "0")
+    s, _ = await _arb_group_with_a_stale_leg()
+    result = await submit_arb_ticket(s, s.engine.evaluate_now("eg-1")[0], source="auto")
+    assert result.status == "filled"
+
+
+async def test_record_nonfill_false_suppresses_the_row_but_not_the_attempt():
+    """The auto-trader passes this for a group it has already logged a
+    non-fill for. The attempt must be identical; only the duplicate audit row
+    goes away."""
+    s, _ = await _arb_group()
+    opp = s.engine.evaluate_now("eg-1")[0]
+    for oid in ("p-yes", "k-no"):
+        s.quotebook.upsert(
+            Quote(outcome_id=oid, bid=Decimal("0.60"), ask=Decimal("0.60"))
+        )
+    result = await submit_arb_ticket(s, opp, source="auto", record_nonfill=False)
+    assert result.status == "missed", "the attempt still runs and still reports"
+    async with session_scope() as session:
+        tickets = await repo.list_paper_tickets(session, s.default_account_id)
+    assert tickets == [], "no duplicate row"
+
+
+async def test_record_nonfill_false_still_lets_a_fill_through():
+    """A fill's row has to exist before the router runs — paper_order.ticket_id
+    is an FK to it — so the flag must never reach that path."""
+    s, _ = await _arb_group()
+    opp = s.engine.evaluate_now("eg-1")[0]
+    result = await submit_arb_ticket(s, opp, source="auto", record_nonfill=False)
+    assert result.status == "filled"
+    async with session_scope() as session:
+        tickets = await repo.list_paper_tickets(session, s.default_account_id)
+    assert len(tickets) == 1
+    assert len(tickets[0]["legs"]) == 2

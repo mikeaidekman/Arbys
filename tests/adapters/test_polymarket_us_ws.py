@@ -11,7 +11,10 @@ from cryptography.hazmat.primitives.asymmetric import ed25519
 
 from arbys.adapters.polymarket_us_auth import PolymarketUsCredentials
 from arbys.adapters.polymarket_us_ws import (
+    MAX_ESCALATIONS_PER_SLUG,
+    MAX_REPAIR_ATTEMPTS,
     WS_SIGN_PATH,
+    DarkMarkets,
     PolymarketUsWebSocketAdapter,
     frame_age_s,
 )
@@ -459,8 +462,15 @@ async def test_a_market_the_socket_never_delivers_is_resubscribed():
             creds=creds,
             url=f"ws://127.0.0.1:{port}",
             repair_sweep_s=0.05,
-            dark_after_s=0.05,
-            priority_dark_after_s=0.05,
+            # Comfortably longer than the sweep interval, and than the 0.01s
+            # the handler sleeps between frames. With all three equal at 0.05s
+            # a *streaming* market needed only 50ms of scheduler jitter to trip
+            # its own deadline and get swept into the repair batch, failing the
+            # last assertion below with `[['chatty', 'dark']]` -- the
+            # long-standing flake in this file, which is a margin problem in
+            # the fixture rather than anything about the adapter.
+            dark_after_s=0.2,
+            priority_dark_after_s=0.2,
         )
         try:
             async def drain():
@@ -754,4 +764,145 @@ async def test_a_guessed_in_play_market_does_not_force_a_reconnect():
     assert len(connections) == 1, (
         f"a guessed in-play market dropped a healthy socket "
         f"({len(connections)} connects)"
+    )
+
+
+def _escalation_adapter() -> PolymarketUsWebSocketAdapter:
+    creds, _ = _creds()
+    return PolymarketUsWebSocketAdapter(
+        outcome_ids=["dark:LONG"],
+        creds=creds,
+        url="ws://127.0.0.1:1",  # never dialled; _maybe_escalate is called directly
+        priority_slugs=lambda: {"dark"},
+        confirmed_in_play=lambda: {"dark"},
+    )
+
+
+def test_a_market_may_only_cost_its_shard_a_bounded_number_of_reconnects():
+    """`MAX_REPAIR_ATTEMPTS` lives in a dict scoped to one connection, and
+    escalation *destroys that connection* — so the give-up budget was rebuilt
+    empty by the very act of giving up. A settled market, which can never
+    stream again however often it is asked, therefore looped forever at
+    RECONNECT_COOLDOWN_S: 165 escalations between 21:00 and 01:10 on
+    2026-08-27/28, every stuck slug a game from that evening that had already
+    finished.
+    """
+    adapter = _escalation_adapter()
+    slugs = ["dark"]
+    attempts = {"dark": MAX_REPAIR_ATTEMPTS}
+    now = 1000.0
+    adapter._last_ws_at["dark"] = now - 100  # long past any deadline
+
+    raised = 0
+    for _ in range(MAX_ESCALATIONS_PER_SLUG + 3):
+        # Clear the per-shard cooldown each time: this test is about the
+        # per-slug budget, and the cooldown only paces the loop rather than
+        # ending it — which is exactly why the cooldown alone was not enough.
+        adapter._last_reconnect_at.clear()
+        try:
+            adapter._maybe_escalate(0, slugs, {"dark"}, attempts, now)
+        except DarkMarkets:
+            raised += 1
+
+    assert raised == MAX_ESCALATIONS_PER_SLUG, (
+        f"a permanently silent market escalated {raised} times; the budget "
+        f"that bounds that cost must outlive the connection it is spent on"
+    )
+
+
+def test_a_market_that_streams_again_earns_back_its_reconnect_budget():
+    """The bound must not permanently disarm escalation for a market whose
+    socket really did break later. Delivery is the signal: `_connect_and_pump`
+    clears the counter the moment a slug sends anything."""
+    adapter = _escalation_adapter()
+    slugs = ["dark"]
+    attempts = {"dark": MAX_REPAIR_ATTEMPTS}
+    now = 1000.0
+    adapter._last_ws_at["dark"] = now - 100
+
+    for _ in range(MAX_ESCALATIONS_PER_SLUG):
+        adapter._last_reconnect_at.clear()
+        with pytest.raises(DarkMarkets):
+            adapter._maybe_escalate(0, slugs, {"dark"}, attempts, now)
+
+    adapter._last_reconnect_at.clear()
+    adapter._maybe_escalate(0, slugs, {"dark"}, attempts, now)  # spent: no raise
+
+    # It delivers a frame, which is what `_connect_and_pump` reacts to.
+    adapter._escalations.pop("dark", None)
+
+    adapter._last_reconnect_at.clear()
+    with pytest.raises(DarkMarkets):
+        adapter._maybe_escalate(0, slugs, {"dark"}, attempts, now)
+
+
+@pytest.mark.asyncio
+async def test_a_settled_market_stops_thrashing_the_shard(monkeypatch):
+    """End to end: a confirmed in-play market that never answers rebuilds the
+    connection a bounded number of times and then leaves the shard alone.
+
+    RECONNECT_COOLDOWN_S is shortened so the loop this pins would show up
+    inside a test's lifetime; at its real 120s the runaway took four hours to
+    become visible.
+    """
+    monkeypatch.setattr(
+        "arbys.adapters.polymarket_us_ws.RECONNECT_COOLDOWN_S", 0.05
+    )
+    connections: list[int] = []
+
+    async def handler(ws):
+        connections.append(id(ws))
+        while True:
+            try:
+                await asyncio.wait_for(ws.recv(), timeout=0.01)
+            except TimeoutError:
+                pass
+            except Exception:
+                return
+            try:
+                await ws.send(
+                    _frame(
+                        "chatty",
+                        [{"px": {"value": "0.4000"}, "qty": "5"}],
+                        [{"px": {"value": "0.4200"}, "qty": "7"}],
+                    )
+                )
+            except Exception:
+                return
+            await asyncio.sleep(0.01)
+
+    creds, _ = _creds()
+    async with websockets.serve(handler, "127.0.0.1", 0) as server:
+        port = server.sockets[0].getsockname()[1]
+        adapter = PolymarketUsWebSocketAdapter(
+            outcome_ids=["chatty:LONG", "settled:LONG"],
+            creds=creds,
+            url=f"ws://127.0.0.1:{port}",
+            repair_sweep_s=0.02,
+            dark_after_s=0.02,
+            priority_dark_after_s=0.02,
+            priority_slugs=lambda: {"settled"},
+            confirmed_in_play=lambda: {"settled"},
+            initial_backoff_s=0.01,
+            max_backoff_s=0.02,
+        )
+
+        async def drain():
+            async for _q in adapter.stream_quotes():
+                pass
+
+        task = asyncio.create_task(drain())
+        try:
+            await _wait_for(lambda: len(connections) >= 2, timeout_s=6.0)
+            await asyncio.sleep(1.5)  # many more sweeps and cooldowns
+        finally:
+            task.cancel()
+            with contextlib.suppress(asyncio.CancelledError):
+                await task
+            await adapter.close()
+
+    assert len(connections) >= 2, "escalation must still happen at all"
+    assert len(connections) <= 1 + MAX_ESCALATIONS_PER_SLUG, (
+        f"a settled market rebuilt the connection {len(connections)} times; "
+        f"the budget should have capped it at {1 + MAX_ESCALATIONS_PER_SLUG}"
     )
