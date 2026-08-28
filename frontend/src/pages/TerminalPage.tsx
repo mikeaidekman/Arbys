@@ -98,6 +98,10 @@ export function TerminalPage() {
       <nav
         className="nav"
         style={{
+          // White header band over the grey page ground. Without a background
+          // the nav shows the page ground, and the tiles below then float on
+          // an unbroken grey field with nothing anchoring the top of it.
+          background: "var(--color-surface)",
           borderBottom: "1px solid var(--color-divider)",
           flex: "none",
         }}
@@ -136,27 +140,28 @@ export function TerminalPage() {
 
       <AccountStrip />
 
+      <CategoryRail
+        groups={liveGroups}
+        sportFilter={sportFilter}
+        onSportChange={setSportFilter}
+        arbOnly={arbOnly}
+        onToggleArbOnly={() => setArbOnly((v) => !v)}
+        venues={VENUES}
+      />
+
+      {/* Single column now the rail is horizontal. The table is the widest
+          thing on the screen and gets the full width back. */}
       <div
         style={{
           flex: 1,
           minHeight: 0,
-          display: "grid",
-          gridTemplateColumns: "minmax(160px, 190px) minmax(0, 1fr)",
-          gap: 0,
+          display: "flex",
+          padding: "0 var(--space-4) var(--space-4)",
         }}
       >
-        <CategoryRail
-          groups={liveGroups}
-          sportFilter={sportFilter}
-          onSportChange={setSportFilter}
-          arbOnly={arbOnly}
-          onToggleArbOnly={() => setArbOnly((v) => !v)}
-          venues={VENUES}
-        />
-
         <section
-          className="vt-scroll"
-          style={{ minHeight: 0, overflow: "auto", padding: 0 }}
+          className="vt-scroll vt-surface"
+          style={{ minHeight: 0, overflow: "auto", padding: 0, flex: 1 }}
         >
           {filtered.length === 0 ? (
             <div style={{ opacity: 0.6, fontSize: 13, padding: "var(--space-4)" }}>

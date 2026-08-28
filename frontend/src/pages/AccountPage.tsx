@@ -53,39 +53,44 @@ function pnlColor(n: number | null): string {
   return n >= 0 ? "var(--vt-green-dark)" : "var(--vt-red-dark)";
 }
 
-function Corners() {
-  return (
-    <>
-      <i className="corner tl" />
-      <i className="corner tr" />
-      <i className="corner bl" />
-      <i className="corner br" />
-    </>
-  );
-}
-
 function Kpi({
   label,
   value,
   sub,
   color,
+  primary,
 }: {
   label: string;
   value: string;
   sub: string;
   color?: string;
+  /** The one tile the eye should land on. `color` is ignored when set: the
+   *  inverted tile carries its own foreground, and a green/red pnlColor on
+   *  navy is unreadable. */
+  primary?: boolean;
 }) {
   return (
-    <div className="vt-kpi blueprint">
-      <Corners />
+    <div className={`vt-kpi${primary ? " vt-kpi-primary" : ""}`}>
       <div className="vt-lab">{label}</div>
       <div
         className="vt-mono"
-        style={{ fontSize: 22, fontWeight: 600, color: color ?? "var(--color-text)" }}
+        style={{
+          fontSize: 22,
+          fontWeight: 600,
+          letterSpacing: "-0.5px",
+          color: primary ? "var(--color-surface)" : (color ?? "var(--color-text)"),
+        }}
       >
         {value}
       </div>
-      <div style={{ fontSize: 11, opacity: 0.55 }}>{sub}</div>
+      <div
+        style={{
+          fontSize: 11,
+          color: primary ? "var(--color-accent-300)" : "var(--color-neutral-600)",
+        }}
+      >
+        {sub}
+      </div>
     </div>
   );
 }
@@ -182,8 +187,10 @@ function Curve({ points }: { points: CurvePoint[] }) {
               className="vt-mono"
               style={{
                 fontSize: 10,
-                opacity: 0.5,
-                background: "var(--color-bg)",
+                color: "var(--color-neutral-600)",
+                // Knocks the gridline out from behind the label, so it takes
+                // the surface it sits on — the panel — not the page ground.
+                background: "var(--color-surface)",
                 alignSelf: "flex-start",
                 paddingRight: 4,
               }}
@@ -233,8 +240,7 @@ function BreakdownPanel({
 }) {
   const max = Math.max(...rows.map((r) => Math.abs(r.net ?? 0)), 0);
   return (
-    <div className="vt-panel blueprint">
-      <Corners />
+    <div className="vt-panel">
       <div className="vt-lab">{label}</div>
       {rows.length === 0 ? (
         <Empty>{emptyNote}</Empty>
@@ -339,7 +345,11 @@ export function AccountPage() {
           position: "sticky",
           top: 0,
           zIndex: 5,
-          background: "var(--color-bg)",
+          // White header band over the grey page ground, matching the
+          // terminal. It was --color-bg when page and card shared a colour;
+          // now a sticky --color-bg nav would scroll as a grey stripe over
+          // the white panels beneath it.
+          background: "var(--color-surface)",
         }}
       >
         <span className="nav-brand">Vantage</span>
@@ -440,7 +450,7 @@ export function AccountPage() {
             label="Net profit"
             value={amount(d.netProfit, { sign: true })}
             sub={`${range} · ${d.settledCount} settled`}
-            color={pnlColor(d.netProfit)}
+            primary
           />
           <Kpi
             label="Capital deployed"
@@ -478,8 +488,7 @@ export function AccountPage() {
             gap: "var(--space-4)",
           }}
         >
-          <div className="vt-panel blueprint">
-            <Corners />
+          <div className="vt-panel">
             <div style={{ display: "flex", alignItems: "baseline", gap: "var(--space-3)" }}>
               <div className="vt-lab">Cumulative net P&amp;L</div>
               <span style={{ flex: 1 }} />
@@ -523,8 +532,7 @@ export function AccountPage() {
             gap: "var(--space-4)",
           }}
         >
-          <div className="vt-panel blueprint">
-            <Corners />
+          <div className="vt-panel">
             <div className="vt-lab">Captured edge distribution</div>
             {d.meanEdgeCents === null ? (
               <Empty>No ticket in this window recorded an expected edge.</Empty>
@@ -577,8 +585,7 @@ export function AccountPage() {
             )}
           </div>
 
-          <div className="vt-panel blueprint">
-            <Corners />
+          <div className="vt-panel">
             <div className="vt-lab">Capital by venue leg</div>
             {d.byVenue.length === 0 ? (
               <Empty>No filled legs in this window.</Empty>
@@ -645,8 +652,7 @@ export function AccountPage() {
             </div>
           </div>
 
-          <div className="vt-panel blueprint">
-            <Corners />
+          <div className="vt-panel">
             <div className="vt-lab">Outcome mix</div>
             {d.rows.length === 0 ? (
               <Empty>No tickets in this window.</Empty>
@@ -675,8 +681,7 @@ export function AccountPage() {
           </div>
         </div>
 
-        <div className="vt-panel blueprint">
-          <Corners />
+        <div className="vt-panel">
           <div
             style={{
               display: "flex",
@@ -904,8 +909,7 @@ function OpenPositions({
 }) {
   const open = groupPositionsByEvent((query.data ?? []).filter((p) => Number(p.qty) !== 0));
   return (
-    <div className="vt-panel blueprint">
-      <Corners />
+    <div className="vt-panel">
       <div className="vt-lab">Open positions</div>
       <div style={{ overflowX: "auto" }} className="vt-scroll">
         <table className="table" style={{ fontSize: 12, width: "100%" }}>

@@ -21,10 +21,112 @@ a:hover { color: var(--color-accent-700); }
 }
 
 :root {
-  --vt-green: #1f9d55;
-  --vt-green-dark: #167a42;
-  --vt-green-tint: #e7f6ec;
-  --vt-red-dark: #a1263c;
+  /* ══════════════════════════════════════════════════════════════════════
+     Re-skin — 2026-08-28
+     Redefines the vendored industry system's tokens rather than editing
+     public/design/industry/styles.css, which is a verbatim third-party copy.
+     Keeping the override here means the vendor file stays pristine and the
+     whole re-skin is one revertible block.
+
+     Scheme lifted from the Trading Performance Dashboard artboard: white
+     cards on a grey ground, IBM Plex Sans for labels with IBM Plex Mono for
+     every numeral, and colour reserved for gain/loss/interactive.
+
+     The rule that no component may carry a raw hex is unchanged — it is
+     satisfied here by REDEFINING the tokens, so every call site still reads
+     var(--color-*).
+     ══════════════════════════════════════════════════════════════════════ */
+
+  /* Ground and surface swap roles: the old system was a flat grey field with
+     lighter cards. Here the page is grey and cards are white, which is what
+     gives the KPI strip and table their edges. */
+  --color-bg: #eef0f3;
+  --color-surface: #ffffff;
+  --color-text: #171a1f;
+
+  --color-accent: #2b5fc7;
+  --color-accent-2: #17376f;
+
+  /* Flat hairline instead of a color-mix against --color-text. The mixed
+     version tracked the text colour; this scheme wants one constant rule
+     weight regardless of what sits next to it. */
+  --color-divider: #dde1e7;
+
+  --color-neutral-100: #f1f3f6;
+  --color-neutral-200: #e9ecf0;
+  --color-neutral-300: #dde1e7;
+  --color-neutral-400: #ccd2da;
+  --color-neutral-500: #a4abb6;
+  --color-neutral-600: #8b93a0;
+  --color-neutral-700: #6b7381;
+  --color-neutral-800: #4a515b;
+  --color-neutral-900: #171a1f;
+
+  --color-accent-100: #eaf0fb;
+  --color-accent-200: #cfdcf5;
+  --color-accent-300: #c3d3ef;
+  --color-accent-400: #a9c0e8;
+  --color-accent-500: #5b86d8;
+  --color-accent-600: #2b5fc7;
+  --color-accent-700: #234ea6;
+  --color-accent-800: #17376f;
+  --color-accent-900: #0f2449;
+
+  --color-accent-2-100: #eaf0fb;
+  --color-accent-2-200: #cfdcf5;
+  --color-accent-2-300: #c6d6f0;
+  --color-accent-2-400: #a9c0e8;
+  --color-accent-2-500: #5b86d8;
+  --color-accent-2-600: #234ea6;
+  --color-accent-2-700: #17376f;
+  --color-accent-2-800: #0f2449;
+  --color-accent-2-900: #08162e;
+
+  /* One family, two cuts. The old pairing used a condensed display face for
+     headings; this scheme has no display voice at all — hierarchy comes from
+     weight, size and the 0.9px-tracked uppercase label, not from a second
+     typeface. */
+  --font-heading: "IBM Plex Sans", Helvetica, Arial, sans-serif;
+  --font-heading-weight: 600;
+  --font-body: "IBM Plex Sans", Helvetica, Arial, sans-serif;
+  --font-mono: "IBM Plex Mono", ui-monospace, "SF Mono", Menlo, monospace;
+
+  --radius-sm: 2px;
+  --radius-md: 4px;
+  --radius-lg: 6px;
+
+  /* The vendored shadows are a grey-black wash. This scheme carries almost no
+     elevation — structure comes from the 1px hairline and the white/grey
+     ground contrast — so these are pulled right back rather than removed,
+     which would break .elev-* call sites. */
+  --shadow-sm: 0 1px 2px rgba(20, 30, 50, 0.06);
+  --shadow-md: 0 1px 3px rgba(20, 30, 50, 0.10);
+  --shadow-lg: 0 4px 16px rgba(20, 30, 50, 0.12);
+
+  /* Profit/loss. The design system still has no such pair, so the terminal
+     still defines its own — these are the re-skin's values. */
+  --vt-green: #1f7a4d;
+  --vt-green-dark: #1a6642;
+  --vt-green-tint: #e8f3ed;
+  --vt-red-dark: #cc3a33;
+}
+
+/* Every numeral in the terminal is mono. This is the single biggest
+   readability change: digits share an advance width, so a column of prices or
+   sizes lines up vertically and can be scanned down rather than read cell by
+   cell. .vt-mono is redefined rather than replaced so existing call sites
+   pick it up for free. */
+.vt-mono {
+  font-family: var(--font-mono);
+  font-variant-numeric: tabular-nums;
+  letter-spacing: -0.2px;
+}
+
+/* Table numerics get the same treatment without every cell needing the class:
+   .vt-num is already on every numeric column header and cell. */
+.vt-num {
+  font-family: var(--font-mono);
+  font-variant-numeric: tabular-nums;
 }
 
 .vt-scroll::-webkit-scrollbar { width: 8px; }
@@ -67,12 +169,18 @@ a:hover { color: var(--color-accent-700); }
    new colors, radii or type scales. */
 .vt-table { font-size: 12px; }
 .vt-table th {
-  padding: 5px 8px;
+  padding: 7px 8px;
   position: sticky;
   top: 0;
-  background: var(--color-bg);
+  /* The surface the table sits on, not the page ground. These were the same
+     colour before the re-skin; now the table is a white card on a grey page,
+     so a --color-bg header would show as a grey band floating over white
+     rows as you scroll. */
+  background: var(--color-surface);
   z-index: 1;
   white-space: nowrap;
+  letter-spacing: 0.9px;
+  border-bottom: 1px solid var(--color-divider);
 }
 .vt-table td {
   padding: 5px 8px;
@@ -129,41 +237,132 @@ a:hover { color: var(--color-accent-700); }
   text-transform: uppercase;
   opacity: 0.55;
 }
+/* KPI tile and panel are the same object at two sizes: a white card on the
+   grey page ground, separated by a hairline rather than by elevation. Before
+   the re-skin these were borders drawn straight on the page ground, which
+   worked when page and card were the same colour and stops working the moment
+   they are not. */
 .vt-kpi {
+  background: var(--color-surface);
   border: 1px solid var(--color-divider);
-  padding: var(--space-3);
+  border-radius: var(--radius-md);
+  padding: 11px 13px;
   display: flex;
   flex-direction: column;
-  gap: 2px;
+  gap: 3px;
+  min-width: 0;
 }
+/* The anchor metric. One per row — the point is that the eye lands somewhere
+   first, which stops working if several tiles compete. */
+.vt-kpi-primary {
+  background: var(--color-accent-800);
+  border-color: var(--color-accent-800);
+}
+.vt-kpi-primary .vt-lab { color: var(--color-accent-300); opacity: 1; }
+.vt-kpi-primary,
+.vt-kpi-primary .vt-mono { color: var(--color-surface); }
+
 .vt-panel {
+  background: var(--color-surface);
   border: 1px solid var(--color-divider);
-  padding: var(--space-4);
+  border-radius: var(--radius-md);
+  padding: 12px 13px 11px;
   display: flex;
   flex-direction: column;
   gap: var(--space-3);
   min-width: 0;
 }
+/* Same object as .vt-pill on the terminal — one selection control across both
+   screens rather than two that drift. Sentence case, not uppercase: these
+   carry data labels ("Never filled", "7d") where uppercase costs legibility
+   and buys nothing, unlike the 10px --vt-lab where it signals "this is a
+   label, not a value". */
 .vt-tab {
-  padding: 4px 10px;
-  font-size: 12px;
-  font-family: var(--font-heading);
-  letter-spacing: 0.06em;
-  text-transform: uppercase;
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  padding: 4px 9px;
+  font-size: 11px;
+  line-height: 1.2;
+  font-family: var(--font-body);
   border: 1px solid var(--color-divider);
+  border-radius: var(--radius-md);
   cursor: pointer;
-  background: transparent;
-  color: var(--color-text);
+  background: var(--color-surface);
+  color: var(--color-neutral-800);
   text-decoration: none;
+  white-space: nowrap;
 }
-.vt-tab:hover { background: var(--color-accent-100); }
+.vt-tab:hover { border-color: var(--color-neutral-400); }
 .vt-tab-on {
-  background: var(--color-accent);
-  border-color: var(--color-accent);
-  color: #fff;
+  background: var(--color-accent-800);
+  border-color: var(--color-accent-800);
+  color: var(--color-surface);
 }
-.vt-tab-on:hover { background: var(--color-accent-600); }
+.vt-tab-on:hover { border-color: var(--color-accent-800); }
 /* The artboard sets this globally; scoped here so it cannot reach the
    terminal's opportunity table, which wraps titles on purpose. */
 .vt-dash table.table td,
 .vt-dash table.table th { white-space: nowrap; }
+
+/* The dashboard's tables live inside .vt-panel cards, so their sticky headers
+   take the card surface rather than the page ground — same correction as the
+   terminal's, for the same reason. */
+.vt-dash table.table th { background: var(--color-surface); }
+
+/* The page ground the panels sit on. Explicit rather than inherited from
+   body, because /account is a full-height flex column and its background is
+   what makes the white cards read as cards. */
+.vt-dash { background: var(--color-bg); }
+
+
+/* — the table's own surface —
+   A white card on the grey page ground. This is where the re-skin's structure
+   comes from: the scheme carries almost no elevation, so the edge between
+   surface and ground is what separates the table from the tiles above it. */
+.vt-surface {
+  background: var(--color-surface);
+  border: 1px solid var(--color-divider);
+  border-radius: var(--radius-md);
+  overflow: hidden;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+}
+
+/* — filter pills —
+   Replaces the old left rail's ghost buttons. `vt-pill-on` is the darkest
+   accent step rather than the mid one: at 11px on white, --color-accent did
+   not read as clearly selected. */
+.vt-pill {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  font-family: var(--font-body);
+  font-size: 11px;
+  line-height: 1.2;
+  padding: 4px 9px;
+  border: 1px solid var(--color-divider);
+  border-radius: var(--radius-md);
+  background: var(--color-surface);
+  color: var(--color-neutral-800);
+  cursor: pointer;
+  white-space: nowrap;
+}
+.vt-pill:hover { border-color: var(--color-neutral-400); }
+.vt-pill-on {
+  background: var(--color-accent-800);
+  border-color: var(--color-accent-800);
+  color: var(--color-surface);
+}
+.vt-pill-on:hover { border-color: var(--color-accent-800); }
+
+/* The count rides inside the pill. Mono so the numbers stay a constant width
+   as the counts change and the row does not reflow on every quote tick. */
+.vt-pill-n {
+  font-family: var(--font-mono);
+  font-variant-numeric: tabular-nums;
+  font-size: 10px;
+  opacity: 0.65;
+}
+.vt-pill-on .vt-pill-n { opacity: 0.8; }

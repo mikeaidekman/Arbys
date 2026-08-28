@@ -241,22 +241,78 @@ with Kalshi-NO on the same question.
 ### Frontend
 
 Single-page terminal at `/`, with `/admin` and `/account` as secondary routes.
-`/account` replaced the old sidebar — `AccountPanel.tsx` no longer exists;
-`AccountStrip` (full-width, above the opportunity table) and `TicketHistory`
-took its place. The UI is built on an external design system copied in
+`/account` replaced the old sidebar — `AccountPanel.tsx` no longer exists,
+and neither does `TicketHistory` (the performance dashboard took its place in
+`770c57e`). `AccountStrip` — full-width, above the opportunity table, and
+reused as the header of `/account` so the two cannot drift — is what survives
+of it. The UI is built on an external design system copied in
 verbatim at `frontend/public/design/industry/styles.css`.
 
-Style via that system's semantic classes (`.card.blueprint`, `.btn.btn-primary`,
-`.tag`, `.table`, `.field`, `.input`) and its CSS custom properties
+Style via that system's semantic classes (`.btn.btn-primary`, `.tag`, `.table`,
+`.field`, `.input`) and its CSS custom properties
 (`--color-bg`, `--color-text`, `--color-accent`, `--space-*`, `--font-heading`).
 **Do not introduce new hex colors, radii, or type scales** — take them from the
 tokens. Tailwind stays installed as a layout escape hatch (grid/flex helpers)
-but is not the styling engine for color, border, radius, or type.
+but is not the styling engine for color, border, radius, or type. That rule is
+unchanged and still holds: there is no raw hex anywhere in `src/components/`
+or `src/pages/`.
 
-The one sanctioned exception is `frontend/src/index.css`'s small `--vt-*` set
-(`--vt-green`, `--vt-green-dark`, `--vt-green-tint`, `--vt-red-dark`) — the
-design system has no profit/loss color pair, so the terminal defines its own
-rather than smuggling in a raw hex value at the call site.
+#### The palette and type are ours now, not the vendor's (2026-08-28)
+
+`src/index.css` opens with a block that **redefines the industry system's
+tokens** — palette, type, radii, shadows. The vendored
+`public/design/industry/styles.css` is deliberately **not edited**: it is a
+verbatim third-party copy, and overriding from our own stylesheet keeps it
+pristine and makes the whole re-skin one revertible chunk. Ours wins on
+cascade order (the vendor file is a `<link>` in `index.html`; ours is the
+bundle, injected after).
+
+The scheme is **white cards on a grey ground**: `--color-bg` is `#eef0f3`,
+`--color-surface` is `#ffffff`, and structure comes from a flat `#dde1e7`
+hairline rather than from elevation — the `--shadow-*` steps are pulled right
+back. Type is **IBM Plex Sans throughout with IBM Plex Mono for every
+numeral**; `.vt-mono` and `.vt-num` both set `font-variant-numeric:
+tabular-nums`, so digits share an advance width and a column can be scanned
+down rather than read cell by cell. Note **Tailwind also defines
+`--font-mono`** and would silently win if our block ever moved earlier — the
+symptom would look like the webfont failing to load, not like a cascade bug.
+
+**`--color-bg` and `--color-surface` are now different colours, and that broke
+four things that had quietly relied on their being equal.** Every one was
+invisible beforehand and none raised an error:
+
+- sticky `.vt-table th` on the terminal, and again on `/account` — a
+  `--color-bg` header scrolls as a grey band over white rows
+- both sticky navs — the same, over the whole page
+- the `/account` P&L chart's axis labels, which knock the gridline out from
+  behind themselves and so must take the *panel* surface
+
+Anything using `--color-bg` as a background *inside* a card is now wrong;
+reach for `--color-surface` there. Six hard-coded `#a1263c` in `AdminPage.tsx`
+were the same class of latent bug — harmless while the palette matched, stale
+crimson the moment red moved.
+
+The `--vt-*` profit/loss set is still the terminal's own (the design system
+has no such pair) and now reads `--vt-green: #1f7a4d` /
+`--vt-red-dark: #cc3a33`.
+
+**`.blueprint` and its `.corner` registration marks are no longer used on
+`/account`** — they are the industry system's signature and fight a
+clean-card scheme. The class still exists in the vendored file.
+
+**`/admin` was left on the old treatment.** It still imports `BlueprintCard`,
+so it keeps the registration marks that `/` and `/account` dropped. It picks
+up the new palette and type for free, since those are tokens — but it is the
+one page where the two schemes are visibly mixed. Re-skinning it is
+outstanding, not deliberate.
+
+`CategoryRail` is a **horizontal pill row above the table**, not the old 190px
+left sidebar: the opportunity table is eleven columns at 12px and wanted the
+width back. It orders leagues **by count, busiest first** — alphabetical put
+UFC (7 groups) above NFL (248). It still accepts a `venues` prop and
+deliberately does not render it, because the nav already carries a connection
+tag per venue. `.vt-pill` and `.vt-tab` are the same object, so the terminal's
+filters and the dashboard's tabs cannot drift apart.
 
 **The `--space-*` scale skips 5 and 7** (`--space-4` then `--space-6`,
 `--space-8`; see the design system CSS). `var(--space-5)` is not an error, not

@@ -17,19 +17,41 @@ function Cell({
   label,
   value,
   tone,
+  primary,
 }: {
   label: string;
   value: string;
   tone?: "pos" | "neg";
+  /** The one figure the eye should land on first. Inverted to the darkest
+   *  accent step so it reads as the anchor of the row rather than as the
+   *  first of six equals. Only ever one tile. */
+  primary?: boolean;
 }) {
   return (
-    <div style={{ display: "flex", flexDirection: "column", gap: 2 }}>
+    <div
+      style={{
+        display: "flex",
+        flexDirection: "column",
+        gap: 3,
+        flex: "1 1 0",
+        minWidth: 0,
+        padding: "11px 13px",
+        borderRadius: "var(--radius-md)",
+        background: primary ? "var(--color-accent-800)" : "var(--color-surface)",
+        border: `1px solid ${primary ? "var(--color-accent-800)" : "var(--color-divider)"}`,
+      }}
+    >
       <span
         style={{
           fontSize: 10,
-          letterSpacing: "0.08em",
+          letterSpacing: "0.9px",
           textTransform: "uppercase",
-          opacity: 0.55,
+          whiteSpace: "nowrap",
+          overflow: "hidden",
+          textOverflow: "ellipsis",
+          // On the inverted tile a 0.55 opacity label goes muddy against the
+          // navy, so it gets its own lighter step instead of a fade.
+          color: primary ? "var(--color-accent-300)" : "var(--color-neutral-600)",
         }}
       >
         {label}
@@ -37,10 +59,13 @@ function Cell({
       <span
         className="vt-mono"
         style={{
-          fontSize: 15,
+          fontSize: 21,
           fontWeight: 600,
-          color:
-            tone === "pos"
+          letterSpacing: "-0.5px",
+          lineHeight: 1.15,
+          color: primary
+            ? "var(--color-surface)"
+            : tone === "pos"
               ? "var(--vt-green-dark)"
               : tone === "neg"
                 ? "var(--vt-red-dark)"
@@ -68,12 +93,15 @@ export function AccountStrip() {
     refetchInterval: 5_000,
   });
 
+  // Tiles on the page ground rather than cells in a bordered band: the row
+  // reads as six discrete objects, which is what lets the eye pick one out
+  // instead of scanning a strip. No bottom rule — the gap between the tiles
+  // and the table below is the separation.
   const stripStyle = {
     display: "flex",
-    gap: "var(--space-4)",
-    alignItems: "center",
-    padding: "var(--space-2) var(--space-4)",
-    borderBottom: "1px solid var(--color-divider)",
+    gap: "var(--space-2)",
+    alignItems: "stretch",
+    padding: "var(--space-3) var(--space-4)",
     flex: "none",
     flexWrap: "wrap",
   } as const;
@@ -106,7 +134,7 @@ export function AccountStrip() {
 
   return (
     <div style={stripStyle}>
-      <Cell label="Equity" value={money(equity)} />
+      <Cell label="Equity" value={money(equity)} primary />
       <Cell label="Cash" value={money(cash)} />
       <Cell label="Position value" value={money(positionValue)} />
       <Cell

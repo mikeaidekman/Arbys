@@ -114,7 +114,7 @@ export function AdminPage() {
                       <button
                         type="button"
                         className="btn btn-ghost"
-                        style={{ color: "#a1263c" }}
+                        style={{ color: "var(--vt-red-dark)" }}
                         onClick={() => del.mutate(g.id)}
                       >
                         delete
@@ -181,7 +181,7 @@ export function AdminPage() {
                     <button
                       type="button"
                       className="btn btn-ghost"
-                      style={{ color: "#a1263c", height: 36 }}
+                      style={{ color: "var(--vt-red-dark)", height: 36 }}
                       onClick={() => setLegs(legs.filter((_, j) => j !== i))}
                     >
                       remove
@@ -215,7 +215,7 @@ export function AdminPage() {
                 {create.isPending ? "Saving…" : "Create"}
               </button>
               {create.error ? (
-                <span style={{ fontSize: 12, color: "#a1263c" }}>
+                <span style={{ fontSize: 12, color: "var(--vt-red-dark)" }}>
                   {(create.error as Error).message}
                 </span>
               ) : null}
@@ -258,7 +258,7 @@ export function AdminPage() {
               </button>
             </div>
             {pushQuote.error ? (
-              <div style={{ fontSize: 12, color: "#a1263c" }}>
+              <div style={{ fontSize: 12, color: "var(--vt-red-dark)" }}>
                 {(pushQuote.error as Error).message}
               </div>
             ) : null}
@@ -279,7 +279,7 @@ export function AdminPage() {
               <button
                 type="button"
                 className="btn btn-primary"
-                style={{ background: "#a1263c", borderColor: "#a1263c" }}
+                style={{ background: "var(--vt-red-dark)", borderColor: "var(--vt-red-dark)" }}
                 onClick={() => {
                   if (window.confirm("Reset the paper portfolio? This cannot be undone.")) {
                     reset.mutate();
@@ -290,7 +290,7 @@ export function AdminPage() {
                 {reset.isPending ? "Resetting…" : "Reset portfolio"}
               </button>
               {reset.error ? (
-                <span style={{ marginLeft: 12, fontSize: 12, color: "#a1263c" }}>
+                <span style={{ marginLeft: 12, fontSize: 12, color: "var(--vt-red-dark)" }}>
                   {(reset.error as Error).message}
                 </span>
               ) : null}
