@@ -324,6 +324,10 @@ export function AccountPage() {
   const shown = d.rows.filter(
     (r) => FILTERS.find((f) => f.key === filter)?.match(r) ?? true,
   );
+  // Null qty means the ticket has no legs — a miss or a pre-execution
+  // rejection never traded — so it contributes 0 contracts rather than making
+  // the total unknown. Same reasoning as capital below.
+  const shownQty = shown.reduce((a, r) => a + (r.qty ?? 0), 0);
   const shownCapital = shown.reduce((a, r) => a + (r.capital ?? 0), 0);
   const shownReturned = shown.reduce((a, r) => a + (r.returned ?? 0), 0);
   const shownNet = shown.some((r) => r.net !== null)
@@ -795,9 +799,16 @@ export function AccountPage() {
               {shown.length > 0 ? (
                 <tfoot>
                   <tr style={{ borderTop: "2px solid var(--color-divider)" }}>
-                    <td colSpan={7} className="vt-lab">
+                    <td colSpan={5} className="vt-lab">
                       Totals · {shown.length} ticket{shown.length === 1 ? "" : "s"} shown
                     </td>
+                    <td className="vt-mono" style={{ textAlign: "right", fontWeight: 600 }}>
+                      {shownQty.toFixed(2)}
+                    </td>
+                    {/* Cost is cents per contract pair — a rate, not an extent,
+                        so it does not sum. Left blank rather than filled with
+                        a number that would read as a total. */}
+                    <td />
                     <td className="vt-mono" style={{ textAlign: "right", fontWeight: 600 }}>
                       {amount(shownCapital)}
                     </td>
@@ -909,6 +920,15 @@ function OpenPositions({
   query: { data?: PaperPosition[]; isLoading: boolean; isError: boolean; error: unknown };
 }) {
   const open = groupPositionsByEvent((query.data ?? []).filter((p) => Number(p.qty) !== 0));
+  const total = open.reduce(
+    (a, r) => ({
+      capital: a.capital + r.capital,
+      markValue: a.markValue + r.markValue,
+      unrealized: a.unrealized + r.unrealized,
+      unmarkedLegs: a.unmarkedLegs + r.unmarkedLegs,
+    }),
+    { capital: 0, markValue: 0, unrealized: 0, unmarkedLegs: 0 },
+  );
   return (
     <div className="vt-panel">
       <div className="vt-lab">Open positions</div>
@@ -982,6 +1002,40 @@ function OpenPositions({
               </tr>
             ))}
           </tbody>
+          {open.length > 0 ? (
+            <tfoot>
+              <tr style={{ borderTop: "2px solid var(--color-divider)" }}>
+                <td colSpan={2} className="vt-lab">
+                  Totals · {open.length} event{open.length === 1 ? "" : "s"} open
+                </td>
+                <td className="vt-mono" style={{ textAlign: "right", fontWeight: 600 }}>
+                  {amount(total.capital)}
+                </td>
+                <td className="vt-mono" style={{ textAlign: "right", fontWeight: 600 }}>
+                  {amount(total.markValue)}
+                  {/* Carried up from the rows on purpose: an unquoted leg is
+                      marked at its own avg_price, so it contributes cost
+                      rather than a mark and lands in unrealized as exactly
+                      zero. A total that hid that would read as fully marked. */}
+                  {total.unmarkedLegs > 0 ? (
+                    <div style={{ fontSize: 10, opacity: 0.7 }}>
+                      {total.unmarkedLegs} leg{total.unmarkedLegs === 1 ? "" : "s"} unquoted
+                    </div>
+                  ) : null}
+                </td>
+                <td
+                  className="vt-mono"
+                  style={{
+                    textAlign: "right",
+                    fontWeight: 600,
+                    color: pnlColor(total.unrealized),
+                  }}
+                >
+                  {amount(total.unrealized, { sign: true })}
+                </td>
+              </tr>
+            </tfoot>
+          ) : null}
         </table>
       </div>
     </div>
