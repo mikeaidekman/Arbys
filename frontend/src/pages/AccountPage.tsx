@@ -2,6 +2,7 @@ import { useState } from "react";
 import { useQuery } from "@tanstack/react-query";
 import { api } from "../api/client";
 import type { PaperPosition, PnlSnapshot, Ticket } from "../api/types";
+import { Logo } from "../components/Logo";
 import {
   RANGES,
   summarize,
@@ -352,7 +353,7 @@ export function AccountPage() {
           background: "var(--color-surface)",
         }}
       >
-        <span className="nav-brand">Vantage</span>
+        <Logo />
         <span style={{ display: "flex", gap: 2, marginLeft: "var(--space-4)" }}>
           <a className="vt-tab" href="/">
             Terminal

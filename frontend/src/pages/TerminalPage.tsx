@@ -15,6 +15,7 @@ import {
 } from "../lib/combo";
 import { usePriceMoves } from "../hooks/usePriceMoves";
 import { useNow } from "../hooks/useNow";
+import { Logo } from "../components/Logo";
 
 const VENUES = ["Polymarket US", "Kalshi"];
 
@@ -106,7 +107,7 @@ export function TerminalPage() {
           flex: "none",
         }}
       >
-        <span className="nav-brand">Vantage</span>
+        <Logo />
         <span
           style={{
             display: "flex",

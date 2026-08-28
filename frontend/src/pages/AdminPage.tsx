@@ -3,6 +3,7 @@ import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { api } from "../api/client";
 import type { EventGroupLeg } from "../api/types";
 import { BlueprintCard } from "../components/BlueprintCard";
+import { Logo } from "../components/Logo";
 
 const VENUES = ["polymarket_us", "kalshi", "draftkings"] as const;
 const ACCOUNT = "default";
@@ -60,7 +61,7 @@ export function AdminPage() {
         className="nav"
         style={{ borderBottom: "1px solid var(--color-divider)", flex: "none" }}
       >
-        <span className="nav-brand">Vantage</span>
+        <Logo />
         <span style={{ flex: 1 }} />
         <a href="/" className="tag tag-outline" style={{ textDecoration: "none" }}>
           ← Terminal

@@ -306,6 +306,17 @@ up the new palette and type for free, since those are tokens — but it is the
 one page where the two schemes are visibly mixed. Re-skinning it is
 outstanding, not deliberate.
 
+**Branding.** The wordmark is the `Logo` component
+(`src/components/Logo.tsx`), not the design system's `.nav-brand` — mark plus
+"ARBYS", in all three navs. Its geometry is the supplied 42px lockup scaled by
+24/42 with every value rounded to a whole pixel. Its colours are
+`--brand-navy` / `--brand-signal`, deliberately **separate from the UI
+palette**: `--brand-navy` equals `--color-accent-800` today only because the
+palette and the artwork came from the same source, and a logo must not move
+when the theme is re-skinned. `public/favicon.svg` is the mark alone, carrying
+the same geometry as literal hex — it is a standalone file with no access to
+the tokens.
+
 `CategoryRail` is a **horizontal pill row above the table**, not the old 190px
 left sidebar: the opportunity table is eleven columns at 12px and wanted the
 width back. It orders leagues **by count, busiest first** — alphabetical put

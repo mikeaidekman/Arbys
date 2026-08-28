@@ -1,9 +1,13 @@
 @import "tailwindcss";
 
-/* The industry design system owns colors, type, borders, shadows, radii, and
-   the .card/.blueprint/.btn/.tag/.table/.nav/.field/.input primitives. This
-   file only carries the Vantage terminal's local helpers, lifted verbatim
-   from the mockup <style> block plus a couple of layout resets. */
+/* The industry design system owns the .card/.blueprint/.btn/.tag/.table/.nav/
+   .field/.input primitives. It NO LONGER owns colour or type: the block below
+   redefines its tokens (see the re-skin note there), so the vendored file
+   supplies structure and this one supplies the palette. Beyond that this file
+   carries the terminal's local helpers and the Arbys brand tokens.
+
+   Historical references to "Vantage" further down name the mockup these
+   helpers were lifted from and are left as they are — the product is Arbys. */
 
 html, body, #root { height: 100%; }
 body { margin: 0; }
@@ -102,6 +106,14 @@ a:hover { color: var(--color-accent-700); }
   --shadow-sm: 0 1px 2px rgba(20, 30, 50, 0.06);
   --shadow-md: 0 1px 3px rgba(20, 30, 50, 0.10);
   --shadow-lg: 0 4px 16px rgba(20, 30, 50, 0.12);
+
+  /* Brand, not theme. These are the logo's own colours and must not move when
+     the palette is re-skinned — a logo that tracks the theme is not a logo.
+     --brand-navy equals --color-accent-800 today and --brand-signal sits near
+     --vt-red-dark, but that is because the palette and the artwork came from
+     the same source, not a dependency worth encoding. */
+  --brand-navy: #17376f;
+  --brand-signal: #e0574e;
 
   /* Profit/loss. The design system still has no such pair, so the terminal
      still defines its own — these are the re-skin's values. */
