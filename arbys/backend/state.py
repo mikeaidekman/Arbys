@@ -118,15 +118,23 @@ def _auto_trade_cooldown_s() -> float:
 DEFAULT_AUTO_TRADE_NONFILL_LOG_S = 60.0
 
 
-def _auto_trade_cross_venue_only() -> bool:
-    """Whether the auto-trader ignores same-venue (complementary) edges.
+def cross_venue_only() -> bool:
+    """Whether the whole system pairs legs across venues only. On by default.
 
-    On by default. See `AutoTradeService`'s module docstring for the
-    measurement: 5 fills of 244 attempts worth $0.41, against 537 of 1,149
-    missed tickets and half the forgone edge, with the large ones being
-    one-sided stale quotes rather than arbitrage. Set to 0 to trade them again.
+    Governs three things that must agree, or the UI and the engine describe
+    different edges: `EngineRuntime` skips `detect_complementary_set`,
+    `/monitored`'s pair search skips same-venue candidates, and the
+    auto-trader refuses a same-venue ticket as a last line of defence.
+    (`detect_cross_venue_two_leg` enforces it unconditionally — its name says
+    so, and it has no business emitting a complementary pair at any setting.)
+
+    Was `ARBYS_AUTO_TRADE_CROSS_VENUE_ONLY`, which only bound the trader while
+    the engine kept publishing the edges and `/monitored` kept ranking them
+    first. Measured 2026-08-27: 5 fills of 244 attempts worth $0.41, against
+    537 of 1,149 missed tickets, with the large ones one-sided stale quotes
+    rather than arbitrage. Set to 0 to detect and trade them again.
     """
-    return os.environ.get("ARBYS_AUTO_TRADE_CROSS_VENUE_ONLY", "1") == "1"
+    return os.environ.get("ARBYS_CROSS_VENUE_ONLY", "1") == "1"
 
 
 def _auto_trade_nonfill_log_s() -> float:
@@ -389,6 +397,7 @@ class AppState:
             fees=self.fees,
             on_opportunities=self._set_group_opportunities,
             max_ticket_stake=max_ticket_stake(),
+            cross_venue_only=cross_venue_only(),
         )
         self.pnl_service = PnlSnapshotService(
             brokers=self.paper_brokers,
@@ -409,7 +418,7 @@ class AppState:
             would_breach_cap=self._auto_would_breach_cap,
             enabled=_auto_trade_enabled,
             cooldown_s=_auto_trade_cooldown_s(),
-            cross_venue_only=_auto_trade_cross_venue_only,
+            cross_venue_only=cross_venue_only,
             nonfill_log_s=_auto_trade_nonfill_log_s(),
         )
 

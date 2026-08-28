@@ -608,10 +608,14 @@ def test_monitored_known_empty_pair_never_outranks_real_depth():
     p:SHORT is deliberately the *best-priced* leg, so pure price ranking would
     still pick it -- the known-empty demotion is what has to save this.
 
-        k:YES + p:SHORT  edge -0.021314  qty      0  profit  0.0000  <- old
-        k:YES + k:NO     edge -0.053292  qty 189.88  profit -10.119  <- new
-        p:LONG + p:SHORT edge -0.069364  qty      0  profit  0.0000
-        p:LONG + k:NO    edge -0.101342  qty 181.59  profit -18.403
+    Only cross-venue pairs are candidates, so the two same-venue combinations
+    below are struck out. That leaves exactly one pair with real depth, and
+    the known-empty one still has to lose to it:
+
+        k:YES + p:SHORT  edge -0.021314  qty      0  profit  0.0000  <- best price, no size
+        p:LONG + k:NO    edge -0.101342  qty 181.59  profit -18.403  <- must win
+        k:YES + k:NO     -- same venue, not a candidate
+        p:LONG + p:SHORT -- same venue, not a candidate
     """
     with TestClient(create_app()) as client:
         group = _register_four_leg_group(
@@ -626,11 +630,11 @@ def test_monitored_known_empty_pair_never_outranks_real_depth():
         )
 
         assert group["best_pair_no_outcome_id"] != "eg-zero:p:SHORT"
-        assert group["best_pair_yes_outcome_id"] == "eg-zero:k:YES"
+        assert group["best_pair_yes_outcome_id"] == "eg-zero:p:LONG"
         assert group["best_pair_no_outcome_id"] == "eg-zero:k:NO"
         assert Decimal(group["max_tradeable_qty"]) > 0
-        assert Decimal(group["max_tradeable_qty"]) == Decimal("189.88")
-        assert Decimal(group["net_edge"]) == Decimal("-0.053292")
+        assert Decimal(group["max_tradeable_qty"]) == Decimal("181.59")
+        assert Decimal(group["net_edge"]) == Decimal("-0.101342")
 
 
 def test_monitored_positive_pairs_still_rank_by_absolute_profit():

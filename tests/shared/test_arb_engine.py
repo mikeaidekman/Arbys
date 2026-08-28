@@ -339,3 +339,54 @@ def test_complementary_set_blocked_by_known_empty_leg():
     assert detect_complementary_set(
         "eg:v1", legs, quotes, _fees(), max_ticket_stake=Decimal("200")
     ) is None
+
+
+def test_cross_venue_refuses_a_same_venue_pair_even_when_it_is_the_best_edge():
+    """A YES and a NO on the same book is a complementary edge, not a
+    cross-venue one, and this detector must not emit it however good it looks.
+
+    Before this, the two detectors produced overlapping candidates from one
+    leg set and a same-venue pair could win the group outright. Here the
+    same-venue pair is deliberately the richer of the two — 20c/contract
+    against 2c — so a detector that merely *preferred* cross-venue would still
+    pass; only one that refuses same-venue does.
+    """
+    eg = _event_group(
+        [
+            EventGroupLeg(outcome_id="k_yes", venue_id="kals", is_yes_side=True),
+            EventGroupLeg(outcome_id="k_no", venue_id="kals", is_yes_side=False),
+            EventGroupLeg(outcome_id="p_yes", venue_id="poly", is_yes_side=True),
+            EventGroupLeg(outcome_id="p_no", venue_id="poly", is_yes_side=False),
+        ]
+    )
+    quotes = {
+        # kals against itself: 0.40 + 0.40 = 0.80 -> 20c/contract, the best
+        # pair on the board and the one that must NOT be returned.
+        "k_yes": _q("k_yes", "0.40", ask_size="10"),
+        "k_no": _q("k_no", "0.40", ask_size="10"),
+        # poly against itself: 0.45 + 0.45 = 0.90 -> 10c/contract.
+        "p_yes": _q("p_yes", "0.45", ask_size="10"),
+        "p_no": _q("p_no", "0.45", ask_size="10"),
+    }
+    fees = {"kals": ZeroFeeModel("kals"), "poly": ZeroFeeModel("poly")}
+    opp = detect_cross_venue_two_leg(eg, quotes, fees)
+    assert opp is not None, "the cross-venue pairs are still arbs and must be found"
+    assert {leg.venue_id for leg in opp.legs} == {"kals", "poly"}
+    # k_yes 0.40 + p_no 0.45 = 0.85 -> 15c, the best of the two cross pairs.
+    assert opp.guaranteed_profit == Decimal("1.50")
+
+
+def test_cross_venue_returns_nothing_when_only_one_venue_is_quoted():
+    """With a single venue's legs there is no cross-venue pair, so there is no
+    opportunity — not a fallback to that venue's own book."""
+    eg = _event_group(
+        [
+            EventGroupLeg(outcome_id="k_yes", venue_id="kals", is_yes_side=True),
+            EventGroupLeg(outcome_id="k_no", venue_id="kals", is_yes_side=False),
+        ]
+    )
+    quotes = {
+        "k_yes": _q("k_yes", "0.40", ask_size="10"),
+        "k_no": _q("k_no", "0.40", ask_size="10"),
+    }
+    assert detect_cross_venue_two_leg(eg, quotes, {"kals": ZeroFeeModel("kals")}) is None

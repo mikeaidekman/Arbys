@@ -179,11 +179,43 @@ Layers, strictly inward-depending:
   detection, triggered only on affected event groups), `pnl_service`,
   `auto_settle_service`, `auto_trade_service`.
 
+  ### Cross-venue pairing is system-wide (2026-08-28)
+
+  `ARBYS_CROSS_VENUE_ONLY` (**1 by default**) makes leg pairing cross-venue
+  everywhere, and three places have to agree or the screen and the engine
+  describe different edges — the frontend joins a displayed pair to a
+  published opportunity by leg `outcome_id`, so a disagreement leaves a live
+  arb's Fill button disabled:
+
+  - `EngineRuntime` skips `detect_complementary_set` **entirely**, rather than
+    filtering it downstream — filtering later would still write the edge to
+    `arb_opportunity` and rank it in `/opportunities`.
+  - `/monitored`'s pair search skips same-venue candidates.
+  - the auto-trader refuses a same-venue ticket.
+
+  **`detect_cross_venue_two_leg` enforces it unconditionally, at any setting.**
+  Its name says cross-venue; it used to pair a venue's own YES against its own
+  NO, so the two detectors produced overlapping candidates from one leg set.
+
+  It also fixed a **display bias that looked like a broken Kalshi feed**.
+  Measured 2026-08-28: **42.7% of head-to-head ask comparisons between the two
+  venues are exact price ties**, and Polymarket US wins *every* one of them —
+  not on a tie-break but on fees, since the models share a shape and differ
+  only in coefficient (`0.06` vs Kalshi's `0.07`), making Polymarket strictly
+  cheaper all-in at an identical ask. Winning ties on *both* sides meant
+  **47.9% of groups were described by a Polymarket-versus-itself pair**, and
+  Kalshi appeared to be missing from the book. It was not: Kalshi had **100%
+  leg coverage** against Polymarket's 99.5%, the same median spread and quote
+  age, **2.5x the median ask depth** (2,623 vs 1,030 contracts) and was
+  cheaper on raw price *more* often (31.5% vs 25.8%). Note the shape of that
+  investigation — "one venue is missing from the UI" was a ranking artifact,
+  not a feed fault, and the feed metrics are what proved it.
+
   `engine_runtime` runs **two** detectors per evaluation:
   `detect_cross_venue_two_leg` across venues, and `detect_complementary_set`
-  once per venue. Every group carries 2 legs per venue (`:YES`/`:NO`,
-  `:LONG`/`:SHORT`), so the complementary detector always has a candidate set —
-  meaning **intra-venue arbs are already detected**. A Kalshi book crossed at
+  once per venue — though the second is **off by default** now (above). Every
+  group carries 2 legs per venue (`:YES`/`:NO`, `:LONG`/`:SHORT`), so the
+  complementary detector always has a candidate set when enabled. A Kalshi book crossed at
   `YES 0.47 + NO 0.52 = 0.99` was observed on 2026-08-22 (1 of 245 groups); it
   produced no opportunity only because fees put it at 1.0249. Both detectors
   are now depth-aware and share the same tick handling (see **Sizing has a
@@ -955,15 +987,12 @@ than profitability judgements.** The spec's "no loosening of the trigger"
 non-goal is about edge floors and gross-edge modes; these have mechanisms
 behind them and are individually switchable.
 
-- **Cross-venue only** (`ARBYS_AUTO_TRADE_CROSS_VENUE_ONLY`, 1 by default).
-  A complementary (same-venue) edge is one venue's own book crossed against
-  itself, which someone co-located takes in milliseconds. Measured 2026-08-27:
-  5 fills of 244 attempts worth **$0.41**, against **537 of 1,149** missed
-  tickets and half the forgone edge. The large ones are not arbitrage at all —
-  Kalshi quoting `LAR:YES` at 0.87 beside `LAC:YES` at 0.05, or a 1002bps
-  "edge" — they are one-sided stale quotes. The rule reads the legs'
-  `venue_id`s, **not** the `<group>:<venue>` id, so it follows what the ticket
-  would actually do rather than a naming convention.
+- **Cross-venue only** (`ARBYS_CROSS_VENUE_ONLY`, 1 by default — see
+  **Cross-venue pairing is system-wide** below). The auto-trader's own check
+  reads the legs' `venue_id`s, **not** the `<group>:<venue>` id, so it follows
+  what the ticket would actually do rather than a naming convention. It is now
+  a last line of defence rather than the only one: with the flag on, the
+  engine never publishes a same-venue edge for it to refuse.
 - **One non-fill row per group per window**
   (`ARBYS_AUTO_TRADE_NONFILL_LOG_S`, 60s). A miss deliberately starts no
   cooldown, but `_opp_fingerprint` includes depth-derived `qty`, so a live book

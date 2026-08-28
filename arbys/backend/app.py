@@ -285,6 +285,14 @@ def create_app() -> FastAPI:
                 if yq is None or y_fm is None:
                     continue
                 for n in (leg for leg in g.legs if not leg.is_yes_side):
+                    # Cross-venue only, matching detect_cross_venue_two_leg.
+                    # These two must agree on which pair a group's edge IS:
+                    # the frontend joins the displayed pair to the published
+                    # opportunity by leg outcome_id, so if one named a
+                    # same-venue pair and the other did not, a live arb's Fill
+                    # button would sit disabled on a row showing an edge.
+                    if n.venue_id == y.venue_id:
+                        continue
                     nq = quoted.get(n.outcome_id)
                     n_fm = s.fees.get(n.venue_id)
                     if nq is None or n_fm is None:

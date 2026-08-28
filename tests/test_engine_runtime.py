@@ -155,3 +155,46 @@ async def test_engine_only_reevaluates_affected_groups():
     book.upsert(q)
     engine.on_quote(q)
     assert calls["n"] == 0
+
+
+def test_complementary_is_not_evaluated_under_cross_venue_only():
+    """The intra-venue detector is skipped entirely, not filtered downstream.
+
+    Filtering later would still have written the edge to `arb_opportunity` and
+    ranked it in `/opportunities`; the point is that nothing no configured path
+    will trade reaches the tape at all.
+    """
+    book = QuoteBook()
+    fees = {"kalshi": ZeroFeeModel("kalshi"), "polymarket_us": ZeroFeeModel("polymarket_us")}
+
+    group = EventGroup(
+        id="eg-1",
+        title="crossed on one venue only",
+        legs=(
+            EventGroupLeg(outcome_id="k:YES", venue_id="kalshi", is_yes_side=True),
+            EventGroupLeg(outcome_id="k:NO", venue_id="kalshi", is_yes_side=False),
+            EventGroupLeg(outcome_id="p:LONG", venue_id="polymarket_us", is_yes_side=True),
+            EventGroupLeg(outcome_id="p:SHORT", venue_id="polymarket_us", is_yes_side=False),
+        ),
+    )
+    # Kalshi's own book is crossed (0.40 + 0.40); every cross-venue pair sums
+    # over a dollar, so a complementary edge is the ONLY thing on offer.
+    for oid, ask in (("k:YES", "0.40"), ("k:NO", "0.40"), ("p:LONG", "0.70"), ("p:SHORT", "0.70")):
+        book.upsert(
+            Quote(
+                outcome_id=oid,
+                bid=Decimal(ask),
+                ask=Decimal(ask),
+                ask_size=Decimal("100"),
+            )
+        )
+
+    on = EngineRuntime(quotebook=book, fees=fees, cross_venue_only=False)
+    on.register_group(group)
+    found = on.evaluate_now("eg-1")
+    assert found, "the complementary edge is real and is found when enabled"
+    assert all(len({leg.venue_id for leg in o.legs}) == 1 for o in found)
+
+    off = EngineRuntime(quotebook=book, fees=fees, cross_venue_only=True)
+    off.register_group(group)
+    assert off.evaluate_now("eg-1") == []

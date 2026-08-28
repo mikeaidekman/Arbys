@@ -19,8 +19,10 @@ rather than profitability judgements:
   forgone edge -- the large ones (a 1002bps "arb" on one venue's own book)
   being one-sided stale quotes, not arbitrage. This is a trigger narrowing
   and so brushes the spec's non-goal; unlike an edge floor it has a
-  mechanism behind it, and it is switchable via
-  ARBYS_AUTO_TRADE_CROSS_VENUE_ONLY.
+  mechanism behind it, and it is switchable via ARBYS_CROSS_VENUE_ONLY.
+  That flag is system-wide: with it on, `EngineRuntime` never publishes a
+  same-venue edge in the first place, so the check here is a last line of
+  defence against a future publisher rather than the only one.
 * **One non-fill row per group per window.** A miss deliberately starts no
   cooldown -- a vanished edge is no reason to stop watching -- but
   `_opp_fingerprint` includes depth-derived `qty`, so a live book republishes

@@ -42,12 +42,14 @@ class EngineRuntime:
         on_opportunity: OpportunityHandler | None = None,
         on_opportunities: OpportunitySetHandler | None = None,
         max_ticket_stake: Decimal | None = DEFAULT_MAX_TICKET_STAKE,
+        cross_venue_only: bool = True,
     ) -> None:
         self._book = quotebook
         self._fees = fees
         self._on_opp = on_opportunity or (lambda _o: None)
         self._on_opps = on_opportunities
         self._max_ticket_stake = max_ticket_stake
+        self._cross_venue_only = cross_venue_only
         self._groups: dict[str, EventGroup] = {}
         self._outcome_to_groups: dict[str, set[str]] = defaultdict(set)
 
@@ -89,7 +91,17 @@ class EngineRuntime:
         if cross is not None:
             found.append(cross)
 
-        # Complementary set only makes sense within a single venue.
+        # Complementary set only makes sense within a single venue — which is
+        # why it is skipped entirely under `cross_venue_only`. Measured
+        # 2026-08-27 it was 5 fills of 244 attempts worth $0.41 while
+        # accounting for 537 of 1,149 missed tickets, and its large edges were
+        # one-sided stale quotes rather than arbitrage: Kalshi quoting
+        # LAR:YES at 0.87 beside LAC:YES at 0.05. Publishing nothing here also
+        # keeps `/opportunities` and the `arb_opportunity` tape free of edges
+        # no configured path will trade.
+        if self._cross_venue_only:
+            return found
+
         by_venue: dict[str, list] = defaultdict(list)
         for leg in group.legs:
             by_venue[leg.venue_id].append(leg)

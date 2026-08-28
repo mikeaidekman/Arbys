@@ -145,7 +145,7 @@ async def test_router_rejection_writes_per_leg_order_rows(monkeypatch):
     assert reasons["p-yes"] == "ticket_rejected"
 
 
-async def test_atomic_commit_failure_writes_per_leg_order_rows():
+async def test_atomic_commit_failure_writes_per_leg_order_rows(monkeypatch):
     """Drives the *real* router into `_commit_atomically`'s post-preview
     failure branch -- no stubbing of `router.submit` -- to prove that path
     also gets its rejected legs written, not just the preview path above.
@@ -162,8 +162,12 @@ async def test_atomic_commit_failure_writes_per_leg_order_rows():
     Both legs sit on Kalshi, which routes through `detect_complementary_set`
     (buy every outcome of a single-venue crossed book) rather than the
     cross-venue detector, so a real two-leg same-adapter ticket can be
-    produced without a second venue.
+    produced without a second venue. That detector is off by default, so this
+    test turns it back on -- what is under test is the router's atomic-commit
+    unwind, not the venue-pairing policy, and a same-venue group is simply the
+    cheapest way to get two legs onto one adapter.
     """
+    monkeypatch.setenv("ARBYS_CROSS_VENUE_ONLY", "0")
     s = get_state()
     group = EventGroup(
         id="eg-2",

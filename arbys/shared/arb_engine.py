@@ -101,6 +101,15 @@ def detect_cross_venue_two_leg(
 ) -> ArbOpportunity | None:
     """Detect the most profitable YES-leg + NO-leg cross-venue arb for a group.
 
+    **Legs must sit on different venues.** A YES and a NO on the *same* book
+    is a complementary edge, which `detect_complementary_set` owns; pairing it
+    here produced overlapping candidates from one leg set and let a same-venue
+    pair win the group outright. Measured 2026-08-28: 42.7% of head-to-head
+    ask comparisons between the two venues are exact price ties, and
+    Polymarket US takes every one of them on fees alone (0.06 vs Kalshi's 0.07
+    coefficient), so 47.9% of groups were being described by a
+    Polymarket-versus-itself pair.
+
     The arb test is per-contract and size-independent: if the all-in cost of
     one contract on each side is under 1, the pair is an arb. Sizing is then a
     separate step bounded by book depth and `max_ticket_stake`, and floored to
@@ -124,6 +133,15 @@ def detect_cross_venue_two_leg(
         y_unit = leg_unit_cost(yq.ask, y_fee_model, is_buy=True)
 
         for n in no_legs:
+            # Cross-venue means cross-venue. This function used to pair a
+            # venue's own YES against its own NO, which is a complementary
+            # edge and is `detect_complementary_set`'s job — the two detectors
+            # were producing overlapping candidates from one leg set. Beyond
+            # the naming, a same-venue pair is one book crossed against
+            # itself: someone co-located takes it in milliseconds, and the
+            # large ones are one-sided stale quotes rather than arbitrage.
+            if n.venue_id == y.venue_id:
+                continue
             nq = quotes.get(n.outcome_id)
             if nq is None:
                 continue
