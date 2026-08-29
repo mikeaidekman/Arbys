@@ -745,10 +745,25 @@ still forcing shard rebuilds at 01:10 the next morning. Each rebuild costs the
 *whole shard* a burst of replayed, hours-old snapshots.
 
 `MAX_ESCALATIONS_PER_SLUG` (2) bounds it on the adapter rather than the
-connection, and is cleared the moment the slug delivers anything — so a
-genuinely broken socket still gets its reconnects, while a delisted book stops
-dropping every other market on its shard. Its quotes then age out and are
-withheld, which is the safe outcome.
+connection — so a genuinely broken socket still gets its reconnects, while a
+delisted book stops dropping every other market on its shard. Its quotes then
+age out and are withheld, which is the safe outcome.
+
+**Only a *live* frame restores that budget, and getting this wrong reproduced
+the whole bug one level up.** The budget was first cleared whenever a slug
+delivered anything at all. But escalating destroys the connection, and the
+venue answers the resulting fresh subscription with a replayed cached snapshot
+for every market on it — so the budget was restored by the very reconnect its
+own escalation caused. Measured 2026-08-28/29: **74 of 187 slugs blew past the
+cap of 2, the worst reaching 29**, every one a game that had already finished.
+`_is_live_frame` now gates it on the frame's own `transactTime` being recent,
+at the same threshold the stale-on-arrival counter uses. A settled book can
+only ever answer with a replay, so it can never earn the budget back.
+
+Note the asymmetry with the **repair** budget just above, which still resets on
+any frame: repairing costs one subscribe message, so "the subscription works"
+is the right question there. Escalation costs the whole shard, so it needs the
+stricter one. Conflating them is what caused this.
 
 The upstream contributor is that `EventGroup.in_play` is **sticky**: it is
 refreshed only when a discovery pass rediscovers the group, Polymarket drops

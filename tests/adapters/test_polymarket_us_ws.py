@@ -19,6 +19,7 @@ from arbys.adapters.polymarket_us_ws import (
     frame_age_s,
 )
 from arbys.shared.quotebook import QuoteBook
+from arbys.shared.types import Quote
 
 
 def _creds() -> tuple[PolymarketUsCredentials, ed25519.Ed25519PublicKey]:
@@ -906,3 +907,65 @@ async def test_a_settled_market_stops_thrashing_the_shard(monkeypatch):
         f"a settled market rebuilt the connection {len(connections)} times; "
         f"the budget should have capped it at {1 + MAX_ESCALATIONS_PER_SLUG}"
     )
+
+
+def test_a_replayed_snapshot_does_not_restore_the_reconnect_budget():
+    """A settled market answers every resubscribe with a cached snapshot, and
+    that must not buy it another reconnect.
+
+    This is the bug the per-slug budget was *supposed* to fix and did not.
+    Escalating destroys the shard; the venue answers the fresh subscription
+    with a replayed book for every market on it; under the old rule that
+    replay counted as delivery and restored the budget the escalation had just
+    spent. Measured 2026-08-28/29: 74 of 187 slugs blew past the cap of 2, the
+    worst reaching 29 — every one a game that had already finished.
+
+    The earlier test passed because it cleared `_escalations` by hand, which
+    silently assumed the very thing that was broken.
+    """
+    adapter = _escalation_adapter()
+    slugs = ["dark"]
+    attempts = {"dark": MAX_REPAIR_ATTEMPTS}
+    now = 1000.0
+    adapter._last_ws_at["dark"] = now - 100
+
+    for _ in range(MAX_ESCALATIONS_PER_SLUG):
+        adapter._last_reconnect_at.clear()
+        with pytest.raises(DarkMarkets):
+            adapter._maybe_escalate(0, slugs, {"dark"}, attempts, now)
+
+    # The reconnect happens and the venue replays an hours-old book. That is
+    # what `source_age_s` well past the priority deadline means.
+    stale = Quote(
+        outcome_id="dark:LONG",
+        bid=Decimal("0.40"),
+        ask=Decimal("0.42"),
+        source_age_s=6000.0,
+    )
+    fresh = Quote(
+        outcome_id="dark:LONG",
+        bid=Decimal("0.40"),
+        ask=Decimal("0.42"),
+        source_age_s=0.2,
+    )
+
+    def deliver(q: Quote) -> None:
+        """Exactly what the pump does on a delivered quote — the predicate is
+        production code, not restated here, so this test cannot pass by
+        agreeing with a copy of the rule."""
+        if adapter._is_live_frame(q):
+            adapter._escalations.pop("dark", None)
+
+    assert adapter._is_live_frame(stale) is False
+    assert adapter._is_live_frame(fresh) is True
+
+    deliver(stale)
+    adapter._last_reconnect_at.clear()
+    adapter._maybe_escalate(0, slugs, {"dark"}, attempts, now)  # must NOT raise
+
+    # A frame the venue timestamped just now is the market genuinely coming
+    # back, and that does earn the budget again.
+    deliver(fresh)
+    adapter._last_reconnect_at.clear()
+    with pytest.raises(DarkMarkets):
+        adapter._maybe_escalate(0, slugs, {"dark"}, attempts, now)

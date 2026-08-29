@@ -420,10 +420,30 @@ class PolymarketUsWebSocketAdapter(MarketDataAdapter):
                     slug = split_outcome_id(quote.outcome_id)[0]
                     delivered.add(slug)
                     attempts.pop(slug, None)  # it answered; restore its budget
-                    # Same reasoning, across connections: a market that is
-                    # streaming again has earned back the right to justify a
-                    # reconnect if it later goes dark for real.
-                    self._escalations.pop(slug, None)
+                    # The escalation budget needs a STRICTER test than the
+                    # repair budget above, and conflating them is a bug this
+                    # already had once.
+                    #
+                    # Repairing costs one subscribe message, so any frame at
+                    # all means the subscription works and the budget should
+                    # come back. Escalating destroys the whole shard — and the
+                    # venue answers the resulting fresh subscription with a
+                    # REPLAYED CACHED SNAPSHOT for every market on it. Under
+                    # the old rule that replay counted as delivery, so a
+                    # settled market's budget was restored by the very
+                    # reconnect its own escalation caused, and it cycled
+                    # forever: measured 2026-08-28/29, 74 of 187 slugs blew
+                    # past the cap of 2, the worst reaching 29, every one of
+                    # them a game that had already finished.
+                    #
+                    # A settled book can only ever answer with a replay. Only
+                    # a frame the venue timestamped *recently* proves it is
+                    # genuinely streaming again, so only that restores the
+                    # right to drop a connection. Same threshold the
+                    # stale-on-arrival counter uses, deliberately — they are
+                    # the same question asked twice.
+                    if self._is_live_frame(quote):
+                        self._escalations.pop(slug, None)
                     await queue.put(quote)
                 self._maybe_report(index, len(slugs), stats)
                 now = time.monotonic()
@@ -516,6 +536,20 @@ class PolymarketUsWebSocketAdapter(MarketDataAdapter):
             len(dark),
             never,
             len(dark) - never,
+        )
+
+    def _is_live_frame(self, quote: Quote) -> bool:
+        """Whether this frame proves the market is genuinely streaming again.
+
+        A frame the venue timestamped recently is a live tick. One carrying a
+        large `source_age_s` is the cached book it replays on every subscribe,
+        which a settled market can produce forever and which therefore proves
+        nothing. Same threshold as the stale-on-arrival counter, deliberately:
+        it is the same question asked twice.
+        """
+        return (
+            quote.source_age_s is None
+            or quote.source_age_s <= self._priority_dark_after_s
         )
 
     def _quotes_from_message(self, msg: Any, stats: _ShardStats) -> list[Quote]:
