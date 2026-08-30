@@ -93,19 +93,33 @@ Desktop is a real cost for a step you can get remotely. The trade is that you
 cannot inspect the image before it ships — acceptable here, since Task 4's
 tests cover the behaviour that matters.
 
-### Before Task 7 — Fly.io
+### Before Task 7 — Fly.io, without installing anything
+
+**`flyctl` cannot be installed on the maintainer's machine (admin policy), so
+deploys run in GitHub Actions and every one-off action is a dashboard click.**
+This is not a workaround grafted on: `fly deploy --remote-only` already built
+on Fly's builders, so running the CLI on a GitHub runner changes nothing about
+the result while making deploys reproducible and auditable. Nothing in this
+plan requires local tooling — Docker was already avoidable, Neon is web-only,
+and Task 1 runs from the existing venv.
 
 - [ ] **Create a Fly.io account** and add a payment method. A machine this size
       plus a small volume is single-digit dollars a month, but confirm current
       pricing yourself rather than trusting a figure written here.
-- [ ] **Install `flyctl`** — on Windows: `iwr https://fly.io/install.ps1 -useb | iex`
-- [ ] `fly auth login`
 - [ ] **Pick an app name.** It is globally unique across all of Fly, so `arbys`
       is likely taken. Whatever you choose goes in `fly.toml` and becomes
       `<name>.fly.dev`.
-- [ ] `fly apps create <name>` and `fly volumes create arbys_data --size 1 --region iad`.
-      The volume is not for storage — it is a *mechanical* single-attach lock
-      that makes running two machines impossible rather than merely discouraged.
+- [ ] **Create the app** from the dashboard.
+- [ ] **Create the volume** `arbys_data`, 1GB, region `iad` — dashboard, or the
+      Machines REST API with your token if the dashboard cannot. It is not for
+      storage: it is a *mechanical* single-attach lock that makes running two
+      machines impossible rather than merely discouraged.
+- [ ] **Create a deploy token**: dashboard → Account → **Access Tokens**.
+      Scope it to this one app, not org-wide.
+- [ ] **Add it to GitHub** as the repository secret **`FLY_API_TOKEN`**
+      (Settings → Secrets and variables → Actions). Note what this means:
+      anyone who can push to `main` can deploy. Fine for a single-maintainer
+      repo, worth knowing rather than discovering.
 
 ### Before Task 7 — production Postgres
 
@@ -184,6 +198,7 @@ equivalent of. Task 5 makes the inline form work; you need the material.
 | `Dockerfile` | Multi-stage: build the SPA, then the Python image. |
 | `.dockerignore` | Keep `.env`, `*.pem`, `*.db`, `venv/` out of the build context. |
 | `fly.toml` | One machine, no autostop, a volume as a mechanical lock. |
+| `.github/workflows/deploy.yml` | Test, build, deploy on push to `main`. Exists already. |
 | `arbys/backend/access.py` | Cloudflare Access JWT verification as a FastAPI dependency. |
 | `tests/db/test_singleton_lock.py` | The lock's dialect gate and its refusal path. |
 | `tests/test_spa_serving.py` | SPA fallback, and that it does not shadow the API. |
@@ -364,25 +379,82 @@ def test_neither_set_still_falls_back_to_rest():
 
 ---
 
-### Task 7: Deploy
+### Task 7: Deploy — dashboard clicks plus a `git push`
 
-- [ ] **Step 1: Write `fly.toml`** exactly as the spec gives it: `auto_stop_machines = false` (scale-to-zero has nothing to restart the venue websockets from), `min_machines_running = 1`, a `[[mounts]]` volume as a *mechanical* single-attach lock, `kill_timeout = 60` for Task 3's drain.
+**No local `flyctl`.** `.github/workflows/deploy.yml` runs the suite, builds the
+frontend, and deploys on every push to `main`. Everything else is a dashboard
+action. Steps 1-6 are ordered so nothing is attempted before what it depends on
+exists.
 
-- [ ] **Step 2: Provision Postgres** (Neon, Supabase or Fly's own) in `us-east`. Set `ARBYS_DB_URL` with the `postgresql+asyncpg://` scheme.
+- [ ] **Step 1: Write `fly.toml`** exactly as the spec gives it:
+      `auto_stop_machines = false` (scale-to-zero has nothing to restart the
+      venue websockets from), `min_machines_running = 1`, a `[[mounts]]` volume,
+      `kill_timeout = 60` for Task 3's drain, and the three plain env flags —
+      `ARBYS_ENABLE_INGEST=1`, `ARBYS_ENABLE_DISCOVERY=1`,
+      `ARBYS_ENABLE_AUTO_TRADE=1`. Flags belong here rather than in the secret
+      store precisely because they should be visible in review.
 
-- [ ] **Step 3: `alembic upgrade head` against it** — the first time this has ever run for real. Task 1 is what makes this safe.
+- [ ] **Step 2: Provision Postgres** (Neon or Supabase) in **us-east**, near
+      `iad`. Fly's own Postgres is *unmanaged* — choosing it means administering
+      a database, which is what this spec exists to avoid.
 
-- [ ] **Step 4: Set secrets** per the spec's table. The `ARBYS_*` feature flags go in `fly.toml` as plain env, visible in review rather than hidden in a store. Three must be set or the instance does nothing: `ARBYS_ENABLE_INGEST=1`, `ARBYS_ENABLE_DISCOVERY=1`, and — per the decision above — **`ARBYS_ENABLE_AUTO_TRADE=1`**, which is what makes this the trading instance rather than an observer.
+- [ ] **Step 3: `alembic upgrade head` against it, from this machine.** This is
+      local Python against a remote database, so it needs no Fly tooling: set
+      `ARBYS_DB_URL` in the shell and run it. **The first time this chain has
+      ever run for real** — Task 1 is what makes it safe.
 
-- [ ] **Step 5: Deploy with `--strategy immediate`.** The default rolling strategy creates a second Machine before retiring the first, which is the overlap window Task 2 exists to refuse. **Read `fly status` mid-deploy and confirm the machine count never exceeds one** — Task 2 turns a mistake here into a refused boot rather than a double-traded edge, but the deploy should be correct on its own.
+- [ ] **Step 4: Set secrets** in the Fly dashboard (app → Secrets), per the
+      spec's table: `ARBYS_DB_URL`, both venue key ids and their inline key
+      material, `CF_ACCESS_TEAM_DOMAIN`, `CF_ACCESS_AUD`.
 
-- [ ] **Step 6: Verify against the running instance.** `/health` reports `websocket` for both venues; the SPA loads through Access; a direct hit on the Fly hostname is rejected; clock skew is under the 30s Polymarket signing tolerance (`scripts/verify_polymarket_us_creds.py` reports it, and a skewed clock fails every request in a way that looks exactly like a bad key).
+- [ ] **Step 5: Deploy** — push to `main`, or run the workflow manually from the
+      Actions tab. The workflow passes `--strategy immediate`; the default
+      rolling strategy starts a second machine before retiring the first, which
+      is the overlap Task 2 refuses. Watch the machine count in the dashboard
+      during the deploy and confirm it never exceeds one. Task 2 turns a mistake
+      here into a refused boot rather than a double-traded edge, but the deploy
+      should be correct on its own.
 
-- [ ] **Step 7: Watch one deploy cycle end to end.** Confirm the drain runs, the lock releases, and the book refills — the +31s measurement should reproduce on the platform. If it does not, that is the spec's Findings premise failing on real infrastructure and the VM fallback is still valid.
+- [ ] **Step 6: TLS and Cloudflare, in this order.** The ordering is the part
+      that catches people:
+      1. the app must be deployed and have IPs before a certificate can validate
+      2. add the CNAME `arbys` → `<app>.fly.dev`, **grey cloud (DNS only)**
+      3. dashboard → app → **Certificates → Add Certificate** for
+         `arbys.<domain>`; add any `_acme-challenge` record it asks for; wait for
+         issuance
+      4. **only then** flip the record to **orange cloud (Proxied)**
+      5. SSL/TLS mode → **Full (strict)**
+      6. create the Access application and its policy (Task 6's prerequisites)
 
-- [ ] **Step 8: Cut over — stop the local bot.** Set `ARBYS_ENABLE_AUTO_TRADE=0` in this machine's `.env` and stop the local backend. Until this step there are two bots on one set of venue credentials, writing two ledgers that agree with each other about nothing; after it there is one. Do it **last**, once the hosted instance has been observed filling tickets, so a failed deploy does not leave nothing running.
+      Let's Encrypt's challenge has to reach Fly, and an orange-clouded record
+      puts Cloudflare in the middle of that handshake. Full (strict) then
+      validates the origin certificate, which is why the Fly cert is needed at
+      all — Fly's automatic `*.fly.dev` cert does not match the Host header
+      Cloudflare sends.
 
-- [ ] **Step 9: Confirm the split holds.** The hosted `/health` reports `websocket` for both venues and its ticket count is climbing; nothing on this laptop is listening on `:8000`. Watching is now a browser tab, and counting is the read-only role.
+- [ ] **Step 7: Verify against the running instance.** `/health` reports
+      `websocket` for both venues; the SPA loads through Access; **a direct hit
+      on `<app>.fly.dev` is rejected**; clock skew is inside Polymarket's 30s
+      signing tolerance — a skewed clock fails every request in a way that looks
+      exactly like a bad key.
+
+- [ ] **Step 8: Watch one deploy cycle end to end.** Confirm the drain runs, the
+      lock releases, and the book refills — the +31s measurement should
+      reproduce on the platform. If it does not, that is the spec's Findings
+      premise failing on real infrastructure and the VM fallback is still valid.
+
+- [ ] **Step 9: Cut over — stop the local bot.** Set
+      `ARBYS_ENABLE_AUTO_TRADE=0` in this machine's `.env` and stop the local
+      backend. Until this step there are two bots on one set of venue
+      credentials writing two ledgers that agree with each other about nothing;
+      after it there is one. Do it **last**, once the hosted instance has been
+      observed filling tickets, so a failed deploy does not leave nothing
+      running.
+
+- [ ] **Step 10: Confirm the split holds.** The hosted `/health` reports
+      `websocket` for both venues and its ticket count is climbing; nothing on
+      this laptop is listening on `:8000`. Watching is now a browser tab, and
+      counting is the read-only role.
 
 ---
 

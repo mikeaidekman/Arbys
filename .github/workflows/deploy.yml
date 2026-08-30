@@ -1,0 +1,83 @@
+name: Deploy
+
+# Deploys run here rather than from a laptop, because flyctl cannot be
+# installed on the maintainer's machine. That turned out to be the better
+# arrangement anyway: `fly deploy --remote-only` already built on Fly's
+# builders, so nothing about the result changes, and a deploy is now
+# reproducible and auditable instead of depending on one machine's state.
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+# One deploy at a time, and never cancel one in flight. The app holds a
+# Postgres advisory lock and is deliberately single-instance; two overlapping
+# deploys are exactly the condition that lock exists to refuse. Cancelling
+# mid-deploy could also interrupt the shutdown drain, which is what makes a
+# restart safe for in-flight tickets.
+concurrency:
+  group: fly-deploy
+  cancel-in-progress: false
+
+jobs:
+  backend:
+    name: Backend tests
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          # Matches the dev venv (3.14.3) rather than the >=3.11 floor, which
+          # is not what the suite has been run against. If the runner cannot
+          # resolve 3.14, pin the exact patch here rather than dropping to
+          # 3.13 — a version skew between CI and the image is worse than a
+          # pinned patch.
+          python-version: "3.14"
+      - run: pip install -e ".[dev]"
+      - name: Ruff
+        run: python -m ruff check .
+      - name: Pytest
+        # The venue switches are pinned off session-wide by tests/conftest.py,
+        # so this never contacts Kalshi or Polymarket. No credentials are
+        # available to this job and none are needed.
+        run: python -m pytest -q
+
+  frontend:
+    name: Frontend build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
+      - run: npm ci
+        working-directory: frontend
+      - run: npm run lint
+        working-directory: frontend
+      # `tsc -b && vite build` — the real typecheck for frontend code. The
+      # Dockerfile runs this too, so a failure here would eventually fail the
+      # deploy anyway; running it as its own job fails in seconds instead of
+      # after a full image build.
+      - run: npm run build
+        working-directory: frontend
+
+  deploy:
+    name: Deploy to Fly
+    needs: [backend, frontend]
+    if: github.ref == 'refs/heads/main' && github.event_name != 'pull_request'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: superfly/flyctl-actions/setup-flyctl@master
+      # --strategy immediate is load-bearing, not a preference. Fly's default
+      # rolling and canary strategies start a SECOND machine before retiring
+      # the first, and this app must never run twice: both instances would
+      # stream both venues and both auto-trade. The advisory lock turns that
+      # into a refused boot rather than a double-executed edge, but the deploy
+      # should be correct on its own rather than relying on the backstop.
+      - run: flyctl deploy --remote-only --strategy immediate
+        env:
+          FLY_API_TOKEN: ${{ secrets.FLY_API_TOKEN }}
