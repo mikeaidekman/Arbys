@@ -1,7 +1,7 @@
 # Live execution — design
 
 **Date:** 2026-08-29
-**Status:** proposed
+**Status:** proposed — Part G measured 2026-08-29; Parts A, C, D, F planned 2026-08-30
 **Depends on:** [hosting without a server](2026-08-25-hosting-without-a-server-design.md),
 which names this as its explicit non-goal and prepares Parts A and B for it
 **Changes:** `shared/execution_router.py`, `adapters/base.py`, both venue adapters
@@ -231,14 +231,22 @@ smallest tradeable size before any meaningful capital moves.
 
 ## Open questions
 
-**Blocking, and it is Part G:** the time-to-fill measurement. If the legging
-window is hundreds of milliseconds, Part C is a rarely-used safety net. If it
-is seconds, the legging rate may be high enough that the 2.1-cent median
-ticket never clears its unwind costs — and the honest conclusion would be that
-this strategy does not survive live execution at this size, which is worth
-knowing before funding it rather than after.
+**Part G is measured (2026-08-29/30) and the answer is favourable.** Kalshi's
+authenticated round trip is **50ms median** on a genuine `200` (p90 63ms). An
+*active* leg's ask changes every **13.8s** on Kalshi and **15.5s** on
+Polymarket US, and only 8% of 240 sampled legs moved at all in four minutes.
+A sequential legging window of ~**81ms** therefore gives **P(legged) ≈ 0.29%
+per ticket on an active leg** — a 1-sigma P&L swing of $17 against $169 of
+measured profit. Part C is a rarely-exercised safety net, not a hot path.
 
-**Non-blocking:** whether Kalshi and Polymarket US both support a true IOC
-order type, or whether it has to be emulated as place-then-cancel. Emulation
-widens the legging window and changes Part G's numbers, so confirm it against
-the venues' order APIs before building Part B.
+Two caveats on that number. The sample came from a quiet period, while 804 of
+the ledger's 2,306 tickets landed between 00:00–03:00 UTC with games in play,
+so treat 0.29% as a floor and repeat the measurement in that window. And a
+signed `GET` is not a `POST` that has to match against a book, so 50ms
+understates real order latency by an unknown amount.
+
+Still open, non-blocking: whether either venue offers a true IOC order type,
+or whether it must be emulated as place-then-cancel. Emulation widens the
+window above and changes these numbers, so confirm it against the order APIs
+before building Part B.
+

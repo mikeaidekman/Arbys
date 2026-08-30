@@ -1,7 +1,7 @@
 # Hosting without a server — design
 
 **Date:** 2026-08-25
-**Status:** proposed
+**Status:** proposed — blocking measurement resolved 2026-08-29, plan written 2026-08-30
 **Depends on:** [the trustworthy ledger design](2026-08-25-trustworthy-ledger-design.md),
 Parts B–D
 **Changes the premise of:** [docs/DEPLOY.md](../../DEPLOY.md), which assumes a VM
@@ -59,10 +59,12 @@ refills the book in roughly one round trip per subscription batch — Polymarket
 US batches at `MAX_SLUGS_PER_SUBSCRIPTION = 100` — rather than one poll per leg.
 Seconds, not minutes.
 
-**Measure it before building on it:** time from process start to N legs quoted,
-credentialed on both venues, and record the number here. If it comes back in
-minutes rather than seconds this spec's platform choice is wrong and the VM
-plan stands. Everything downstream is contingent on this one number.
+**Measured 2026-08-29 — seconds, as predicted.** Six Polymarket US shards
+connected at +0s and the first 30-second heartbeat reported `live 100/100
+slug(s)` at **+31s**, with 69 of those frames stale-on-arrival (the replayed
+cached snapshots this adapter expects). Kalshi's snapshot-on-connect behaves
+the same way. The platform choice in Part D therefore stands; had this come
+back in minutes, DEPLOY.md's VM plan would have.
 
 Note the coupling this creates: the low-maintenance hosting story now *requires*
 credentials on both venues. The un-credentialed REST path still works, but it
@@ -502,10 +504,17 @@ measurement comes back badly.
 
 ## Open questions
 
-**One blocking, and it is the first task:** the restart measurement in
-Findings. Everything about the platform choice follows from whether a
-credentialed cold start refills the book in seconds or minutes. If minutes,
-this spec's Part D is wrong and DEPLOY.md's VM stands.
+**The blocking question is answered.** The restart measurement came back at
++31s to a fully-served shard (see Findings), so Part D stands and
+[the implementation plan](../plans/2026-08-30-fly-hosting.md) proceeds.
+
+Still open, and it belongs to Part E rather than the platform: **Cloudflare
+Access versus Tailscale.** This spec specifies Access and the plan's opening
+section sets out why — the domain is already on Cloudflare, so it is an Access
+application and a CNAME, whereas Tailscale means running `tailscaled` inside
+the container, which is the sidecar the brief exists to avoid. Tailscale was
+provisionally preferred in conversation on 2026-08-29 before this spec was
+found. Decide before the plan's Task 6.
 
 Non-blocking: whether the drain bound of 20s is right. It is a guess, and the
 right value is a function of live venue acknowledgement latency, which is
