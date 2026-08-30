@@ -1,0 +1,52 @@
+# Arbys — one machine, and deliberately only one.
+#
+# This app streams both venues over persistent WebSockets and auto-trades what
+# it detects. Two instances would each hold their own quote book, each publish
+# opportunities, and each submit tickets against the same venue credentials —
+# two ledgers agreeing with each other about nothing. Every setting below that
+# looks like a missed optimisation is holding that line.
+#
+# Fly's Launch UI defaults to two machines and 256MB; both are wrong here and
+# both are corrected in this file. After changing it, confirm with
+# `machines list` (the Fly admin workflow) that exactly one exists.
+
+app = "arbys-dekman"
+primary_region = "ewr"
+
+[build]
+
+[http_service]
+  internal_port = 8000
+  force_https = true
+
+  # Scale-to-zero has nothing to restart the venue websockets from: a stopped
+  # machine is a stopped feed, and the first request would find an empty quote
+  # book rather than a live one.
+  auto_stop_machines = false
+  auto_start_machines = false
+
+  # One. Not "at least one" as a floor under a larger number — one.
+  min_machines_running = 1
+
+[[vm]]
+  size = "shared-cpu-1x"
+  # The local process sits at ~148MB after 24h with 560 groups and six
+  # WebSocket shards, before Python's own overhead. 256MB is not enough
+  # headroom for a discovery pass on top of that.
+  memory = "1gb"
+
+# Not for storage — the ledger lives in Postgres and this app writes nothing to
+# disk. A Fly volume attaches to one machine at a time, so its presence makes
+# accidentally running two awkward. Belt and braces: the real guarantee is the
+# Postgres advisory lock in the app's bootstrap.
+#
+# The volume must exist and be in `primary_region` before a deploy referencing
+# it will succeed. Create it with the Fly admin workflow:
+#   volumes create arbys_data --size 1 --region ewr --yes
+[[mounts]]
+  source = "arbys_data"
+  destination = "/data"
+
+# Room for the shutdown drain to finish in-flight tickets rather than being
+# cut off mid-unwind. Must stay comfortably above the app's own drain bound.
+kill_timeout = 60

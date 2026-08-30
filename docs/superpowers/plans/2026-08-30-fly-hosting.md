@@ -6,7 +6,7 @@
 
 **Spec:** [docs/superpowers/specs/2026-08-25-hosting-without-a-server-design.md](../specs/2026-08-25-hosting-without-a-server-design.md)
 
-**Architecture:** One Fly Machine in `iad` with managed Postgres, serving the API *and* the built SPA from one origin. A Postgres advisory lock makes a second instance refuse to boot. A drain on shutdown makes a platform-initiated restart safe. Nothing about detection, sizing or the paper broker changes.
+**Architecture:** One Fly Machine in `ewr` with managed Postgres, serving the API *and* the built SPA from one origin. A Postgres advisory lock makes a second instance refuse to boot. A drain on shutdown makes a platform-initiated restart safe. Nothing about detection, sizing or the paper broker changes.
 
 **Tech Stack:** Python 3.14 (matching the dev venv, not the `>=3.11` floor), asyncio, SQLAlchemy 2 async + asyncpg, FastAPI, Docker, Fly.io.
 
@@ -117,10 +117,10 @@ and Task 1 runs from the existing venv.
       is likely taken. Whatever you choose goes in `fly.toml` and becomes
       `<name>.fly.dev`.
 - [ ] **Create the app** from the dashboard.
-- [ ] **Create the volume** `arbys_data`, 1GB, region `iad`. **The dashboard
+- [ ] **Create the volume** `arbys_data`, 1GB, region `ewr` (matching `fly.toml`). **The dashboard
       cannot do this** (confirmed 2026-08-30), so use the manual
       `Fly admin` workflow in the Actions tab:
-      `volumes create arbys_data --size 1 --region iad --yes`.
+      `volumes create arbys_data --size 1 --region ewr --yes`.
       It is not for storage: it is a *mechanical* single-attach lock that makes
       running two machines awkward rather than merely discouraged. The real
       guarantee is Task 2's advisory lock.
@@ -137,7 +137,7 @@ and Task 1 runs from the existing venv.
       Postgres. Note Fly Postgres is *unmanaged* — you would be administering
       it, which is the thing this whole spec exists to avoid. Neon or Supabase
       fit the brief better.
-- [ ] Provision it in a **US-east** region, near the Fly machine in `iad`.
+- [ ] Provision it in a **US-east** region, near the Fly machine in `ewr`.
       Cross-region database round trips would sit inside every write path.
 - [ ] Have the `postgresql+asyncpg://` connection string ready for
       `fly secrets set`.
@@ -185,8 +185,10 @@ equivalent of. Task 5 makes the inline form work; you need the material.
 - [ ] **Does the hosted ledger start clean?** The plan assumes yes — see *What
       this plan deliberately leaves undone*. `arbys-local.db` stays on the
       laptop.
-- [ ] **Region.** `iad` is the spec's choice. Both venues are US-based, so
-      us-east is right unless you know otherwise.
+- [x] **Region: `ewr`.** The spec said `iad`; Fly's Launch UI created the app
+      in `ewr`. Newark and Ashburn are both US-east and equivalent for these
+      venues, so `fly.toml` follows reality rather than moving the app. The
+      volume and the Postgres instance must match it.
 
 ## Global Constraints
 
@@ -397,16 +399,24 @@ frontend, and deploys on every push to `main`. Everything else is a dashboard
 action. Steps 1-6 are ordered so nothing is attempted before what it depends on
 exists.
 
-- [ ] **Step 1: Write `fly.toml`** exactly as the spec gives it:
-      `auto_stop_machines = false` (scale-to-zero has nothing to restart the
-      venue websockets from), `min_machines_running = 1`, a `[[mounts]]` volume,
-      `kill_timeout = 60` for Task 3's drain, and the three plain env flags —
+- [x] **Step 1: `fly.toml` is written.** App `arbys-dekman`, region `ewr`
+      (where Fly's Launch UI put it — Newark and Ashburn are equivalent for
+      these venues, so it was not worth moving). `auto_stop_machines = false`,
+      `min_machines_running = 1`, `[[mounts]]`, `kill_timeout = 60`.
+
+      **Two corrections to what Fly's Launch UI created**, both already in the
+      file and both worth understanding rather than just applying: it defaulted
+      to **2 machines**, which for this app means two bots on one set of venue
+      credentials; and **256MB**, against a local process measured at ~148MB
+      before Python's overhead and a discovery pass.
+
+      Still to add here once Task 5 lands: the three plain env flags
       `ARBYS_ENABLE_INGEST=1`, `ARBYS_ENABLE_DISCOVERY=1`,
-      `ARBYS_ENABLE_AUTO_TRADE=1`. Flags belong here rather than in the secret
-      store precisely because they should be visible in review.
+      `ARBYS_ENABLE_AUTO_TRADE=1`. Flags belong in this file rather than the
+      secret store precisely because they should be visible in review.
 
 - [ ] **Step 2: Provision Postgres** (Neon or Supabase) in **us-east**, near
-      `iad`. Fly's own Postgres is *unmanaged* — choosing it means administering
+      `ewr`. Fly's own Postgres is *unmanaged* — choosing it means administering
       a database, which is what this spec exists to avoid.
 
 - [ ] **Step 3: `alembic upgrade head` against it, from this machine.** This is
