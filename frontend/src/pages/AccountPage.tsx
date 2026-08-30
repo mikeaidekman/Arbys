@@ -1,7 +1,7 @@
 import { useState } from "react";
 import { useQuery } from "@tanstack/react-query";
 import { api } from "../api/client";
-import type { PaperPosition, PnlSnapshot, Ticket } from "../api/types";
+import type { PaperAccountSummary, PaperPosition, PnlSnapshot, Ticket } from "../api/types";
 import { Logo } from "../components/Logo";
 import {
   RANGES,
@@ -314,6 +314,13 @@ export function AccountPage() {
     queryKey: ["paper", "positions", ACCOUNT],
     queryFn: () => api.paperPositions(ACCOUNT),
     refetchInterval: 10_000,
+  });
+  // Balances only — the rest of this page is computed from the ticket ledger.
+  // Cash headroom cannot be: it is what is LEFT, not what was spent.
+  const summary = useQuery<PaperAccountSummary>({
+    queryKey: ["paper", "summary", ACCOUNT, "performance"],
+    queryFn: () => api.paperSummary(ACCOUNT),
+    refetchInterval: 15_000,
   });
 
   const days = RANGES.find((r) => r.key === range)?.days ?? null;
@@ -867,6 +874,8 @@ export function AccountPage() {
           emptyNote="No tickets in this window."
         />
 
+        <NetOfCosts d={d} summary={summary.data} />
+
         <OpenPositions query={positions} />
       </div>
     </div>
@@ -929,6 +938,122 @@ function groupPositionsByEvent(legs: PaperPosition[]): PositionEventRow[] {
     if (p.mark === null) row.unmarkedLegs += 1;
   }
   return [...rows.values()].sort((a, b) => b.capital - a.capital);
+}
+
+/**
+ * What the strategy actually earned, and what it cost to earn it.
+ *
+ * The page's other tiles answer "how much profit"; this answers "profit net of
+ * what". Fees are 62% of gross on the measured ledger, which is the single
+ * dominant fact about this strategy and was previously not on screen anywhere
+ * — it lived only in ad-hoc queries against the database.
+ *
+ * Everything here is scoped to **settled** tickets, matching `netProfit`. An
+ * unsettled ticket has spent real fees against a profit that has not happened,
+ * so including it would produce a drag figure reconciling against nothing.
+ */
+function NetOfCosts({
+  d,
+  summary,
+}: {
+  d: Dashboard;
+  summary: PaperAccountSummary | undefined;
+}) {
+  const START = 2000; // seeded per venue by bootstrap and by every reset
+  const balances = Object.entries(summary?.balances ?? {})
+    // draftkings is seeded but never traded; showing it as 100% headroom
+    // implies capacity that does not exist.
+    .filter(([v]) => v === "kalshi" || v === "polymarket_us")
+    .map(([venue, amt]) => ({ venue, cash: Number(amt), pct: (Number(amt) / START) * 100 }))
+    .sort((a, b) => a.cash - b.cash);
+
+  return (
+    <div className="vt-panel">
+      <div className="vt-lab">Net of all costs</div>
+      <table className="table" style={{ fontSize: 12, width: "100%" }}>
+        <tbody>
+          <tr>
+            <td style={{ opacity: 0.75 }}>Gross profit on settled tickets</td>
+            <td className="vt-mono" style={{ textAlign: "right" }}>{amount(d.grossProfit, { sign: true })}</td>
+          </tr>
+          <tr>
+            <td style={{ opacity: 0.75 }}>Taker fees</td>
+            <td
+              className="vt-mono"
+              style={{ textAlign: "right", color: d.feesPaid > 0 ? "var(--vt-red-dark)" : undefined }}
+            >
+              {d.feesPaid > 0 ? `-${amount(d.feesPaid)}` : amount(0)}
+            </td>
+          </tr>
+          <tr style={{ borderTop: "2px solid var(--color-divider)" }}>
+            <td className="vt-lab">Net</td>
+            <td
+              className="vt-mono"
+              style={{ textAlign: "right", fontWeight: 600, color: pnlColor(d.netProfit) }}
+            >
+              {amount(d.netProfit, { sign: true })}
+            </td>
+          </tr>
+        </tbody>
+      </table>
+
+      {d.feeDragPct === null ? null : (
+        <div style={{ display: "flex", flexDirection: "column", gap: 4 }}>
+          <div style={{ display: "flex", justifyContent: "space-between", fontSize: 11 }}>
+            <span style={{ opacity: 0.7 }}>Fees as a share of gross</span>
+            <span className="vt-mono" style={{ fontWeight: 600 }}>{pct(d.feeDragPct, 0)}</span>
+          </div>
+          <div style={{ height: 8, background: "var(--color-neutral-200)", borderRadius: 2, overflow: "hidden" }}>
+            <div
+              style={{
+                width: `${Math.min(100, Math.max(0, d.feeDragPct)).toFixed(1)}%`,
+                height: "100%",
+                background: "var(--vt-red-dark)",
+              }}
+            />
+          </div>
+          <div style={{ fontSize: 10, opacity: 0.6 }}>
+            Both venues charge the same shape of fee, peaking at a coin flip. Totals
+            price near 50/50, which is where the drag is worst.
+          </div>
+        </div>
+      )}
+
+      <div className="vt-lab" style={{ marginTop: "var(--space-2)" }}>Buying power</div>
+      {balances.length === 0 ? (
+        <Empty>No balances reported.</Empty>
+      ) : (
+        <div style={{ display: "flex", flexDirection: "column", gap: 6 }}>
+          {balances.map((b) => (
+            <div key={b.venue} style={{ display: "flex", flexDirection: "column", gap: 2 }}>
+              <div style={{ display: "flex", justifyContent: "space-between", fontSize: 11 }}>
+                <span style={{ textTransform: "capitalize" }}>{b.venue.replace(/_/g, " ")}</span>
+                <span className="vt-mono">
+                  {amount(b.cash)} <span style={{ opacity: 0.55 }}>of {amount(START)}</span>
+                </span>
+              </div>
+              <div style={{ height: 6, background: "var(--color-neutral-200)", borderRadius: 2, overflow: "hidden" }}>
+                <div
+                  style={{
+                    width: `${Math.min(100, Math.max(0, b.pct)).toFixed(1)}%`,
+                    height: "100%",
+                    // Cash is capacity, so low is the warning. A venue near
+                    // zero silently throttles everything and nothing else on
+                    // this page says so.
+                    background: b.pct < 10 ? "var(--vt-red-dark)" : b.pct < 33 ? "var(--color-accent)" : "var(--vt-green)",
+                  }}
+                />
+              </div>
+            </div>
+          ))}
+          <div style={{ fontSize: 10, opacity: 0.6 }}>
+            A venue near zero cannot take a leg, so the bot stops filling on that
+            side however good the edge is. Reset the account to reseed.
+          </div>
+        </div>
+      )}
+    </div>
+  );
 }
 
 /**

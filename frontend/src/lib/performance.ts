@@ -124,6 +124,9 @@ export interface LedgerRow {
   /** All-in cost of one contract pair, in cents. Null when nothing filled. */
   costCents: number | null;
   capital: number | null;
+  /** Taker fees inside `capital`. Broken out because fee drag is the single
+   *  largest cost this strategy carries and `capital` hides it. */
+  fees: number;
   returned: number | null;
   net: number | null;
   roi: number | null;
@@ -175,6 +178,7 @@ export function toLedgerRow(t: Ticket): LedgerRow {
     qty,
     costCents: capital !== null && qty !== null && qty > 0 ? (capital / qty) * 100 : null,
     capital,
+    fees: t.legs.reduce((a, l) => a + (l.fill_price === null ? 0 : Number(l.fee)), 0),
     returned,
     net,
     roi: net !== null && capital !== null && capital > 0 ? (net / capital) * 100 : null,
@@ -227,6 +231,15 @@ export interface CurvePoint {
 export interface Dashboard {
   rows: LedgerRow[];
   netProfit: number | null;
+  /** Settled net BEFORE fees, i.e. netProfit + feesPaid. The pair is what
+   *  makes fee drag legible: net alone cannot show what it cost to earn. */
+  grossProfit: number | null;
+  /** Fees on settled tickets only, so it reconciles against netProfit rather
+   *  than against a different population. */
+  feesPaid: number;
+  /** Fees as a share of gross. Measured at 62% on 2026-08-29 — the dominant
+   *  fact about this strategy and previously not on screen anywhere. */
+  feeDragPct: number | null;
   capitalDeployed: number | null;
   capitalReturned: number | null;
   returnOnCapital: number | null;
@@ -314,6 +327,11 @@ export function summarize(
   const open = rows.filter((r) => r.outcome === "open");
 
   const netProfit = sumOrNull(settled.map((r) => r.net));
+  // Settled scope, matching netProfit. Fees on open tickets are real money
+  // already spent, but pairing them with a profit that has not happened yet
+  // would produce a drag figure that reconciles against nothing.
+  const feesPaid = settled.reduce((a, r) => a + r.fees, 0);
+  const grossProfit = netProfit === null ? null : netProfit + feesPaid;
   const capitalDeployed = sumOrNull(traded.map((r) => r.capital));
   const capitalReturned = sumOrNull(settled.map((r) => r.returned));
   const settledCapital = sumOrNull(settled.map((r) => r.capital));
@@ -392,6 +410,10 @@ export function summarize(
   return {
     rows,
     netProfit,
+    grossProfit,
+    feesPaid,
+    feeDragPct:
+      grossProfit !== null && grossProfit > 0 ? (feesPaid / grossProfit) * 100 : null,
     capitalDeployed,
     capitalReturned,
     returnOnCapital:
