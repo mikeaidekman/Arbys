@@ -32,6 +32,35 @@ Task 6 implements it. **Verify, do not merely front:** a direct request to the
 Fly hostname carries no signed assertion and must be rejected, or the origin is
 quietly reachable around Access.
 
+## The hosted instance trades; this machine only watches — decided 2026-08-30
+
+`ARBYS_ENABLE_AUTO_TRADE=1` in `fly.toml`, alongside `ARBYS_ENABLE_INGEST=1`
+and `ARBYS_ENABLE_DISCOVERY=1`. Three consequences follow, and the third is a
+hazard rather than a detail.
+
+**Watching means opening the hosted URL.** Task 4 serves the SPA from the same
+origin as the API, so the terminal and the performance dashboard are just
+`https://arbys.<domain>` behind Access. **No local process is involved at
+all** — not a backend, not a Vite dev server. That is what makes the split
+clean: there is exactly one thing running and it is not on this laptop.
+
+**Counting means a read-only database role.** Every analysis in this project so
+far has read the ledger directly rather than through the API, because the
+interesting questions (settled-only realized net, fee drag, per-leg staleness,
+duplicate fills) are joins the API does not expose. Against hosted Postgres
+that wants a **separate read-only role**, not the application's credentials:
+ad-hoc analysis should be incapable of writing to a live ledger, and a
+half-finished query should be incapable of holding a lock on it.
+
+**The local bot has to stop, and the advisory lock will not stop it.** Task 2's
+lock is scoped to a *database*. A backend on this laptop runs against local
+SQLite, so it takes a different lock and boots happily — two bots, two
+ledgers, one set of venue credentials, and an accounting picture that agrees
+with neither. Harmless while both are paper and actively dangerous once either
+is not. The cutover is therefore explicit, in Task 7 Step 8, and it is the last
+step rather than the first: keep collecting locally until the hosted instance
+is proven.
+
 ## Prerequisites — what a human has to prepare
 
 Everything below needs an account, a card, or a decision, and none of it can be
@@ -88,6 +117,11 @@ tests cover the behaviour that matters.
       Cross-region database round trips would sit inside every write path.
 - [ ] Have the `postgresql+asyncpg://` connection string ready for
       `fly secrets set`.
+- [ ] **Create a second, read-only role** and keep its connection string
+      separately. This is the one you use for analysis. The application's
+      credentials should never be the ones sitting in a query window: every
+      interesting question about this ledger is a read, and nothing about
+      answering it should be able to write.
 
 ### Before Task 6 — Cloudflare Access
 
@@ -124,11 +158,6 @@ equivalent of. Task 5 makes the inline form work; you need the material.
 
 ### Decisions worth making before you start
 
-- [ ] **Does the hosted instance trade?** `ARBYS_ENABLE_AUTO_TRADE` is a plain
-      env var in `fly.toml`, not a secret. A hosted observer that only collects
-      data is a materially different thing from a hosted bot that fills paper
-      tickets around the clock, and the second one is what makes the ledger
-      worth reading. Both are legitimate; pick deliberately.
 - [ ] **Does the hosted ledger start clean?** The plan assumes yes — see *What
       this plan deliberately leaves undone*. `arbys-local.db` stays on the
       laptop.
@@ -350,6 +379,10 @@ def test_neither_set_still_falls_back_to_rest():
 - [ ] **Step 6: Verify against the running instance.** `/health` reports `websocket` for both venues; the SPA loads through Access; a direct hit on the Fly hostname is rejected; clock skew is under the 30s Polymarket signing tolerance (`scripts/verify_polymarket_us_creds.py` reports it, and a skewed clock fails every request in a way that looks exactly like a bad key).
 
 - [ ] **Step 7: Watch one deploy cycle end to end.** Confirm the drain runs, the lock releases, and the book refills — the +31s measurement should reproduce on the platform. If it does not, that is the spec's Findings premise failing on real infrastructure and the VM fallback is still valid.
+
+- [ ] **Step 8: Cut over — stop the local bot.** Set `ARBYS_ENABLE_AUTO_TRADE=0` in this machine's `.env` and stop the local backend. Until this step there are two bots on one set of venue credentials, writing two ledgers that agree with each other about nothing; after it there is one. Do it **last**, once the hosted instance has been observed filling tickets, so a failed deploy does not leave nothing running.
+
+- [ ] **Step 9: Confirm the split holds.** The hosted `/health` reports `websocket` for both venues and its ticket count is climbing; nothing on this laptop is listening on `:8000`. Watching is now a browser tab, and counting is the read-only role.
 
 ---
 
