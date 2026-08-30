@@ -372,7 +372,7 @@ def test_neither_set_still_falls_back_to_rest():
 
 - [ ] **Step 3: `alembic upgrade head` against it** — the first time this has ever run for real. Task 1 is what makes this safe.
 
-- [ ] **Step 4: Set secrets** per the spec's table. The `ARBYS_*` feature flags go in `fly.toml` as plain env, visible in review rather than hidden in a store. `ARBYS_ENABLE_INGEST=1` and `ARBYS_ENABLE_DISCOVERY=1` are the two without which a hosted instance does nothing at all.
+- [ ] **Step 4: Set secrets** per the spec's table. The `ARBYS_*` feature flags go in `fly.toml` as plain env, visible in review rather than hidden in a store. Three must be set or the instance does nothing: `ARBYS_ENABLE_INGEST=1`, `ARBYS_ENABLE_DISCOVERY=1`, and — per the decision above — **`ARBYS_ENABLE_AUTO_TRADE=1`**, which is what makes this the trading instance rather than an observer.
 
 - [ ] **Step 5: Deploy with `--strategy immediate`.** The default rolling strategy creates a second Machine before retiring the first, which is the overlap window Task 2 exists to refuse. **Read `fly status` mid-deploy and confirm the machine count never exceeds one** — Task 2 turns a mistake here into a refused boot rather than a double-traded edge, but the deploy should be correct on its own.
 
