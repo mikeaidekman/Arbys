@@ -1,0 +1,56 @@
+name: Fly admin (manual)
+
+# One-off `fly` commands, for a maintainer who cannot install flyctl locally.
+#
+# The Fly dashboard cannot do everything — creating a volume is the case that
+# forced this — and the CLI is unavailable on the maintainer's machine by
+# admin policy. The GitHub runner already installs flyctl and already holds
+# the deploy token, so this exposes that as a box you type into.
+#
+# WHAT THIS IS: a remote shell for the `fly` CLI, scoped to whatever
+# FLY_API_TOKEN can reach. Anyone who can run workflows in this repo can run
+# any fly command against the app, including destructive ones. That is
+# acceptable for a single-maintainer personal repo and would not be for a
+# shared one. It is manual-dispatch only — it never runs on push.
+#
+# Common uses:
+#   volumes create arbys_data --size 1 --region iad --yes
+#   volumes list
+#   certs add arbys.example.com
+#   certs show arbys.example.com
+#   secrets list                  (names only; values are never printed)
+#   status
+#   logs --no-tail
+#
+# Do NOT put secret VALUES in the command box — workflow inputs are recorded
+# in the run history in plain text. Set secrets in the Fly dashboard instead.
+
+on:
+  workflow_dispatch:
+    inputs:
+      command:
+        description: "fly subcommand and args (without the leading 'fly')"
+        required: true
+        default: "status"
+
+# Shares a group with deploy.yml so an admin command cannot interleave with a
+# deploy. Both touch one single-instance app; a volume being created while a
+# machine is being replaced is exactly the kind of race worth not having.
+concurrency:
+  group: fly-deploy
+  cancel-in-progress: false
+
+jobs:
+  run:
+    name: fly ${{ inputs.command }}
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: superfly/flyctl-actions/setup-flyctl@master
+      - name: Run
+        # No `-a` is passed: fly.toml in the repo names the app, so a command
+        # cannot be aimed at the wrong one by mistyping a flag. Commands are
+        # unquoted on purpose so multi-word args work as typed.
+        run: flyctl ${{ inputs.command }}
+        env:
+          FLY_API_TOKEN: ${{ secrets.FLY_API_TOKEN }}

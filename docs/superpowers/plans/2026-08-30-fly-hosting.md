@@ -80,9 +80,16 @@ you do not care about, not the production one.
       Its free tier and instant branching make a disposable database trivial:
       branch, run the test, delete the branch. A local Docker container also
       works — see the Docker note.
-- [ ] Copy the connection string and set `ARBYS_TEST_PG_URL`, rewriting the
-      scheme to **`postgresql+asyncpg://`**. The `postgres://` form Neon shows
-      by default will not work: SQLAlchemy picks the driver from the scheme.
+- [ ] Copy the connection string and make **two edits**, because the URL is
+      handed to the driver verbatim — `db/session.py` does no rewriting:
+      - scheme `postgresql://` -> **`postgresql+asyncpg://`**. SQLAlchemy picks
+        its driver from the scheme, and the default is the *synchronous* one.
+      - query param `?sslmode=require` -> **`?ssl=require`**. `sslmode` is a
+        psycopg parameter; asyncpg does not know it and fails with
+        `connect() got an unexpected keyword argument 'sslmode'`.
+
+      Set the result as `ARBYS_TEST_PG_URL`. The same two edits apply to the
+      production URL in Task 7.
 - [ ] Nothing else in the suite reads it, so this is safe to leave set.
 
 **On Docker:** the plan's Task 4 Step 5 suggests building the image locally to
@@ -110,10 +117,13 @@ and Task 1 runs from the existing venv.
       is likely taken. Whatever you choose goes in `fly.toml` and becomes
       `<name>.fly.dev`.
 - [ ] **Create the app** from the dashboard.
-- [ ] **Create the volume** `arbys_data`, 1GB, region `iad` — dashboard, or the
-      Machines REST API with your token if the dashboard cannot. It is not for
-      storage: it is a *mechanical* single-attach lock that makes running two
-      machines impossible rather than merely discouraged.
+- [ ] **Create the volume** `arbys_data`, 1GB, region `iad`. **The dashboard
+      cannot do this** (confirmed 2026-08-30), so use the manual
+      `Fly admin` workflow in the Actions tab:
+      `volumes create arbys_data --size 1 --region iad --yes`.
+      It is not for storage: it is a *mechanical* single-attach lock that makes
+      running two machines awkward rather than merely discouraged. The real
+      guarantee is Task 2's advisory lock.
 - [ ] **Create a deploy token**: dashboard → Account → **Access Tokens**.
       Scope it to this one app, not org-wide.
 - [ ] **Add it to GitHub** as the repository secret **`FLY_API_TOKEN`**
@@ -199,6 +209,7 @@ equivalent of. Task 5 makes the inline form work; you need the material.
 | `.dockerignore` | Keep `.env`, `*.pem`, `*.db`, `venv/` out of the build context. |
 | `fly.toml` | One machine, no autostop, a volume as a mechanical lock. |
 | `.github/workflows/deploy.yml` | Test, build, deploy on push to `main`. Exists already. |
+| `.github/workflows/fly-admin.yml` | Manual one-off `fly` commands, for what the dashboard cannot do. Exists already. |
 | `arbys/backend/access.py` | Cloudflare Access JWT verification as a FastAPI dependency. |
 | `tests/db/test_singleton_lock.py` | The lock's dialect gate and its refusal path. |
 | `tests/test_spa_serving.py` | SPA fallback, and that it does not shadow the API. |
