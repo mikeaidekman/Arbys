@@ -16,19 +16,21 @@ The spec made everything contingent on one measurement: *does a credentialed col
 
 **Measured 2026-08-29 on the running backend: six Polymarket shards connected at +0s and the first 30-second heartbeat reported `live 100/100 slugs` at +31s.** Seconds, as predicted. Part D stands and this plan proceeds.
 
-## One decision still open — read this before Task 6
+## Access is Cloudflare Access — decided 2026-08-30
 
-The spec specifies **Cloudflare Access** with JWT verification. In conversation on 2026-08-29 the alternative of **Tailscale** was raised and provisionally preferred before the spec was found.
+The spec specified it, the owner confirmed it, and the deciding fact is that
+**the domain is already on Cloudflare**: this is an Access application and a
+CNAME, not a domain migration or a new dependency.
 
-They are not equivalent:
+Tailscale was floated in conversation on 2026-08-29 before this spec was
+found, and is now closed off. It would have meant running `tailscaled` inside
+the container — a sidecar, which is the thing a "nothing to administer" brief
+exists to avoid. Recorded so the option is not reopened by someone reading the
+older conversation.
 
-| | Cloudflare Access | Tailscale |
-| --- | --- | --- |
-| public hostname | yes, but every request must carry a signed assertion | none at all |
-| new infrastructure | an Access app + a CNAME; the domain is already on Cloudflare | `tailscaled` running inside the container |
-| against the brief | nothing to administer | a sidecar, which is the thing the brief exists to avoid |
-
-**Recommendation: Cloudflare Access**, per the spec. Task 6 assumes it. If Tailscale is chosen instead, Task 6 changes entirely and Task 7's `fly.toml` drops its public service — flag it before starting Task 6 rather than after.
+Task 6 implements it. **Verify, do not merely front:** a direct request to the
+Fly hostname carries no signed assertion and must be rejected, or the origin is
+quietly reachable around Access.
 
 ## Global Constraints
 
@@ -215,8 +217,6 @@ def test_neither_set_still_falls_back_to_rest():
 ---
 
 ### Task 6: Cloudflare Access
-
-**Read the open decision at the top of this plan before starting.**
 
 **Files:**
 - Create: `arbys/backend/access.py`, `tests/test_access_auth.py`

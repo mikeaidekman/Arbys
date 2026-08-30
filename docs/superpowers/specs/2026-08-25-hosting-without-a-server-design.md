@@ -508,13 +508,11 @@ measurement comes back badly.
 +31s to a fully-served shard (see Findings), so Part D stands and
 [the implementation plan](../plans/2026-08-30-fly-hosting.md) proceeds.
 
-Still open, and it belongs to Part E rather than the platform: **Cloudflare
-Access versus Tailscale.** This spec specifies Access and the plan's opening
-section sets out why — the domain is already on Cloudflare, so it is an Access
-application and a CNAME, whereas Tailscale means running `tailscaled` inside
-the container, which is the sidecar the brief exists to avoid. Tailscale was
-provisionally preferred in conversation on 2026-08-29 before this spec was
-found. Decide before the plan's Task 6.
+**Part E is confirmed as Cloudflare Access (2026-08-30).** The domain is
+already on Cloudflare, so it is an Access application and a CNAME. Tailscale
+was floated on 2026-08-29 before this spec was found and is closed off: it
+would mean running `tailscaled` in the container, which is the sidecar this
+brief exists to avoid.
 
 Non-blocking: whether the drain bound of 20s is right. It is a guess, and the
 right value is a function of live venue acknowledgement latency, which is
