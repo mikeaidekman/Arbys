@@ -32,6 +32,109 @@ Task 6 implements it. **Verify, do not merely front:** a direct request to the
 Fly hostname carries no signed assertion and must be rejected, or the origin is
 quietly reachable around Access.
 
+## Prerequisites — what a human has to prepare
+
+Everything below needs an account, a card, or a decision, and none of it can be
+done from the repo. Grouped by the task it unblocks, so nothing is set up
+earlier than it is needed.
+
+Checked on the dev machine 2026-08-30: `node`/`npm` present; **`docker`,
+`flyctl` and `psql` all absent.** Only `flyctl` is genuinely required — see the
+note on Docker below.
+
+### Before Task 1 — a throwaway Postgres
+
+Task 1 replays the Alembic chain against real Postgres. It needs a database
+you do not care about, not the production one.
+
+- [ ] **Create a Neon account** (neon.tech) and a project in a US-east region.
+      Its free tier and instant branching make a disposable database trivial:
+      branch, run the test, delete the branch. A local Docker container also
+      works — see the Docker note.
+- [ ] Copy the connection string and set `ARBYS_TEST_PG_URL`, rewriting the
+      scheme to **`postgresql+asyncpg://`**. The `postgres://` form Neon shows
+      by default will not work: SQLAlchemy picks the driver from the scheme.
+- [ ] Nothing else in the suite reads it, so this is safe to leave set.
+
+**On Docker:** the plan's Task 4 Step 5 suggests building the image locally to
+check it. You can skip installing Docker entirely by using
+`fly deploy --remote-only`, which builds on Fly's builders. Given this laptop
+was at **97% RAM with VS Code and browsers using 6.7 GB**, adding Docker
+Desktop is a real cost for a step you can get remotely. The trade is that you
+cannot inspect the image before it ships — acceptable here, since Task 4's
+tests cover the behaviour that matters.
+
+### Before Task 7 — Fly.io
+
+- [ ] **Create a Fly.io account** and add a payment method. A machine this size
+      plus a small volume is single-digit dollars a month, but confirm current
+      pricing yourself rather than trusting a figure written here.
+- [ ] **Install `flyctl`** — on Windows: `iwr https://fly.io/install.ps1 -useb | iex`
+- [ ] `fly auth login`
+- [ ] **Pick an app name.** It is globally unique across all of Fly, so `arbys`
+      is likely taken. Whatever you choose goes in `fly.toml` and becomes
+      `<name>.fly.dev`.
+- [ ] `fly apps create <name>` and `fly volumes create arbys_data --size 1 --region iad`.
+      The volume is not for storage — it is a *mechanical* single-attach lock
+      that makes running two machines impossible rather than merely discouraged.
+
+### Before Task 7 — production Postgres
+
+- [ ] **Decide the provider.** Neon or Supabase pinned to us-east, or Fly's own
+      Postgres. Note Fly Postgres is *unmanaged* — you would be administering
+      it, which is the thing this whole spec exists to avoid. Neon or Supabase
+      fit the brief better.
+- [ ] Provision it in a **US-east** region, near the Fly machine in `iad`.
+      Cross-region database round trips would sit inside every write path.
+- [ ] Have the `postgresql+asyncpg://` connection string ready for
+      `fly secrets set`.
+
+### Before Task 6 — Cloudflare Access
+
+The domain is already on Cloudflare, which is why this is small.
+
+- [ ] **Enable Zero Trust** on the Cloudflare account if it is not already.
+      It is free at single-user scale; confirm the current limit.
+- [ ] **Choose a hostname**, e.g. `arbys.<your-domain>`.
+- [ ] **Create an Access application** for that hostname, with a policy
+      allowing your own email and nothing else.
+- [ ] Note two values — both go into Fly secrets:
+      - the **team domain**, `<team>.cloudflareaccess.com`
+      - the application **AUD tag**, from the application's settings
+- [ ] Point the hostname at the Fly app with a **CNAME to `<name>.fly.dev`**,
+      proxied (orange cloud). Not proxied, Access never sees the request and
+      the origin is open.
+
+### Before Task 5 — venue credentials in inline form
+
+Both keys currently live as files on this laptop, which a container has no
+equivalent of. Task 5 makes the inline form work; you need the material.
+
+- [ ] **Kalshi:** `KALSHI_API_KEY_ID`, plus the **contents** of the `.pem` at
+      `KALSHI_PRIVATE_KEY_PATH`. It is multi-line, which is exactly what secret
+      stores mangle — Task 5 normalises a flattened `
+` form, so either
+      survives, but paste it carefully.
+- [ ] **Polymarket US:** `POLYMARKET_US_API_KEY_ID`, plus the base64 secret
+      from the file at `POLYMARKET_US_PRIVATE_KEY_PATH`. Single-line, so it
+      travels unchanged.
+- [ ] **Keep both out of the repo and out of `fly.toml`.** They go in
+      `fly secrets set`, never in a file that is committed. `.dockerignore`
+      from Task 4 keeps `*.pem` out of the build context as a second line.
+
+### Decisions worth making before you start
+
+- [ ] **Does the hosted instance trade?** `ARBYS_ENABLE_AUTO_TRADE` is a plain
+      env var in `fly.toml`, not a secret. A hosted observer that only collects
+      data is a materially different thing from a hosted bot that fills paper
+      tickets around the clock, and the second one is what makes the ledger
+      worth reading. Both are legitimate; pick deliberately.
+- [ ] **Does the hosted ledger start clean?** The plan assumes yes — see *What
+      this plan deliberately leaves undone*. `arbys-local.db` stays on the
+      laptop.
+- [ ] **Region.** `iad` is the spec's choice. Both venues are US-based, so
+      us-east is right unless you know otherwise.
+
 ## Global Constraints
 
 - **All money and all prices are `Decimal`. Never float.**
