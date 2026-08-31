@@ -42,8 +42,24 @@ def _sync_url() -> str:
         ("sqlite+aiosqlite://", "sqlite://"),
     ):
         if url.startswith(async_driver):
-            return url.replace(async_driver, sync_driver, 1)
+            return _sync_ssl(url.replace(async_driver, sync_driver, 1))
     return url
+
+
+def _sync_ssl(url: str) -> str:
+    """Swap asyncpg's TLS parameter for psycopg's.
+
+    The two drivers spell the same thing differently and each rejects the
+    other's outright: asyncpg wants ``ssl=require``, libpq (psycopg) wants
+    ``sslmode=require``. Swapping the driver without swapping this produces
+    ``invalid connection option "ssl"`` — which is what a hosted
+    ``alembic upgrade head`` would have hit against any managed Postgres URL,
+    since they all carry a TLS parameter.
+
+    Found by the Postgres migration workflow on 2026-08-31, before it could be
+    found by a deploy.
+    """
+    return url.replace("?ssl=", "?sslmode=").replace("&ssl=", "&sslmode=")
 
 
 def run_migrations_offline() -> None:

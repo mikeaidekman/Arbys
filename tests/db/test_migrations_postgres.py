@@ -43,8 +43,18 @@ pytestmark = pytest.mark.skipif(
 
 
 def _sync(url: str) -> str:
-    """Inspection is synchronous; the app's URL names the async driver."""
-    return url.replace("postgresql+asyncpg://", "postgresql+psycopg://", 1)
+    """Inspection is synchronous; the app's URL names the async driver.
+
+    The TLS parameter has to move too: asyncpg wants ``ssl=require`` and
+    libpq wants ``sslmode=require``, and each rejects the other. This mirrors
+    `_sync_url`/`_sync_ssl` in the Alembic env, deliberately — if the two ever
+    disagree, this test passes while the real migration path fails.
+    """
+    return (
+        url.replace("postgresql+asyncpg://", "postgresql+psycopg://", 1)
+        .replace("?ssl=", "?sslmode=")
+        .replace("&ssl=", "&sslmode=")
+    )
 
 
 def _wipe(url: str) -> None:
