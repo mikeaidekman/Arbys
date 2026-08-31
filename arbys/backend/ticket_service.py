@@ -30,6 +30,7 @@ from __future__ import annotations
 
 import uuid
 from dataclasses import dataclass
+from datetime import datetime
 from decimal import Decimal
 from typing import TYPE_CHECKING
 
@@ -81,10 +82,27 @@ def _title(state: AppState, event_group_id: str) -> str:
     return group.title if group is not None else event_group_id
 
 
+def _starts_at(state: AppState, event_group_id: str) -> datetime | None:
+    """Freeze when the game starts, and so roughly when the ticket pays out.
+
+    Snapshotted for the same reason as `_title`, and with a sharper edge: a
+    ticket outlives its group, and the group is retired precisely when the game
+    *finishes* -- which is while the ticket is still unsettled. A live join
+    would therefore be empty for exactly the rows a "what settles when" view
+    needs to place.
+
+    None where the group is gone or reports no start time (a Kalshi ticker
+    without HHMM, say). None means unknown, never "settles now".
+    """
+    base_id = event_group_id.split(":", 1)[0]
+    group = state.event_groups.get(base_id)
+    return group.start_time if group is not None else None
+
+
 async def _write_ticket(
     *, ticket_id: str, account_id: str, opp: ArbOpportunity, title: str,
     source: str, status: str, reason: str | None,
-    economics: ArbOpportunity | None,
+    economics: ArbOpportunity | None, starts_at: datetime | None = None,
 ) -> None:
     """Persist the ticket.
 
@@ -106,6 +124,7 @@ async def _write_ticket(
             account_id=account_id,
             event_group_id=opp.event_group_id,
             title_snapshot=title,
+            starts_at=starts_at,
             source=source,
             status=status,
             rejection_reason=reason,
@@ -287,6 +306,7 @@ async def submit_arb_ticket(
     account_id = account_id or state.default_account_id
     ticket_id = uuid.uuid4().hex
     title = _title(state, opp.event_group_id)
+    starts_at = _starts_at(state, opp.event_group_id)
 
     # Refused before anything reaches the broker. Recorded rather than dropped
     # silently: a drained attempt and a vanished edge are different events, and
@@ -296,7 +316,7 @@ async def submit_arb_ticket(
         reason = f"draining:{opp.event_group_id} (shutting down, not accepting tickets)"
         if record_nonfill:
             await _write_ticket(
-                ticket_id=ticket_id, account_id=account_id, opp=opp, title=title,
+                ticket_id=ticket_id, account_id=account_id, opp=opp, title=title, starts_at=starts_at,
                 source=source, status="rejected", reason=reason, economics=None,
             )
         return TicketResult(ticket_id, "rejected", (), reason)
@@ -304,7 +324,7 @@ async def submit_arb_ticket(
     state.enter_ticket()
     try:
         return await _submit_checked(
-            state, opp, ticket_id=ticket_id, title=title,
+            state, opp, ticket_id=ticket_id, title=title, starts_at=starts_at,
             source=source, account_id=account_id, record_nonfill=record_nonfill,
         )
     finally:
@@ -317,6 +337,7 @@ async def _submit_checked(
     *,
     ticket_id: str,
     title: str,
+    starts_at: datetime | None,
     source: str,
     account_id: str,
     record_nonfill: bool,
@@ -336,7 +357,7 @@ async def _submit_checked(
         reason = f"edge_no_longer_available:{opp.event_group_id}"
         if record_nonfill:
             await _write_ticket(
-                ticket_id=ticket_id, account_id=account_id, opp=opp, title=title,
+                ticket_id=ticket_id, account_id=account_id, opp=opp, title=title, starts_at=starts_at,
                 source=source, status="missed", reason=reason, economics=None,
             )
         return TicketResult(ticket_id, "missed", (), reason)
@@ -347,7 +368,7 @@ async def _submit_checked(
     if skew is not None:
         if record_nonfill:
             await _write_ticket(
-                ticket_id=ticket_id, account_id=account_id, opp=live, title=title,
+                ticket_id=ticket_id, account_id=account_id, opp=live, title=title, starts_at=starts_at,
                 source=source, status="rejected", reason=skew, economics=live,
             )
         return TicketResult(ticket_id, "rejected", (), skew)
@@ -356,7 +377,7 @@ async def _submit_checked(
     if breach is not None:
         if record_nonfill:
             await _write_ticket(
-                ticket_id=ticket_id, account_id=account_id, opp=live, title=title,
+                ticket_id=ticket_id, account_id=account_id, opp=live, title=title, starts_at=starts_at,
                 source=source, status="rejected", reason=breach, economics=live,
             )
         return TicketResult(ticket_id, "rejected", (), breach)
@@ -379,7 +400,7 @@ async def _submit_checked(
     # The ticket row must exist before the router runs: paper_order.ticket_id
     # is an FK to it, and the sink writes order rows from inside submit().
     await _write_ticket(
-        ticket_id=ticket_id, account_id=account_id, opp=live, title=title,
+        ticket_id=ticket_id, account_id=account_id, opp=live, title=title, starts_at=starts_at,
         source=source, status="pending", reason=None, economics=live,
     )
 
@@ -463,6 +484,7 @@ async def submit_arb_ticket_for_descriptor(
         account_id=account_id,
         event_group_id=event_group_id,
         title=_title(state, event_group_id),
+        starts_at=_starts_at(state, event_group_id),
         source=source,
         reason=reason,
     )
@@ -471,7 +493,7 @@ async def submit_arb_ticket_for_descriptor(
 
 async def _write_missed_descriptor(
     *, ticket_id: str, account_id: str, event_group_id: str, title: str,
-    source: str, reason: str,
+    source: str, reason: str, starts_at: datetime | None = None,
 ) -> None:
     """A missed ticket with no opportunity object behind it, so no economics.
 
@@ -486,6 +508,7 @@ async def _write_missed_descriptor(
             account_id=account_id,
             event_group_id=event_group_id,
             title_snapshot=title,
+            starts_at=starts_at,
             source=source,
             status="missed",
             rejection_reason=reason,

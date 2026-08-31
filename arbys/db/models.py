@@ -252,7 +252,12 @@ class PaperTicket(Base):
     groups when they stop matching and `delete_event_group` takes the legs with
     it, so a live join would blank the name of every finished game — exactly
     the rows worth auditing. `title_snapshot` is frozen at submit time for the
-    same reason and is the only naming the UI renders.
+    same reason and is the only naming the UI renders. `starts_at` is snapshotted
+    for the third time on the same reasoning: it is when the underlying game
+    begins, and so roughly when the ticket pays out, and a live join would fail
+    precisely when it matters -- discovery retires a *finished* game while its
+    ticket is still awaiting settlement, which is exactly the row a "what
+    settles when" view needs to place.
 
     The three economic columns are nullable because a `missed` ticket has no
     economics: a manual click passes only an event group and outcome ids, so if
@@ -266,6 +271,10 @@ class PaperTicket(Base):
     account_id: Mapped[str] = mapped_column(ForeignKey("paper_account.id"), nullable=False)
     event_group_id: Mapped[str] = mapped_column(String(64), nullable=False)
     title_snapshot: Mapped[str] = mapped_column(String(512), nullable=False)
+    # Nullable: rows written before this column existed have none, and a group
+    # that reports no start time (a Kalshi ticker without HHMM, say) legitimately
+    # has none either. Null means unknown, never "settles now".
+    starts_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     source: Mapped[str] = mapped_column(String(16), nullable=False, default="manual")
     status: Mapped[str] = mapped_column(String(16), nullable=False)
     rejection_reason: Mapped[str | None] = mapped_column(String(256))

@@ -272,6 +272,7 @@ async def insert_paper_ticket(
     title_snapshot: str, source: str, status: str,
     rejection_reason: str | None = None, total_stake: Decimal | None = None,
     expected_profit: Decimal | None = None, expected_edge_bps: Decimal | None = None,
+    starts_at: datetime | None = None,
 ) -> None:
     session.add(
         m.PaperTicket(
@@ -279,6 +280,7 @@ async def insert_paper_ticket(
             account_id=account_id,
             event_group_id=event_group_id,
             title_snapshot=title_snapshot,
+            starts_at=starts_at,
             source=source,
             status=status,
             rejection_reason=rejection_reason,
@@ -574,6 +576,7 @@ async def list_paper_tickets(
                 "expected_profit": t.expected_profit,
                 "expected_edge_bps": t.expected_edge_bps,
                 "submitted_at": t.submitted_at,
+                "starts_at": t.starts_at,
                 "realized_profit": _score_ticket(legs, settled),
                 "legs": legs,
             }

@@ -135,6 +135,20 @@ export interface LedgerRow {
   status: Ticket["status"];
   outcome: Outcome;
   rejectionReason: string | null;
+  /** When the game starts, and so roughly when this ticket pays out. ISO, or
+   *  null when unknown. See `settlementDate` for the display fallback. */
+  startsAt: string | null;
+  /** What this ticket is worth at settlement, guaranteed: `qty - capital`.
+   *
+   *  A matched arb pair pays exactly $1 whichever side wins, so the payout is
+   *  just the contract count and the profit is fixed at fill time. This is the
+   *  meaningful number for a hedged book — mark-to-market unrealized value
+   *  moves with quotes that cannot change what the pair settles for.
+   *
+   *  Null when the legs are *not* matched (different filled quantities, or only
+   *  one leg filled). That position is directional, its payout depends on who
+   *  wins, and showing a guaranteed value for it would be a lie. */
+  settlementValue: number | null;
 }
 
 /**
@@ -167,7 +181,20 @@ export function toLedgerRow(t: Ticket): LedgerRow {
   // the size of its unsettled leg.
   const net = t.realized_profit === null ? null : Number(t.realized_profit);
   const qty = t.legs.length > 0 ? Number(t.legs[0].qty) : null;
+  // Guaranteed settlement value, but only for a genuinely matched pair. Every
+  // filled leg must carry the same quantity: a matched pair pays $1 per
+  // contract whoever wins, an unmatched one pays 0 or 1 depending, and the
+  // whole point of this figure is that it is not a forecast.
+  const filledQtys = t.legs
+    .filter((l) => l.fill_price !== null)
+    .map((l) => Number(l.qty));
+  const matched =
+    filledQtys.length >= 2 && filledQtys.every((q) => q === filledQtys[0]);
+  const settlementValue =
+    matched && capital !== null ? filledQtys[0] - capital : null;
   return {
+    startsAt: t.starts_at,
+    settlementValue,
     id: t.id,
     submittedAt: t.submitted_at,
     title: t.title_snapshot,
@@ -189,6 +216,83 @@ export function toLedgerRow(t: Ticket): LedgerRow {
     outcome: ticketOutcome(t),
     rejectionReason: t.rejection_reason,
   };
+}
+
+/** A trailing "(YYYY-MM-DD)" in a title, which every discovery-created group
+ *  carries. Used only as a fallback — see `settlementDate`. */
+// Sentinel for tickets whose payout day is unknown. Cannot collide with a
+// real key, which is always YYYY-MM-DD.
+const UNKNOWN_DATE_KEY = "date-unknown";
+
+const TITLE_DATE = /\((\d{4}-\d{2}-\d{2})\)\s*$/;
+
+function isoDay(d: Date): string {
+  const p = (n: number) => String(n).padStart(2, "0");
+  return `${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())}`;
+}
+
+/** The day a ticket pays out, as YYYY-MM-DD, or null when unknowable.
+ *
+ *  `startsAt` is authoritative: it is the venue's own kickoff time, frozen onto
+ *  the ticket at submit. Falling back to the title's trailing date matters for
+ *  every row written before that column existed, which is all of them at the
+ *  time of writing. The fallback is deliberately *second*, and degrades to null
+ *  rather than to a wrong date if the title format ever changes.
+ *
+ *  Both resolve to the game's local day. Group dates in this project are
+ *  Eastern throughout (see CLAUDE.md), so the two sources agree for an Eastern
+ *  viewer and can differ by a day for one far enough away.
+ */
+export function settlementDate(row: LedgerRow): string | null {
+  if (row.startsAt !== null) {
+    const d = new Date(row.startsAt);
+    if (!Number.isNaN(d.getTime())) return isoDay(d);
+  }
+  const m = TITLE_DATE.exec(row.title);
+  return m === null ? null : m[1];
+}
+
+export interface SettlementBucket {
+  /** YYYY-MM-DD, or null for the "date unknown" bucket. */
+  date: string | null;
+  /** Guaranteed profit landing that day. */
+  value: number;
+  /** Capital that comes back with it. */
+  capital: number;
+  contracts: number;
+  tickets: number;
+}
+
+/** Group unsettled tickets by the day they pay out, earliest first.
+ *
+ *  Only rows with a real `settlementValue` are counted: an unmatched pair has
+ *  no guaranteed payout, so putting it on a calendar of guaranteed payouts
+ *  would misstate the total. The unknown-date bucket sorts last — it is a gap
+ *  in what we know, not a date in the far future. */
+export function settlementBuckets(rows: LedgerRow[]): SettlementBucket[] {
+  const by = new Map<string, SettlementBucket>();
+  for (const r of rows) {
+    if (r.settlementValue === null) continue;
+    const date = settlementDate(r);
+    const key = date ?? UNKNOWN_DATE_KEY;
+    const b = by.get(key) ?? {
+      date,
+      value: 0,
+      capital: 0,
+      contracts: 0,
+      tickets: 0,
+    };
+    b.value += r.settlementValue;
+    b.capital += r.capital ?? 0;
+    b.contracts += r.qty ?? 0;
+    b.tickets += 1;
+    by.set(key, b);
+  }
+  return [...by.values()].sort((a, b) => {
+    if (a.date === null) return 1;
+    if (b.date === null) return -1;
+    return a.date < b.date ? -1 : a.date > b.date ? 1 : 0;
+  });
 }
 
 export interface LeagueRow {

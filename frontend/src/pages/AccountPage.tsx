@@ -1,15 +1,17 @@
 import { useState } from "react";
 import { useQuery } from "@tanstack/react-query";
 import { api } from "../api/client";
-import type { PaperAccountSummary, PaperPosition, PnlSnapshot, Ticket } from "../api/types";
+import type { PaperAccountSummary, PnlSnapshot, Ticket } from "../api/types";
 import { Logo } from "../components/Logo";
 import {
   RANGES,
+  settlementBuckets,
   summarize,
-  type CurvePoint,
+  toLedgerRow,
   type Dashboard,
   type LedgerRow,
   type Outcome,
+  type SettlementBucket,
 } from "../lib/performance";
 
 const ACCOUNT = "default";
@@ -109,111 +111,6 @@ function Empty({ children }: { children: React.ReactNode }) {
  * excursion: an arb book can and does dip, and a chart that assumes monotonic
  * profit would clip the dip rather than draw it.
  */
-function Curve({ points }: { points: CurvePoint[] }) {
-  if (points.length < 2) {
-    return (
-      <Empty>
-        Not enough snapshots in this window — one is written every 30 seconds
-        while the backend is running.
-      </Empty>
-    );
-  }
-  const W = 800;
-  const H = 230;
-  const values = points.map((p) => p.value);
-  // Zero is always in frame: without it a series that never crosses the axis
-  // reads as if it started at its own minimum.
-  const lo = Math.min(0, ...values);
-  const hi = Math.max(0, ...values);
-  const span = hi - lo || 1;
-  const y = (v: number) => H - ((v - lo) / span) * H;
-  const pts = points.map((p, i) => [(i / (points.length - 1)) * W, y(p.value)]);
-  const line = pts.map(([px, py]) => `${px.toFixed(1)},${py.toFixed(1)}`).join(" ");
-  const zeroY = y(0);
-  const area = `M0,${zeroY.toFixed(1)} L${line.split(" ").join(" L")} L${W},${zeroY.toFixed(1)} Z`;
-  const axis = [1, 0.75, 0.5, 0.25, 0].map((f) => lo + span * f);
-
-  return (
-    <>
-      <div style={{ position: "relative", height: H }}>
-        <svg
-          width="100%"
-          height={H}
-          viewBox={`0 0 ${W} ${H}`}
-          preserveAspectRatio="none"
-          style={{ display: "block", overflow: "visible" }}
-          role="img"
-          aria-label="Cumulative net profit and loss"
-        >
-          <g stroke="var(--color-divider)" strokeWidth={1} vectorEffect="non-scaling-stroke">
-            {[0, 0.25, 0.5, 0.75, 1].map((f) => (
-              <line key={f} x1={0} y1={f * H} x2={W} y2={f * H} />
-            ))}
-          </g>
-          <path d={area} fill="var(--color-accent-100)" stroke="none" />
-          {lo < 0 ? (
-            <line
-              x1={0}
-              y1={zeroY}
-              x2={W}
-              y2={zeroY}
-              stroke="var(--color-text)"
-              strokeWidth={1}
-              strokeDasharray="3 3"
-              opacity={0.35}
-              vectorEffect="non-scaling-stroke"
-            />
-          ) : null}
-          <polyline
-            points={line}
-            fill="none"
-            stroke="var(--vt-green)"
-            strokeWidth={2}
-            vectorEffect="non-scaling-stroke"
-          />
-        </svg>
-        <div
-          style={{
-            position: "absolute",
-            inset: 0,
-            display: "flex",
-            flexDirection: "column",
-            justifyContent: "space-between",
-            pointerEvents: "none",
-          }}
-        >
-          {axis.map((v, i) => (
-            <div
-              key={i}
-              className="vt-mono"
-              style={{
-                fontSize: 10,
-                color: "var(--color-neutral-600)",
-                // Knocks the gridline out from behind the label, so it takes
-                // the surface it sits on — the panel — not the page ground.
-                background: "var(--color-surface)",
-                alignSelf: "flex-start",
-                paddingRight: 4,
-              }}
-            >
-              {amount(v, { sign: true })}
-            </div>
-          ))}
-        </div>
-      </div>
-      <div
-        className="vt-mono"
-        style={{ display: "flex", justifyContent: "space-between", fontSize: 10, opacity: 0.5 }}
-      >
-        <span>{day(points[0].ts)}</span>
-        <span>{day(points[Math.floor(points.length / 2)].ts)}</span>
-        <span>{day(points[points.length - 1].ts)}</span>
-      </div>
-    </>
-  );
-}
-
-/** Signed proportional bar. Negative nets draw left-anchored in red. */
 function Bar({ value, max, color }: { value: number | null; max: number; color: string }) {
   const width = value === null || max <= 0 ? 0 : (Math.abs(value) / max) * 100;
   return (
@@ -310,11 +207,6 @@ export function AccountPage() {
     queryFn: () => api.paperPnl(ACCOUNT, 1000),
     refetchInterval: 30_000,
   });
-  const positions = useQuery<PaperPosition[]>({
-    queryKey: ["paper", "positions", ACCOUNT],
-    queryFn: () => api.paperPositions(ACCOUNT),
-    refetchInterval: 10_000,
-  });
   // Balances only — the rest of this page is computed from the ticket ledger.
   // Cash headroom cannot be: it is what is LEFT, not what was spent.
   const summary = useQuery<PaperAccountSummary>({
@@ -341,20 +233,34 @@ export function AccountPage() {
     ? shown.reduce((a, r) => a + (r.net ?? 0), 0)
     : null;
 
-  // Unrealized is deliberately NOT windowed by `range`, unlike every other
-  // tile in the row. A position is open now or it is not; asking what it was
-  // worth "in the last 7 days" has no meaning. Computed from the positions
-  // query rather than the ticket ledger because the backend marks each leg
-  // there — the ledger only knows what a ticket cost, not what it is worth.
-  const openLegs = (positions.data ?? []).filter((x) => Number(x.qty) !== 0);
-  const unrealizedValue = openLegs.length
-    ? openLegs.reduce((a, x) => a + Number(x.unrealized), 0)
+  // Deliberately NOT windowed by `range`, unlike every other tile in the row.
+  // A ticket is awaiting settlement now or it is not; asking what was pending
+  // "in the last 7 days" has no meaning, and a ticket submitted before the
+  // window opened is still owed to you.
+  //
+  // Computed from the ticket ledger rather than the positions endpoint, which
+  // this page no longer queries at all. Positions are marked at mid, and a mark
+  // is noise on a hedged book: the pair settles for $1 whoever wins, so the
+  // profit was fixed at fill time and no quote can change it.
+  const allRows = (tickets.data ?? []).map(toLedgerRow);
+  const pendingRows = allRows.filter((r) => r.status === "filled" && r.net === null);
+  const hedged = pendingRows.filter((r) => r.settlementValue !== null);
+  // Legged: one side filled, the other not, or the two filled at different
+  // sizes. It has no guaranteed payout, so it is excluded from every total on
+  // this page and surfaced on its own instead. The per-leg positions table used
+  // to be the only place this was visible; dropping it without this would have
+  // hidden the one position type worth worrying about.
+  const unhedged = pendingRows.filter((r) => r.settlementValue === null);
+  const pendingValue = hedged.length
+    ? hedged.reduce((a, r) => a + (r.settlementValue ?? 0), 0)
     : null;
-  const markValue = openLegs.reduce(
-    (a, x) => a + Number(x.qty) * Number(x.mark ?? x.avg_price),
-    0,
-  );
-  const unquotedLegs = openLegs.filter((x) => x.mark === null).length;
+  const pendingContracts = hedged.reduce((a, r) => a + (r.qty ?? 0), 0);
+  const buckets = settlementBuckets(pendingRows);
+  // Windowed, unlike the tiles above: this is the header for the accrual chart
+  // and must agree with what the chart actually draws.
+  const accrual = {
+    total: d.rows.reduce((a, r) => a + (r.settlementValue ?? 0), 0),
+  };
 
   const maxBucket = Math.max(...d.edgeBuckets.map((b) => b.count), 1);
   const loading = tickets.isLoading || pnl.isLoading;
@@ -496,18 +402,16 @@ export function AccountPage() {
             color={pnlColor(d.returnOnCapital)}
           />
           <Kpi
-            label="Unrealized value"
-            value={
-              unrealizedValue === null ? "—" : amount(unrealizedValue, { sign: true })
-            }
+            label="Locked in"
+            value={pendingValue === null ? "—" : amount(pendingValue, { sign: true })}
             sub={
-              openLegs.length === 0
-                ? "no open positions"
-                : `mark ${amount(markValue)} · ${openLegs.length} leg${
-                    openLegs.length === 1 ? "" : "s"
-                  }${unquotedLegs > 0 ? ` · ${unquotedLegs} unquoted` : ""}`
+              hedged.length === 0
+                ? "nothing awaiting settlement"
+                : `${round0(pendingContracts)} contracts · ${hedged.length} ticket${
+                    hedged.length === 1 ? "" : "s"
+                  }${unhedged.length > 0 ? ` · ${unhedged.length} unhedged` : ""}`
             }
-            color={pnlColor(unrealizedValue)}
+            color={pnlColor(pendingValue)}
           />
           <Kpi
             label="Open exposure"
@@ -526,31 +430,17 @@ export function AccountPage() {
         >
           <div className="vt-panel">
             <div style={{ display: "flex", alignItems: "baseline", gap: "var(--space-3)" }}>
-              <div className="vt-lab">Cumulative net P&amp;L</div>
+              <div className="vt-lab">Locked-in profit, cumulative</div>
               <span style={{ flex: 1 }} />
-              <span
-                className="vt-mono"
-                style={{
-                  fontSize: 13,
-                  color: pnlColor(d.curve.length > 0 ? d.curve[d.curve.length - 1].value : null),
-                }}
-              >
-                {d.curve.length > 0
-                  ? `${amount(d.curve[d.curve.length - 1].value, { sign: true })} equity change`
-                  : ""}
+              <span className="vt-mono" style={{ fontSize: 13, color: "var(--vt-green)" }}>
+                {accrual.total > 0 ? `${amount(accrual.total, { sign: true })} earned` : ""}
               </span>
             </div>
-            {pnl.isError ? (
-              <Empty>
-                Couldn't load equity history
-                {pnl.error instanceof Error ? `: ${pnl.error.message}` : "."}
-              </Empty>
-            ) : (
-              <Curve points={d.curve} />
-            )}
+            <AccrualCurve rows={d.rows} />
             <div style={{ fontSize: 11, opacity: 0.5 }}>
-              Equity change from the start of the window — includes open marks, so it
-              moves between settlements.
+              Settlement value accrued in this window — contracts less capital, so
+              it is fixed at fill time and cannot move with quotes. Solid is
+              settled, hatched is certain but not yet paid.
             </div>
           </div>
 
@@ -876,70 +766,179 @@ export function AccountPage() {
 
         <NetOfCosts d={d} summary={summary.data} />
 
-        <OpenPositions query={positions} />
+        <SettlementCalendar buckets={buckets} unhedged={unhedged} />
       </div>
     </div>
   );
 }
 
-interface PositionEventRow {
-  key: string;
-  title: string;
-  eventGroupId: string | null;
-  legs: PaperPosition[];
-  /** Cost basis: Σ qty × avg_price. */
-  capital: number;
-  /** Σ qty × mark, falling back to avg_price for an unquoted leg. */
-  markValue: number;
-  unrealized: number;
-  unmarkedLegs: number;
+
+
+/**
+ * Cumulative locked-in profit across the window.
+ *
+ * Replaces the equity curve, which moved with open marks. A mark is noise on a
+ * hedged book: a matched pair settles for exactly $1 whoever wins, so the
+ * profit was fixed the moment both legs filled and no later quote can change
+ * it. This accrues `qty - capital` by submit time and splits the total into
+ * what has already paid out and what is merely certain.
+ */
+function AccrualCurve({ rows }: { rows: LedgerRow[] }) {
+  const pts = rows
+    .filter((r) => r.settlementValue !== null)
+    .slice()
+    .sort((a, b) => (a.submittedAt < b.submittedAt ? -1 : 1));
+  if (pts.length < 2) {
+    return <Empty>Not enough filled tickets in this window to plot.</Empty>;
+  }
+  let total = 0;
+  let settled = 0;
+  const series = pts.map((r) => {
+    total += r.settlementValue ?? 0;
+    if (r.net !== null) settled += r.settlementValue ?? 0;
+    return { total, settled };
+  });
+  const W = 800;
+  const H = 230;
+  // Zero-based on purpose: this series only ever goes up, so a floor at its own
+  // minimum would make a flat night look like a climb.
+  const hi = Math.max(series[series.length - 1].total, 0.01);
+  const x = (i: number) => (i / (series.length - 1)) * W;
+  const y = (v: number) => H - (v / hi) * H;
+  const area = (key: "total" | "settled") =>
+    `M0,${H} ` +
+    series.map((p, i) => `L${x(i).toFixed(1)},${y(p[key]).toFixed(1)}`).join(" ") +
+    ` L${W},${H} Z`;
+  const axis = [1, 0.75, 0.5, 0.25, 0].map((f) => hi * f);
+  return (
+    <svg viewBox={`0 0 ${W} ${H}`} preserveAspectRatio="none" style={{ width: "100%", height: 230 }}>
+      <defs>
+        <pattern id="pending-hatch" width="6" height="6" patternUnits="userSpaceOnUse">
+          <path d="M0,6 L6,0" stroke="var(--vt-green)" strokeWidth="1" opacity="0.45" />
+        </pattern>
+      </defs>
+      {axis.map((v, i) => (
+        <line
+          key={i}
+          x1="0"
+          x2={W}
+          y1={y(v).toFixed(1)}
+          y2={y(v).toFixed(1)}
+          stroke="var(--color-divider)"
+          strokeWidth="1"
+        />
+      ))}
+      <path d={area("total")} fill="url(#pending-hatch)" />
+      <path d={area("settled")} fill="var(--vt-green)" opacity="0.22" />
+      <polyline
+        points={series.map((p, i) => `${x(i).toFixed(1)},${y(p.total).toFixed(1)}`).join(" ")}
+        fill="none"
+        stroke="var(--vt-green)"
+        strokeWidth="1.5"
+      />
+    </svg>
+  );
+}
+
+function bucketLabel(date: string | null): string {
+  if (date === null) return "Date unknown";
+  // Parsed as local midnight rather than through Date(iso), which would read a
+  // bare YYYY-MM-DD as UTC and shift the label back a day west of Greenwich.
+  const [y, m, dd] = date.split("-").map(Number);
+  const d = new Date(y, m - 1, dd);
+  return d.toLocaleDateString(undefined, { weekday: "short", month: "short", day: "numeric" });
 }
 
 /**
- * Collapse position legs into one row per event group.
+ * What is owed and when it lands.
  *
- * Keyed on `event_group_id`, never on the title string: one game's two legs
- * can resolve their titles from different sources — a ticket's frozen
- * snapshot on one, the live event_group join on the other — so a renamed
- * group would split a single game into two rows. A leg with no group id
- * (never traded through a ticket, and its group since retired) stands alone
- * under its own outcome id rather than being merged by name.
- *
- * `markValue` uses each leg's own mark where the venue is quoting and its
- * `avg_price` where it is not — flat mark-to-market, matching the backend's
- * `account_equity`, because a missing quote means unknown rather than
- * worthless. The count of unquoted legs is surfaced so the figure is not
- * mistaken for fully-marked.
+ * The replacement for the per-leg positions table, and it has to carry that
+ * table's one irreplaceable job: a legged arb -- one side filled, or the two
+ * filled at different sizes -- has no guaranteed payout, so it is absent from
+ * every bucket here and would be invisible if it were not called out
+ * separately. That is the position type most worth seeing.
  */
-function groupPositionsByEvent(legs: PaperPosition[]): PositionEventRow[] {
-  const rows = new Map<string, PositionEventRow>();
-  for (const p of legs) {
-    const key = p.event_group_id ?? `outcome:${p.outcome_id}`;
-    let row = rows.get(key);
-    if (row === undefined) {
-      row = {
-        key,
-        title: p.title,
-        eventGroupId: p.event_group_id,
-        legs: [],
-        capital: 0,
-        markValue: 0,
-        unrealized: 0,
-        unmarkedLegs: 0,
-      };
-      rows.set(key, row);
-    }
-    const qty = Number(p.qty);
-    const avg = Number(p.avg_price);
-    row.legs.push(p);
-    row.capital += qty * avg;
-    row.markValue += qty * (p.mark === null ? avg : Number(p.mark));
-    row.unrealized += Number(p.unrealized);
-    if (p.mark === null) row.unmarkedLegs += 1;
-  }
-  return [...rows.values()].sort((a, b) => b.capital - a.capital);
+function SettlementCalendar({
+  buckets,
+  unhedged,
+}: {
+  buckets: SettlementBucket[];
+  unhedged: LedgerRow[];
+}) {
+  const max = Math.max(...buckets.map((b) => b.value), 0.01);
+  const total = buckets.reduce((a, b) => a + b.value, 0);
+  const contracts = buckets.reduce((a, b) => a + b.contracts, 0);
+  return (
+    <div className="vt-panel">
+      <div style={{ display: "flex", alignItems: "baseline", gap: "var(--space-3)" }}>
+        <div className="vt-lab">Settles on</div>
+        <span style={{ flex: 1 }} />
+        <span className="vt-mono" style={{ fontSize: 13 }}>
+          {buckets.length > 0
+            ? `${amount(total, { sign: true })} over ${round0(contracts)} contracts`
+            : ""}
+        </span>
+      </div>
+      {buckets.length === 0 ? (
+        <Empty>Nothing awaiting settlement.</Empty>
+      ) : (
+        <table className="vt-table" style={{ width: "100%" }}>
+          <thead>
+            <tr>
+              <th>Day</th>
+              <th style={{ width: "40%" }} />
+              <th style={{ textAlign: "right" }}>Profit</th>
+              <th style={{ textAlign: "right" }}>Capital</th>
+              <th style={{ textAlign: "right" }}>Tickets</th>
+            </tr>
+          </thead>
+          <tbody>
+            {buckets.map((b) => (
+              <tr key={b.date ?? "unknown"}>
+                <td style={{ whiteSpace: "nowrap", opacity: b.date === null ? 0.6 : 1 }}>
+                  {bucketLabel(b.date)}
+                </td>
+                <td>
+                  <Bar value={b.value} max={max} color="var(--vt-green)" />
+                </td>
+                <td className="vt-num" style={{ textAlign: "right", color: "var(--vt-green)" }}>
+                  {amount(b.value, { sign: true })}
+                </td>
+                <td className="vt-num" style={{ textAlign: "right" }}>
+                  {round0(b.capital)}
+                </td>
+                <td className="vt-num" style={{ textAlign: "right" }}>
+                  {b.tickets}
+                </td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      )}
+      {unhedged.length > 0 && (
+        <div
+          style={{
+            marginTop: "var(--space-3)",
+            padding: "var(--space-2)",
+            border: "1px solid var(--color-divider)",
+            fontSize: 12,
+          }}
+        >
+          <span style={{ color: "var(--vt-red-dark)", fontWeight: 600 }}>
+            {unhedged.length} unhedged ticket{unhedged.length === 1 ? "" : "s"}
+          </span>{" "}
+          — one leg filled, or the two filled at different sizes. These have no
+          guaranteed payout, so they are excluded from every figure above.
+          <ul style={{ margin: "var(--space-2) 0 0", paddingLeft: "1.1rem" }}>
+            {unhedged.slice(0, 6).map((r) => (
+              <li key={r.id}>{r.title}</li>
+            ))}
+          </ul>
+        </div>
+      )}
+    </div>
+  );
 }
-
 /**
  * What the strategy actually earned, and what it cost to earn it.
  *
@@ -1052,141 +1051,6 @@ function NetOfCosts({
           </div>
         </div>
       )}
-    </div>
-  );
-}
-
-/**
- * Per-leg open positions.
- *
- * Not in the artboard, kept deliberately: the "open exposure" tile is one
- * number, and an arb that has legged — one side filled, the other not — is
- * invisible in an aggregate but obvious here.
- */
-function OpenPositions({
-  query,
-}: {
-  query: { data?: PaperPosition[]; isLoading: boolean; isError: boolean; error: unknown };
-}) {
-  const open = groupPositionsByEvent((query.data ?? []).filter((p) => Number(p.qty) !== 0));
-  const total = open.reduce(
-    (a, r) => ({
-      capital: a.capital + r.capital,
-      markValue: a.markValue + r.markValue,
-      unrealized: a.unrealized + r.unrealized,
-      unmarkedLegs: a.unmarkedLegs + r.unmarkedLegs,
-    }),
-    { capital: 0, markValue: 0, unrealized: 0, unmarkedLegs: 0 },
-  );
-  return (
-    <div className="vt-panel">
-      <div className="vt-lab">Open positions</div>
-      <div style={{ overflowX: "auto" }} className="vt-scroll">
-        <table className="table" style={{ fontSize: 12, width: "100%" }}>
-          <thead>
-            <tr>
-              <th>Event</th>
-              <th>Legs</th>
-              <th style={{ textAlign: "right" }}>Capital</th>
-              <th style={{ textAlign: "right" }}>Mark value</th>
-              <th style={{ textAlign: "right" }}>Unrealized</th>
-            </tr>
-          </thead>
-          <tbody>
-            {query.isLoading ? (
-              <tr>
-                <td colSpan={5} style={{ opacity: 0.5 }}>
-                  Loading…
-                </td>
-              </tr>
-            ) : query.isError ? (
-              <tr>
-                <td colSpan={5} style={{ color: "var(--vt-red-dark)" }}>
-                  Couldn't load open positions
-                  {query.error instanceof Error ? `: ${query.error.message}` : "."}
-                </td>
-              </tr>
-            ) : open.length === 0 ? (
-              <tr>
-                <td colSpan={5} style={{ opacity: 0.5 }}>
-                  No open positions.
-                </td>
-              </tr>
-            ) : null}
-            {open.map((row) => (
-              <tr key={row.key}>
-                <td title={row.eventGroupId ?? undefined}>{row.title}</td>
-                <td>
-                  {row.legs.map((p) => (
-                    <div
-                      key={`${p.venue_id}:${p.outcome_id}`}
-                      style={{ fontSize: 11, opacity: 0.85, whiteSpace: "nowrap" }}
-                      title={p.outcome_id}
-                    >
-                      <span style={{ textTransform: "capitalize" }}>
-                        {p.venue_id.replace(/_/g, " ")}
-                      </span>{" "}
-                      {Number(p.qty).toFixed(2)} @ {(Number(p.avg_price) * 100).toFixed(1)}¢ →
-                      mark {p.mark === null ? "—" : `${(Number(p.mark) * 100).toFixed(1)}¢`}
-                    </div>
-                  ))}
-                </td>
-                <td className="vt-mono" style={{ textAlign: "right" }}>
-                  {amount(row.capital)}
-                </td>
-                <td className="vt-mono" style={{ textAlign: "right" }}>
-                  {amount(row.markValue)}
-                  {row.unmarkedLegs > 0 ? (
-                    <div style={{ fontSize: 10, opacity: 0.7 }}>
-                      {row.unmarkedLegs} leg{row.unmarkedLegs === 1 ? "" : "s"} unquoted
-                    </div>
-                  ) : null}
-                </td>
-                <td
-                  className="vt-mono"
-                  style={{ textAlign: "right", color: pnlColor(row.unrealized) }}
-                >
-                  {amount(row.unrealized, { sign: true })}
-                </td>
-              </tr>
-            ))}
-          </tbody>
-          {open.length > 0 ? (
-            <tfoot>
-              <tr style={{ borderTop: "2px solid var(--color-divider)" }}>
-                <td colSpan={2} className="vt-lab">
-                  Totals · {open.length} event{open.length === 1 ? "" : "s"} open
-                </td>
-                <td className="vt-mono" style={{ textAlign: "right", fontWeight: 600 }}>
-                  {amount(total.capital)}
-                </td>
-                <td className="vt-mono" style={{ textAlign: "right", fontWeight: 600 }}>
-                  {amount(total.markValue)}
-                  {/* Carried up from the rows on purpose: an unquoted leg is
-                      marked at its own avg_price, so it contributes cost
-                      rather than a mark and lands in unrealized as exactly
-                      zero. A total that hid that would read as fully marked. */}
-                  {total.unmarkedLegs > 0 ? (
-                    <div style={{ fontSize: 10, opacity: 0.7 }}>
-                      {total.unmarkedLegs} leg{total.unmarkedLegs === 1 ? "" : "s"} unquoted
-                    </div>
-                  ) : null}
-                </td>
-                <td
-                  className="vt-mono"
-                  style={{
-                    textAlign: "right",
-                    fontWeight: 600,
-                    color: pnlColor(total.unrealized),
-                  }}
-                >
-                  {amount(total.unrealized, { sign: true })}
-                </td>
-              </tr>
-            </tfoot>
-          ) : null}
-        </table>
-      </div>
     </div>
   );
 }

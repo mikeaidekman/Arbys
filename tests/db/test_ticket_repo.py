@@ -105,7 +105,8 @@ async def test_missed_ticket_has_null_economics():
 
 
 async def _two_leg_filled_ticket(
-    session, *, ticket_id: str, fill_prices: dict[str, Decimal] | None = None
+    session, *, ticket_id: str, fill_prices: dict[str, Decimal] | None = None,
+    starts_at=None,
 ) -> None:
     """A 100-unit arb: buy YES at limit 0.40 and NO at limit 0.50, 1c fee each
     side. Fills at the limit price by default; pass `fill_prices` to fill at a
@@ -122,6 +123,7 @@ async def _two_leg_filled_ticket(
         account_id="default",
         event_group_id="eg-1",
         title_snapshot="MLB: ATL @ LAD",
+        starts_at=starts_at,
         source="manual",
         status="filled",
         total_stake=Decimal("92.00"),
@@ -272,6 +274,57 @@ async def test_title_survives_event_group_deletion(seed_reference_rows):
     async with session_scope() as session:
         tickets = await repo.list_paper_tickets(session, "default")
     assert tickets[0]["title_snapshot"] == "MLB: ATL @ LAD"
+
+
+async def test_starts_at_survives_event_group_deletion(seed_reference_rows):
+    """The reason this column exists rather than being joined at read time.
+
+    A group is retired when its game *finishes*, which is while the ticket is
+    still awaiting settlement -- so a live join would be empty for exactly the
+    rows a "what settles when" view has to place. Deleting the group here is
+    not an edge case, it is the normal lifecycle.
+    """
+    from datetime import UTC, datetime
+
+    from arbys.shared.types import EventGroup, EventGroupLeg
+
+    kickoff = datetime(2026, 9, 13, 17, 0, tzinfo=UTC)
+    await create_all()
+    await seed_reference_rows()
+    async with session_scope() as session:
+        await repo.upsert_event_group(
+            session,
+            EventGroup(
+                id="eg-1",
+                title="NFL: ARI @ LAC",
+                start_time=kickoff,
+                legs=(
+                    EventGroupLeg(outcome_id="k-yes", venue_id="kalshi", is_yes_side=True),
+                ),
+            ),
+        )
+        await _two_leg_filled_ticket(session, ticket_id="tkt-1", starts_at=kickoff)
+    async with session_scope() as session:
+        await repo.delete_event_group(session, "eg-1")
+    async with session_scope() as session:
+        tickets = await repo.list_paper_tickets(session, "default")
+    got = tickets[0]["starts_at"]
+    # SQLite has no timezone-aware storage, so it returns a naive datetime where
+    # Postgres preserves the offset. `submitted_at` has behaved that way since
+    # the table existed and production is Postgres; compare the instant.
+    assert got.replace(tzinfo=UTC) == kickoff
+
+
+async def test_starts_at_is_null_when_the_venue_reports_no_start():
+    """Null means *unknown*, never "settles now". An NFL Kalshi ticker carries a
+    date with no HHMM, and every row written before the column existed has none
+    -- reading null as the present would file all of them under today."""
+    await create_all()
+    async with session_scope() as session:
+        await _two_leg_filled_ticket(session, ticket_id="tkt-1")
+    async with session_scope() as session:
+        tickets = await repo.list_paper_tickets(session, "default")
+    assert tickets[0]["starts_at"] is None
 
 
 async def test_tickets_filter_by_status_and_source():

@@ -120,6 +120,10 @@ export interface Ticket {
   expected_profit: string | null;
   expected_edge_bps: string | null;
   submitted_at: string;
+  /** When the underlying game starts, frozen at submit time — so roughly when
+   *  this ticket pays out. Null means *unknown*: a row written before the
+   *  column existed, or a venue that reports no start time. Never "now". */
+  starts_at: string | null;
   /** Null while any leg is unsettled. */
   realized_profit: string | null;
   legs: TicketLeg[];

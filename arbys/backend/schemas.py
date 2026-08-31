@@ -170,6 +170,10 @@ class TicketOut(BaseModel):
     expected_profit: Decimal | None
     expected_edge_bps: Decimal | None
     submitted_at: datetime
+    # When the underlying game starts, snapshotted at submit time -- so roughly
+    # when this ticket pays out. None means unknown (an older row, or a venue
+    # that reports no start time), never "settles now".
+    starts_at: datetime | None
     realized_profit: Decimal | None
     legs: list[TicketLegOut]
 
