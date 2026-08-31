@@ -31,6 +31,7 @@ from ..shared.equity import account_equity  # noqa: E402
 from ..shared.qty import tradeable_qty  # noqa: E402
 from ..shared.types import EventGroup, EventGroupLeg, Quote  # noqa: E402
 from .access import require_access  # noqa: E402
+from .loop_health import monitor as loop_monitor  # noqa: E402
 from .schemas import (  # noqa: E402
     ArbLegOut,
     ArbOpportunityOut,
@@ -143,9 +144,11 @@ def create_app() -> FastAPI:
     async def lifespan(_app: FastAPI):
         state = get_state()
         await state.bootstrap()
+        loop_monitor().start()
         try:
             yield
         finally:
+            await loop_monitor().stop()
             await state.shutdown()
             reset_state()
 
@@ -173,6 +176,10 @@ def create_app() -> FastAPI:
             "status": "ok",
             **dropped_write_stats(),
             "adapters": get_state().adapter_modes(),
+            # Both venue websockets use ping_timeout=20s. When this approaches
+            # that, a disconnect is our starved loop rather than the venue --
+            # see loop_health.py.
+            "loop_lag": loop_monitor().stats(),
         }
 
     # ------------------------------------------------------------------
