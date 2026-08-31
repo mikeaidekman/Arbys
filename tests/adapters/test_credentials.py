@@ -164,3 +164,42 @@ def test_polymarket_id_set_with_a_malformed_inline_key_raises(monkeypatch):
     monkeypatch.setenv("POLYMARKET_US_PRIVATE_KEY", "!!!not base64!!!")
     with pytest.raises(RuntimeError, match="POLYMARKET_US_PRIVATE_KEY"):
         creds_from_env()
+
+
+@pytest.mark.parametrize(
+    "mangle",
+    [
+        pytest.param(lambda p: p, id="pristine"),
+        pytest.param(lambda p: p.replace("\n", "\\n"), id="literal-backslash-n"),
+        pytest.param(lambda p: p.replace("\n", " "), id="newlines-as-spaces"),
+        pytest.param(lambda p: p.replace("\n", ""), id="newlines-stripped"),
+        pytest.param(lambda p: p.replace("\n", "\r\n"), id="crlf"),
+        pytest.param(lambda p: p.replace("\n", "\n\n"), id="doubled-newlines"),
+        pytest.param(lambda p: "  " + p.strip() + "  \n", id="surrounding-whitespace"),
+    ],
+)
+def test_a_mangled_pem_still_loads(monkeypatch, pem, mangle):
+    """Every way a multi-line secret actually arrives broken.
+
+    `MalformedFraming` was the real failure on the first hosted deploy: the
+    key was fine and its line breaks were not. Reconstructing from the base64
+    body is safe because a PEM *is* its markers plus that body — genuinely
+    wrong bytes still fail, one step later.
+    """
+    data, _path = pem
+    monkeypatch.setenv("KALSHI_API_KEY_ID", "kid")
+    monkeypatch.setenv("KALSHI_PRIVATE_KEY", mangle(data))
+    monkeypatch.delenv("KALSHI_PRIVATE_KEY_PATH", raising=False)
+    assert kalshi_ws_creds_from_env() is not None
+
+
+def test_repair_does_not_rescue_a_genuinely_bad_key(monkeypatch):
+    """Tolerance for whitespace must not become tolerance for rubbish."""
+    monkeypatch.setenv("KALSHI_API_KEY_ID", "kid")
+    monkeypatch.setenv(
+        "KALSHI_PRIVATE_KEY",
+        "-----BEGIN PRIVATE KEY-----\nbm90IGEga2V5\n-----END PRIVATE KEY-----\n",
+    )
+    monkeypatch.delenv("KALSHI_PRIVATE_KEY_PATH", raising=False)
+    with pytest.raises(RuntimeError, match="KALSHI_PRIVATE_KEY"):
+        kalshi_ws_creds_from_env()

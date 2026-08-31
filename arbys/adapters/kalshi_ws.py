@@ -34,6 +34,7 @@ import json
 import logging
 import os
 import random
+import re
 import time
 from collections.abc import AsyncIterator
 from decimal import Decimal
@@ -79,6 +80,30 @@ def _auth_headers(
     }
 
 
+_PEM_RE = re.compile(
+    r"-----BEGIN ([A-Z ]+?)-----(.*?)-----END \1-----", re.DOTALL
+)
+
+
+def _repair_pem(data: str) -> str | None:
+    """Rebuild a PEM whose line breaks were lost, or None if unrecoverable.
+
+    Takes the BEGIN/END markers and whatever lies between them, strips every
+    scrap of whitespace out of the body, and re-wraps it at the 64 characters
+    the format expects. That covers the ways a multi-line secret actually
+    arrives mangled — newlines turned into spaces, removed entirely, or
+    doubled — without being lenient about the bytes themselves.
+    """
+    match = _PEM_RE.search(data)
+    if match is None:
+        return None
+    label, body = match.group(1), "".join(match.group(2).split())
+    if not body:
+        return None
+    lines = [body[i : i + 64] for i in range(0, len(body), 64)]
+    return "\n".join([f"-----BEGIN {label}-----", *lines, f"-----END {label}-----", ""])
+
+
 def _parse_kalshi_pem(data: str, *, source: str) -> rsa.RSAPrivateKey:
     """Parse PEM text, tolerating a key whose newlines were flattened.
 
@@ -90,7 +115,20 @@ def _parse_kalshi_pem(data: str, *, source: str) -> rsa.RSAPrivateKey:
     """
     if "\\n" in data and "\n" not in data:
         data = data.replace("\\n", "\n")
-    key = serialization.load_pem_private_key(data.encode(), password=None)
+    try:
+        key = serialization.load_pem_private_key(data.encode(), password=None)
+    except ValueError:
+        # A PEM that will not parse is nearly always a whitespace casualty
+        # rather than a bad key: secret stores and paste boxes variously turn
+        # the newlines into spaces, drop them, or double them, and the result
+        # is `MalformedFraming` — which reads like a corrupt key and is not.
+        # Rebuilding from the base64 body is safe because a PEM *is* its
+        # markers plus that body; if the bytes were genuinely wrong this still
+        # fails, just one step later.
+        repaired = _repair_pem(data)
+        if repaired is None:
+            raise
+        key = serialization.load_pem_private_key(repaired.encode(), password=None)
     if not isinstance(key, rsa.RSAPrivateKey):
         raise TypeError(
             f"expected an RSA private key from {source}, got {type(key).__name__}"
