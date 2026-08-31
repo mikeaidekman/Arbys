@@ -288,6 +288,45 @@ async def submit_arb_ticket(
     ticket_id = uuid.uuid4().hex
     title = _title(state, opp.event_group_id)
 
+    # Refused before anything reaches the broker. Recorded rather than dropped
+    # silently: a drained attempt and a vanished edge are different events, and
+    # conflating them would make every deploy look like a burst of missed
+    # opportunities in the ticket log.
+    if state.draining:
+        reason = f"draining:{opp.event_group_id} (shutting down, not accepting tickets)"
+        if record_nonfill:
+            await _write_ticket(
+                ticket_id=ticket_id, account_id=account_id, opp=opp, title=title,
+                source=source, status="rejected", reason=reason, economics=None,
+            )
+        return TicketResult(ticket_id, "rejected", (), reason)
+
+    state.enter_ticket()
+    try:
+        return await _submit_checked(
+            state, opp, ticket_id=ticket_id, title=title,
+            source=source, account_id=account_id, record_nonfill=record_nonfill,
+        )
+    finally:
+        state.exit_ticket()
+
+
+async def _submit_checked(
+    state: AppState,
+    opp: ArbOpportunity,
+    *,
+    ticket_id: str,
+    title: str,
+    source: str,
+    account_id: str,
+    record_nonfill: bool,
+) -> TicketResult:
+    """The submission proper, with the ticket counted as in flight.
+
+    Split out so `enter_ticket`/`exit_ticket` bracket every exit path — an
+    early `return` that skipped the decrement would wedge shutdown's drain
+    forever on a ticket that had already finished.
+    """
     live = _match_live(state, opp)
     if live is None:
         # Same `edge_no_longer_available:<group>` prefix as the descriptor

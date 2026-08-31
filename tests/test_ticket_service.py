@@ -477,3 +477,84 @@ async def test_record_nonfill_false_still_lets_a_fill_through():
         tickets = await repo.list_paper_tickets(session, s.default_account_id)
     assert len(tickets) == 1
     assert len(tickets[0]["legs"]) == 2
+
+
+async def test_a_ticket_is_refused_while_draining():
+    """A platform restarts on its own schedule, so shutdown has to stop
+    accepting work before it stops doing work.
+
+    The refusal is recorded with a distinct reason rather than silently
+    dropped: a drained attempt and a vanished edge are different events, and a
+    ticket log that conflated them would make a deploy look like a burst of
+    missed opportunities."""
+    s, _ = await _arb_group()
+    opp = s.engine.evaluate_now("eg-1")[0]
+    s.begin_draining()
+
+    result = await submit_arb_ticket(s, opp, source="auto")
+    assert result.status == "rejected"
+    assert result.reason is not None
+    assert result.reason.startswith("draining:")
+    assert result.order_ids == ()
+
+    async with session_scope() as session:
+        tickets = await repo.list_paper_tickets(session, s.default_account_id)
+    assert tickets[0]["status"] == "rejected"
+    assert tickets[0]["rejection_reason"].startswith("draining:")
+
+
+async def test_draining_refuses_before_the_router_runs():
+    """Refusing *after* placing a leg would be the bug wearing a different
+    hat. Nothing may reach the broker once draining starts."""
+    s, _ = await _arb_group()
+    opp = s.engine.evaluate_now("eg-1")[0]
+    s.begin_draining()
+    await submit_arb_ticket(s, opp, source="auto")
+
+    async with session_scope() as session:
+        tickets = await repo.list_paper_tickets(session, s.default_account_id)
+    assert tickets[0]["legs"] == [], "a drained ticket must not have touched the broker"
+
+
+async def test_shutdown_waits_for_an_in_flight_ticket():
+    """An in-flight submission is past the cap check and may already have
+    applied fills. Shutdown lets it finish rather than abandoning it."""
+    import asyncio
+
+    s, _ = await _arb_group()
+    started, release = asyncio.Event(), asyncio.Event()
+
+    async def slow_ticket():
+        s.enter_ticket()
+        started.set()
+        try:
+            await release.wait()
+        finally:
+            s.exit_ticket()
+
+    task = asyncio.create_task(slow_ticket())
+    await asyncio.wait_for(started.wait(), timeout=2.0)
+
+    shutdown = asyncio.create_task(s.shutdown())
+    await asyncio.sleep(0.05)
+    assert not shutdown.done(), "shutdown must wait for the in-flight ticket"
+
+    release.set()
+    await asyncio.wait_for(shutdown, timeout=5.0)
+    await task
+
+
+async def test_shutdown_gives_up_at_the_bound_rather_than_hanging(monkeypatch):
+    """A wedged submit must not block shutdown forever — the platform will
+    hard-kill us, which gives no drain at all."""
+    import asyncio
+
+    from arbys.backend import state as state_module
+
+    monkeypatch.setattr(state_module, "DRAIN_TIMEOUT_S", 0.2)
+    s, _ = await _arb_group()
+    s.enter_ticket()  # never exits
+    try:
+        await asyncio.wait_for(s.shutdown(), timeout=5.0)
+    finally:
+        s.exit_ticket()

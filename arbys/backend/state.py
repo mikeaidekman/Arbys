@@ -96,6 +96,11 @@ def _auto_trade_enabled() -> bool:
     return os.environ.get("ARBYS_ENABLE_AUTO_TRADE", "0") == "1"
 
 
+# How long shutdown waits for in-flight tickets before giving up. Must sit
+# comfortably inside the platform's kill timeout (fly.toml sets 60s), or the
+# drain is cut off mid-flight and the whole exercise is pointless.
+DRAIN_TIMEOUT_S = 20.0
+
 DEFAULT_AUTO_TRADE_COOLDOWN_S = 60.0
 
 
@@ -379,6 +384,13 @@ class AppState:
         # removing entries when the edge disappears.
         self._opps_by_group: dict[str, list[ArbOpportunity]] = {}
         self._opp_subscribers: list[asyncio.Queue[ArbOpportunity]] = []
+        # Shutdown accepts no new tickets and waits for the ones already
+        # running. A platform restarts on its own schedule, so this is the
+        # normal path rather than an emergency one.
+        self._draining = False
+        self._inflight = 0
+        self._idle = asyncio.Event()
+        self._idle.set()
 
         self.default_account_id = "default"
         self._sink_inner = DbPaperPersistenceSink()
@@ -739,12 +751,52 @@ class AppState:
         await self._stop_ingest()
         await self._start_ingest()
 
+    @property
+    def draining(self) -> bool:
+        """True once shutdown has begun. `submit_arb_ticket` refuses on it."""
+        return self._draining
+
+    def begin_draining(self) -> None:
+        """Stop accepting tickets. Idempotent; separate from `shutdown()` so a
+        test can exercise the refusal without tearing everything down."""
+        self._draining = True
+
+    def enter_ticket(self) -> None:
+        """Register a submission as in flight, so shutdown can wait for it."""
+        self._inflight += 1
+        self._idle.clear()
+
+    def exit_ticket(self) -> None:
+        self._inflight = max(0, self._inflight - 1)
+        if self._inflight == 0:
+            self._idle.set()
+
     async def shutdown(self) -> None:
+        # Order matters. Stop accepting first, then stop the producer, then
+        # wait for what is already running — reversing any of those leaves a
+        # window where the auto-trader submits into a half-torn-down app.
+        self._draining = True
+        await self.auto_trade_service.stop()
+
+        if self._inflight:
+            log.info("draining %d in-flight ticket(s)", self._inflight)
+            try:
+                await asyncio.wait_for(self._idle.wait(), timeout=DRAIN_TIMEOUT_S)
+            except TimeoutError:
+                # Loud, because the alternative is a naked position nobody
+                # knows about. The platform will hard-kill us shortly either
+                # way; saying so is the only thing left to do.
+                log.error(
+                    "drain timed out after %.0fs with %d ticket(s) still in "
+                    "flight; shutting down anyway",
+                    DRAIN_TIMEOUT_S,
+                    self._inflight,
+                )
+
         if self._discovery_service is not None:
             await self._discovery_service.stop()
             self._discovery_service = None
         await self._stop_ingest()
-        await self.auto_trade_service.stop()
         await self.auto_settle_service.stop()
         await self.pnl_service.stop()
 
