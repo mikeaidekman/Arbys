@@ -1,0 +1,34 @@
+# The build context is not the repo. .env being gitignored protects git, not a
+# `docker build .` — and a secret copied into a layer stays in the image
+# history even if a later layer removes it.
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+
+# Databases: the local ledger is ~48MB and the pre-reset archive another 48MB.
+# Neither belongs in an image, and the hosted instance uses Postgres anyway.
+*.db
+*.db-wal
+*.db-shm
+*.sqlite
+
+venv/
+__pycache__/
+*.pyc
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+
+# Built by the frontend stage inside the image; copying a local build in would
+# ship whatever happened to be on the developer's disk instead.
+frontend/dist/
+frontend/node_modules/
+
+.git/
+.github/
+docs/
+tests/
+scratch/
+*.log

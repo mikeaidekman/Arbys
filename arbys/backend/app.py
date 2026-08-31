@@ -2,16 +2,23 @@
 
 from __future__ import annotations
 
+import logging
+import os
 from contextlib import asynccontextmanager
 from decimal import Decimal
+from pathlib import Path
 from typing import NamedTuple
 
 from dotenv import load_dotenv
 from fastapi import FastAPI, HTTPException, WebSocket, WebSocketDisconnect
+from fastapi.responses import FileResponse
+from fastapi.staticfiles import StaticFiles
 
 # Load .env from the working directory so ARBYS_* flags are honored when
 # uvicorn is launched with no explicit --env-file.
 load_dotenv()
+
+log = logging.getLogger(__name__)
 
 from ..db import repositories as repo  # noqa: E402
 from ..db.session import dropped_write_stats, session_scope  # noqa: E402
@@ -509,7 +516,67 @@ def create_app() -> FastAPI:
             raise HTTPException(status_code=409, detail=result.reason or result.status)
         return list(result.order_ids)
 
+    _mount_spa(app)
     return app
+
+
+# The SPA's client-side routes. Named explicitly rather than served by a
+# catch-all: a catch-all registered after the API would still swallow every
+# *unknown* path, so a mistyped endpoint would return index.html with a 200 and
+# the failure would surface as confusing UI rather than a 404. There are three
+# routes and they live in frontend/src/main.tsx; add to both together.
+SPA_ROUTES = ("/", "/admin", "/account")
+
+
+def spa_dist_dir() -> Path:
+    """Where the built SPA lives.
+
+    `ARBYS_SPA_DIR` overrides it for tests and for an image that puts the build
+    somewhere other than the repo layout.
+    """
+    override = os.environ.get("ARBYS_SPA_DIR")
+    if override:
+        return Path(override)
+    return Path(__file__).resolve().parents[2] / "frontend" / "dist"
+
+
+def _mount_spa(app: FastAPI) -> None:
+    """Serve the built frontend from the same origin as the API.
+
+    One origin means no CORS, one deploy, and no `/api` prefix to strip — the
+    rewrite in `frontend/vite.config.ts` is dev-server only, so a split
+    deployment has to reimplement it somewhere and 404s completely if it is
+    missed.
+
+    Mounted last, after every API route, and silently skipped when there is no
+    build: `frontend/dist` is gitignored, so a checkout that has never run
+    `npm run build` must still get a working API rather than a boot failure.
+    """
+    dist = spa_dist_dir()
+    index = dist / "index.html"
+    if not index.is_file():
+        log.info("no SPA build at %s; serving the API only", dist)
+        return
+
+    assets = dist / "assets"
+    if assets.is_dir():
+        app.mount("/assets", StaticFiles(directory=assets), name="assets")
+
+    def _index() -> FileResponse:
+        return FileResponse(index)
+
+    for route in SPA_ROUTES:
+        app.get(route, include_in_schema=False)(_index)
+
+    # Root-level files Vite emits beside index.html (favicon, manifest). Named
+    # individually for the same reason as SPA_ROUTES — a directory mount at
+    # "/" would become the catch-all this design avoids.
+    for extra in dist.iterdir():
+        if extra.is_file() and extra.name != "index.html":
+            app.get(f"/{extra.name}", include_in_schema=False)(
+                lambda _p=extra: FileResponse(_p)
+            )
+    log.info("serving SPA from %s", dist)
 
 
 app = create_app()
