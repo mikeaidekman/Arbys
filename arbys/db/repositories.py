@@ -61,6 +61,19 @@ async def ensure_outcome_placeholder(
         )
         await session.flush()
     session.add(m.Outcome(id=outcome_id, market_id=placeholder_market_id, label=outcome_id))
+    # Flush before returning, so the row exists by the time the caller adds a
+    # leg pointing at it. `EventGroupLeg.outcome_id` carries a ForeignKey but no
+    # `relationship()`, and SQLAlchemy's unit of work orders inserts by
+    # relationship dependencies rather than by raw FKs -- so with both pending it
+    # is free to write the leg first. The next caller's `session.get` then
+    # autoflushes exactly that order and Postgres rejects it.
+    #
+    # This was invisible for the life of the project: SQLite does not enforce
+    # foreign keys unless asked, so dev happily wrote legs referencing outcomes
+    # that did not exist yet. It surfaced on the first hosted deploy as
+    # `discovery.groups` dropping every batch -- no groups, so no adapters, so
+    # no venue was ever contacted.
+    await session.flush()
 
 
 # ---------------------------------------------------------------------------
@@ -239,6 +252,13 @@ async def insert_paper_order(
             ticket_id=ticket_id,
         )
     )
+    # Flush for the same reason ensure_outcome_placeholder does: `paper_fill`
+    # references this row by FK with no `relationship()` between them, so a
+    # caller that records an order and its fill in one transaction is otherwise
+    # at the mercy of the unit of work's insert order. Production happens to be
+    # safe -- DbPaperPersistenceSink commits on_order before on_fill -- which is
+    # precisely why nothing would have caught it here.
+    await session.flush()
 
 
 async def insert_paper_fill(

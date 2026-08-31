@@ -369,7 +369,7 @@ async def test_pnl_snapshot_write_counts_its_dropped_write(monkeypatch):
     assert "pnl.snapshot" in str(stats["last_dropped_write"])
 
 
-async def test_concurrent_write_burst_and_reads_drop_nothing():
+async def test_concurrent_write_burst_and_reads_drop_nothing(seed_reference_rows):
     """The test the spec called for and that was never written.
 
     Every other test in this module injects a synthetic `OperationalError`
@@ -419,6 +419,7 @@ async def test_concurrent_write_burst_and_reads_drop_nothing():
     from arbys.shared.types import EventGroup, EventGroupLeg
 
     await create_all()
+    await seed_reference_rows(account_id="acct-burst")
     db_session.reset_dropped_writes()
     factory = get_session_factory()
 

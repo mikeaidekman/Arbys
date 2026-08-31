@@ -24,11 +24,12 @@ from arbys.shared.types import EventGroup, EventGroupLeg, Quote
 
 
 @pytest.fixture(autouse=True)
-async def _fresh_state(tmp_path: Path):
+async def _fresh_state(tmp_path: Path, seed_reference_rows):
     os.environ["ARBYS_DB_URL"] = f"sqlite+aiosqlite:///{tmp_path / 'tickets.db'}"
     db_session.reset_engine()
     state_module.reset_state()
     await create_all()
+    await seed_reference_rows()
     yield
     db_session.reset_engine()
     state_module.reset_state()

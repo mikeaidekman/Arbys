@@ -62,3 +62,43 @@ def _force_offline_test_environment() -> None:
         os.environ[key] = value
     for key in _CREDENTIAL_ENV:
         os.environ.pop(key, None)
+
+
+async def _seed_reference_rows(
+    *,
+    venues: tuple[str, ...] = ("kalshi", "polymarket_us", "draftkings"),
+    account_id: str = "default",
+) -> None:
+    """Create the venue and paper_account rows that `bootstrap()` always creates.
+
+    A test that builds its schema with `create_all()` alone gets the tables and
+    none of the reference data. That used to be survivable because SQLite does
+    not enforce foreign keys unless asked; it now does (see `_SQLITE_PRAGMAS`),
+    so dev can fail where Postgres fails -- which is the whole point, since a
+    missing `outcome` row silently broke discovery on the first hosted deploy.
+
+    Placeholder markets carry a `venue_id` and balances an `account_id`; both are
+    real foreign keys. Seeding here mirrors production rather than working around
+    the constraint.
+    """
+    from arbys.db import repositories as repo
+    from arbys.db.session import session_scope
+
+    async with session_scope() as session:
+        for venue_id in venues:
+            await repo.ensure_venue(
+                session, venue_id, name=venue_id.title(), kind="exchange"
+            )
+        await repo.ensure_paper_account(session, account_id, name=account_id)
+
+
+@pytest.fixture
+def seed_reference_rows():
+    """Hands back the seeder rather than running it.
+
+    These tests create their schema inside the test body, so seeding has to
+    happen at a point the fixture cannot see -- after `create_all()`, before the
+    first write. Returning the callable lets each test await it in the right
+    place.
+    """
+    return _seed_reference_rows

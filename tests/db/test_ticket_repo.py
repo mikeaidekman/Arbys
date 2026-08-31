@@ -248,12 +248,13 @@ async def test_unsettled_legs_report_no_resolved_value():
     assert all(leg["resolved_value"] is None for leg in tickets[0]["legs"])
 
 
-async def test_title_survives_event_group_deletion():
+async def test_title_survives_event_group_deletion(seed_reference_rows):
     """Discovery retires groups routinely. The snapshot is why history keeps
     its name for exactly the games that have finished."""
     from arbys.shared.types import EventGroup, EventGroupLeg
 
     await create_all()
+    await seed_reference_rows()
     async with session_scope() as session:
         await repo.upsert_event_group(
             session,

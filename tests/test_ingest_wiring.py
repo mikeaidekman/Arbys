@@ -593,7 +593,7 @@ async def test_auto_trader_skips_silently_when_the_cap_would_be_breached(monkeyp
     assert tickets == [], "the cap pre-check must skip the submission, not write a ticket"
 
 
-async def test_reset_clears_the_auto_trade_cooldowns():
+async def test_reset_clears_the_auto_trade_cooldowns(seed_reference_rows):
     # This is the only test in the file that touches the DB (via
     # reset_paper_account) without ever bootstrapping and without going
     # through _live_edge() (which creates schema itself — see its
@@ -601,6 +601,7 @@ async def test_reset_clears_the_auto_trade_cooldowns():
     # directly. Everything else gets it for free from AppState.bootstrap()'s
     # own create_all() call.
     await db_session.create_all()
+    await seed_reference_rows()
     s = get_state()
     s.auto_trade_service._cooldown_until["eg-1"] = 1e9
     await s.reset_paper_account(s.default_account_id)

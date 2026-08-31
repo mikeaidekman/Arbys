@@ -32,12 +32,20 @@ def _get_db_url() -> str:
 _engine: AsyncEngine | None = None
 _session_factory: async_sessionmaker[AsyncSession] | None = None
 
-# journal_mode is persisted in the database file; the other two are
-# per-connection and so must be re-issued on every checkout.
+# journal_mode is persisted in the database file; the rest are per-connection
+# and so must be re-issued on every checkout.
+#
+# foreign_keys is OFF by default in SQLite -- the constraints are parsed and
+# recorded and then simply not checked. That is not a dev/prod difference worth
+# tolerating: it means dev cannot fail on a write that prod will reject, and it
+# already cost a hosted deploy where discovery dropped every batch on an FK
+# violation it had never once hit locally. Postgres always enforces; now so
+# does dev.
 _SQLITE_PRAGMAS: tuple[tuple[str, str], ...] = (
     ("journal_mode", "WAL"),
     ("synchronous", "NORMAL"),
     ("busy_timeout", "15000"),
+    ("foreign_keys", "ON"),
 )
 
 _PRAGMA_FLAG = "_arbys_sqlite_pragmas"

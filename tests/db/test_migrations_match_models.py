@@ -107,6 +107,62 @@ def test_migration_chain_replays_from_empty_and_matches_models(tmp_path):
     )
 
 
+def _foreign_keys(url: str) -> dict[str, set[tuple[str, str, str]]]:
+    """{table: {(column, referred_table, referred_column)}}.
+
+    Compared separately from columns because a foreign key is the one piece of
+    schema whose *absence* is load-bearing here: `arb_opportunity` and
+    `paper_ticket` both reference `event_group.id` by value on purpose, so that
+    retiring a group cannot erase the record of what it did. Nothing checked
+    them until 0007, which is how `arb_opportunity` kept a constraint that made
+    every retirement fail on Postgres while dev -- where SQLite does not enforce
+    foreign keys unless asked -- stayed green.
+    """
+    engine = sa.create_engine(url)
+    try:
+        insp = sa.inspect(engine)
+        out: dict[str, set[tuple[str, str, str]]] = {}
+        for table in insp.get_table_names():
+            if table == "alembic_version":
+                continue
+            out[table] = {
+                (col, fk["referred_table"], ref)
+                for fk in insp.get_foreign_keys(table)
+                for col, ref in zip(
+                    fk["constrained_columns"], fk["referred_columns"], strict=True
+                )
+            }
+        return out
+    finally:
+        engine.dispose()
+
+
+def test_migration_chain_and_models_agree_on_foreign_keys(tmp_path):
+    from_models = _foreign_keys(_build_from_models(tmp_path / "models.db"))
+    from_migrations = _foreign_keys(_build_from_migrations(tmp_path / "migrations.db"))
+
+    problems: list[str] = []
+    for table in sorted(set(from_models) & set(from_migrations)):
+        for fk in sorted(from_models[table] - from_migrations[table]):
+            problems.append(f"{table}: models.py has FK {fk}, migrations do not")
+        for fk in sorted(from_migrations[table] - from_models[table]):
+            problems.append(f"{table}: migrations create FK {fk}, models.py does not")
+    assert not problems, "foreign-key drift between models.py and migrations: " + (
+        "; ".join(problems)
+    )
+
+
+def test_the_tape_outlives_the_group(tmp_path):
+    """Retiring a group must not be blocked by, or cascade into, the record of
+    what it did. Both tables carry `event_group_id` as a plain column."""
+    fks = _foreign_keys(_build_from_migrations(tmp_path / "migrations.db"))
+    for table in ("arb_opportunity", "paper_ticket"):
+        assert not [fk for fk in fks[table] if fk[1] == "event_group"], (
+            f"{table}.event_group_id must not be a foreign key: discovery retires "
+            "groups on nearly every pass, and this table has to survive that"
+        )
+
+
 def test_migration_chain_downgrades_cleanly(tmp_path):
     """Every revision's downgrade must undo its upgrade."""
     path = tmp_path / "roundtrip.db"

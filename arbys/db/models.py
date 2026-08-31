@@ -159,10 +159,23 @@ class Quote(Base):
 # ---------------------------------------------------------------------------
 
 class ArbOpportunity(Base):
+    """One published opportunity, kept as a tape.
+
+    `event_group_id` is deliberately **not** a ForeignKey, for the same reason
+    `PaperTicket.event_group_id` is not: discovery retires a group on nearly
+    every pass, and this table is the durable record of what the engine
+    published — the only place suppressed auto-trade attempts remain countable.
+    Cascading the delete would erase the history of exactly the games that
+    finished, and keeping the constraint instead makes retirement fail, which is
+    what it did: on Postgres `delete_event_group` raised on any group that had
+    ever published, so nothing was ever retired. SQLite never enforced the
+    constraint, so dev saw neither outcome.
+    """
+
     __tablename__ = "arb_opportunity"
 
     id: Mapped[str] = mapped_column(String(64), primary_key=True, default=_uuid)
-    event_group_id: Mapped[str] = mapped_column(ForeignKey("event_group.id"), nullable=False)
+    event_group_id: Mapped[str] = mapped_column(String(64), nullable=False)
     detected_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now(), nullable=False
     )
