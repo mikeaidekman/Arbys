@@ -32,15 +32,24 @@ primary_region = "ewr"
 # they should be visible in review: these three lines are the difference
 # between an idle web app and a bot trading around the clock.
 #
-# AUTO_TRADE is deliberately 0 for now. Ingest and discovery are on so the
-# credentialed WebSocket path can be verified in production — the premise the
-# whole hosting design rests on — while nothing can trade. The dangerous
-# combination is a publicly-writable app that also trades; either alone is
-# minor. Flip this to 1 once Cloudflare Access is enforcing.
+# AUTO_TRADE went to 1 on 2026-08-31, once Cloudflare Access was verified to be
+# *enforcing* and not merely fronting: on the bare `arbys-dekman.fly.dev`
+# hostname every endpoint now returns 403 — `POST /quotes` and the websocket
+# included — while `/health` stays open by design. The dangerous combination
+# was a publicly-writable app that also trades, and `POST /quotes` can
+# manufacture an arbitrage out of nothing; either half alone is minor.
+#
+# This is the paper broker filling against live venue odds, not real orders —
+# no ExecutionAdapter places anything on either venue today. What is now at
+# risk is the honesty of the ledger, not money.
+#
+# Two caps still bind and neither is a substitute for the other:
+# ARBYS_MAX_TICKET_STAKE (200) at detection, ARBYS_MAX_OUTCOME_QTY (500) at
+# execution. Both keep their defaults.
 [env]
   ARBYS_ENABLE_INGEST = "1"
   ARBYS_ENABLE_DISCOVERY = "1"
-  ARBYS_ENABLE_AUTO_TRADE = "0"
+  ARBYS_ENABLE_AUTO_TRADE = "1"
 
 [http_service]
   internal_port = 8000
