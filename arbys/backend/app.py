@@ -284,8 +284,27 @@ def create_app() -> FastAPI:
             ],
         )
 
+    # `def`, not `async def`, and that is load-bearing. This body has no `await`
+    # in ~158 lines of Decimal arithmetic over every registered group, so as a
+    # coroutine it ran to completion on the event loop and froze everything
+    # else for the duration. Measured on the hosted machine: 5.3s per call
+    # across 864 groups, against a terminal polling every 3s, giving a loop-lag
+    # p95 of 4.4-6.0s and a max of 8.4s while p50 stayed at 1ms -- idle, then
+    # frozen solid, which is the signature of one blocking call rather than
+    # saturation.
+    #
+    # Six seconds of that is not merely slow. Both venue websockets run
+    # `ping_timeout=20`, and worse, ARBYS_POLYMARKET_US_PRIORITY_DARK_AFTER_S is
+    # 6s -- so a stall this long marks live in-play markets dark on its own,
+    # which escalates to a resubscribe and then a shard rebuild, and every
+    # rebuild replays cached books that can be hours old. The reconnect storm
+    # was self-inflicted.
+    #
+    # FastAPI runs a plain `def` endpoint in a threadpool. The GIL still shares
+    # the CPU, but the loop is scheduled between bytecodes instead of being
+    # frozen for seconds. An `async def` that never awaits gets none of that.
     @app.get("/monitored", response_model=list[MonitoredGroupOut])
-    async def list_monitored() -> list[MonitoredGroupOut]:
+    def list_monitored() -> list[MonitoredGroupOut]:
         """Return every registered event group + current quotes + arb edge.
 
         For each group, ``arb_edge = 1 - (best_yes_ask + best_no_ask)`` where

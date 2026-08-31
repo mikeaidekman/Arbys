@@ -258,6 +258,27 @@ with Kalshi-NO on the same question.
 - SQLite gotcha: autoincrement PKs need
   `BigInteger().with_variant(Integer(), "sqlite")` or inserts fail on a NOT NULL
   constraint. See `Quote` and `PaperPnlSnapshot`.
+- **SQLite enforces foreign keys here, and only because we ask.** `PRAGMA
+  foreign_keys` defaults to *off*: constraints are parsed, recorded, and then
+  not checked. It is in `_SQLITE_PRAGMAS` now, because the alternative is a dev
+  environment that cannot fail on a write Postgres will reject — which is not a
+  hypothetical, it cost the first hosted deploy. Turning it on immediately
+  surfaced two defects the whole suite had been green over.
+- **A repo helper that adds a parent row must flush before the caller adds the
+  child.** SQLAlchemy's unit of work orders inserts by *relationship*
+  dependencies, not by raw `ForeignKey` columns, so where there is no
+  `relationship()` — `EventGroupLeg.outcome_id`, `PaperFill.order_id` — it is
+  free to write the child first, and the next `session.get` autoflushes exactly
+  that order. `ensure_outcome_placeholder` already flushed its placeholder
+  `market` for this reason and stopped one row short of the `outcome`, which is
+  why discovery could not write a single group to Postgres.
+- **`event_group_id` is a plain column on `arb_opportunity` and `paper_ticket`,
+  never a ForeignKey.** Discovery retires groups on nearly every pass, and both
+  tables are the durable record of what those groups did. The constraint made
+  `delete_event_group` raise on any group that had ever published, so on
+  Postgres nothing would ever have been retired; migration `0007` drops it.
+  `tests/db/test_migrations_match_models.py` now compares foreign keys as well
+  as columns — it compared neither before, which is how the drift survived.
 - **Migrations must never build DDL from `Base.metadata`.** Each revision
   describes the change *it* makes, in explicit `op.*` calls, frozen at that
   point in history. `0001_initial` originally called
@@ -1149,6 +1170,56 @@ fired; the downstream `profit <= 0` check happened to reduce to the correct
 test. Never a live defect, but it broke the moment `qty` stopped equalling
 payoff. The gate is now an explicit per-contract
 `net_edge_per_contract(...) <= 0`.
+
+## Hosting
+
+Deployed as one Fly machine (`arbys-dekman`, `ewr`) against a Neon Postgres,
+with `fly.toml` and the `Deploy` GitHub Action as the only way in — there is no
+flyctl on the dev box, and the production connection string exists nowhere but
+Fly's secret store. `alembic upgrade head` runs as the `release_command`, so a
+broken migration aborts the deploy instead of reaching a running app.
+
+**Everything that broke on the first deploys was invisible locally, and none of
+it raised.** That is the pattern to expect from this environment, so the
+diagnostics matter more than they look:
+
+- `GET /health` reports `adapters` (which data path each venue is *actually*
+  on), `dropped_writes`, and `loop_lag`. It is exempt from Access precisely so
+  it still answers when Access is what is misbehaving.
+- **`loop_lag` is how you tell our fault from the venue's.** Both WS adapters
+  run `ping_timeout=20`, so a loop held that long drops every venue connection
+  at once — which reads in the logs as a venue outage and is not one. `/health`
+  reports p50/p95/max over a 60-sample window.
+
+**A `def` endpoint is not a style choice here.** `list_monitored` is ~158 lines
+of Decimal math over every registered group with no `await` anywhere, declared
+`async def` — so it froze the whole event loop for the length of a request.
+Measured on the hosted box: 5.3s per call across 864 groups, against a terminal
+that polls it every 3s. FastAPI runs a plain `def` endpoint in a threadpool; an
+`async def` that never awaits gets none of that protection.
+
+**The container is not the dev server, and three things only it gets wrong:**
+
+- The SPA asks for `/api/...` because `frontend/vite.config.ts` rewrites that in
+  dev. Nothing rewrote it in the image, so every call 404'd against a page that
+  rendered blank rather than erroring. `_StripApiPrefix` in `app.py` is the
+  rewrite; serving from one origin removes CORS and the second deploy target,
+  but it does **not** remove this.
+- `_mount_spa` must mount build *directories*, not just root-level files.
+  `public/design/industry/` is the vendored design system the entire UI is built
+  on and it is a directory, so it 404'd while `favicon.svg` beside it did not.
+  The page still rendered — just with its component styles gone.
+- An app-level `Depends()` applies to websocket routes too. Annotate it
+  `HTTPConnection`, never `Request`: FastAPI cannot supply a `Request` to a
+  socket, so `require_access` raised `TypeError` during dependency resolution
+  and `/ws/opportunities` returned 500. That happens *before* the dependency's
+  own "is this switched on?" check, so it broke the live feed with Access
+  disabled.
+
+Cloudflare Access fronts the app; `arbys/backend/access.py` verifies the
+assertion rather than trusting the proxy, because `<app>.fly.dev` stays
+reachable directly. It is a no-op until both `CF_ACCESS_TEAM_DOMAIN` and
+`CF_ACCESS_AUD` are set.
 
 ## Repo facts
 

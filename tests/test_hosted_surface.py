@@ -102,3 +102,40 @@ def test_static_mounts_are_not_a_catch_all(built_spa):
     rather than quietly returning index.html with a 200."""
     assert built_spa.get("/not-a-real-route").status_code == 404
     assert built_spa.get("/design/industry/nope.css").status_code == 404
+
+
+# --- endpoints that block the event loop ------------------------------------
+
+def test_expensive_endpoints_are_not_coroutines():
+    """An `async def` handler with no `await` runs to completion on the event
+    loop and freezes every other task for its whole duration.
+
+    `/monitored` is ~158 lines of Decimal arithmetic over every registered
+    group and awaits nothing. On the hosted machine that measured 5.3s per call
+    across 864 groups, giving a loop-lag p95 of 4.4-6.0s while p50 stayed at
+    1ms -- idle, then frozen, which is one blocking call rather than a busy box.
+
+    Six seconds matters twice over: both venue websockets run
+    `ping_timeout=20`, and `ARBYS_POLYMARKET_US_PRIORITY_DARK_AFTER_S` is 6s, so
+    a stall this long marks live markets dark by itself and escalates into shard
+    rebuilds that replay hours-old books.
+
+    Declared `def`, FastAPI runs it in a threadpool and the loop keeps
+    breathing. This asserts the property rather than the keyword, because the
+    keyword is easy to reintroduce while tidying.
+    """
+    import inspect
+
+    app = create_app()
+    offenders = []
+    for route in app.routes:
+        endpoint = getattr(route, "endpoint", None)
+        path = getattr(route, "path", "")
+        if endpoint is None or path not in ("/monitored",):
+            continue
+        if inspect.iscoroutinefunction(endpoint):
+            offenders.append(path)
+    assert not offenders, (
+        f"{offenders} are coroutines but never await -- they will block the "
+        "event loop and stall both venue websockets"
+    )
