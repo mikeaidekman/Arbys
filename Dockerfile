@@ -26,6 +26,11 @@ ENV PYTHONUNBUFFERED=1 \
     PIP_NO_CACHE_DIR=1
 
 COPY pyproject.toml ./
+# alembic.ini is needed by the release command, which runs `alembic upgrade
+# head` before a new version goes live. The migrations themselves live under
+# arbys/db/migrations and arrive with the package; without this file alembic
+# cannot find them and the release fails with "No config file found".
+COPY alembic.ini ./
 COPY arbys/ ./arbys/
 # `pip install -e .` against pyproject, NOT requirements.txt — that file listed
 # pandas, numpy and requests, none of which this project uses. It has been

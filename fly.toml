@@ -15,6 +15,19 @@ primary_region = "ewr"
 
 [build]
 
+# Runs in a temporary machine with the app's secrets, BEFORE the new version
+# goes live — and aborts the deploy if it fails, so a broken migration never
+# reaches a running app. This is also why the production database never needs
+# a connection string on anyone's laptop: the only place it exists is Fly's
+# secret store.
+#
+# `alembic upgrade head` is idempotent, so it is safe on every deploy and not
+# only the first. Note bootstrap() also calls create_all(), which is a no-op
+# against an already-migrated schema; the migration chain stays the source of
+# truth for prod and the Postgres CI workflow is what proves the two agree.
+[deploy]
+  release_command = "alembic upgrade head"
+
 [http_service]
   internal_port = 8000
   force_https = true

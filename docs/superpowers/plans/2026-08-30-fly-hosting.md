@@ -419,10 +419,17 @@ exists.
       `ewr`. Fly's own Postgres is *unmanaged* — choosing it means administering
       a database, which is what this spec exists to avoid.
 
-- [ ] **Step 3: `alembic upgrade head` against it, from this machine.** This is
-      local Python against a remote database, so it needs no Fly tooling: set
-      `ARBYS_DB_URL` in the shell and run it. **The first time this chain has
-      ever run for real** — Task 1 is what makes it safe.
+- [x] **Step 3: migrations run themselves.** `fly.toml` carries
+      `[deploy] release_command = "alembic upgrade head"`, which runs in a
+      temporary machine with the app's secrets before the new version goes
+      live and **aborts the deploy if it fails**. Better than the one-off this
+      step originally described: the production connection string then never
+      needs to exist on anyone's laptop, and migrations cannot be forgotten on
+      a later deploy.
+
+      This surfaced a real gap — `alembic.ini` was not being copied into the
+      image, so the release command would have failed with "No config file
+      found" on the first deploy. Fixed in the Dockerfile.
 
 - [ ] **Step 4: Set secrets** in the Fly dashboard (app → Secrets), per the
       spec's table: `ARBYS_DB_URL`, both venue key ids and their inline key
