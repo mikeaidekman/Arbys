@@ -10,7 +10,7 @@ from pathlib import Path
 from typing import NamedTuple
 
 from dotenv import load_dotenv
-from fastapi import FastAPI, HTTPException, WebSocket, WebSocketDisconnect
+from fastapi import Depends, FastAPI, HTTPException, WebSocket, WebSocketDisconnect
 from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
 
@@ -30,6 +30,7 @@ from ..shared.arb_engine import (  # noqa: E402
 from ..shared.equity import account_equity  # noqa: E402
 from ..shared.qty import tradeable_qty  # noqa: E402
 from ..shared.types import EventGroup, EventGroupLeg, Quote  # noqa: E402
+from .access import require_access  # noqa: E402
 from .schemas import (  # noqa: E402
     ArbLegOut,
     ArbOpportunityOut,
@@ -114,7 +115,16 @@ def create_app() -> FastAPI:
             await state.shutdown()
             reset_state()
 
-    app = FastAPI(title="Arbys", version="0.1.0", lifespan=lifespan)
+    # Applied to every route as a global dependency rather than per-endpoint,
+    # so a new endpoint is protected by default. Forgetting to decorate one is
+    # exactly how an auth gap gets introduced later; `/health` opts out inside
+    # the dependency instead. See access.py for why fronting is not enough.
+    app = FastAPI(
+        title="Arbys",
+        version="0.1.0",
+        lifespan=lifespan,
+        dependencies=[Depends(require_access)],
+    )
 
     @app.get("/health")
     async def health() -> dict[str, object]:
