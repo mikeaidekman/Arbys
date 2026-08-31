@@ -436,6 +436,8 @@ class AppState:
 
         self.adapter_factories: dict[str, AdapterFactory] = _default_adapter_factories()
         self._adapters: list[MarketDataAdapter] = []
+        # venue_id -> "websocket" | "rest", as built. Empty until ingest starts.
+        self._adapter_modes: dict[str, str] = {}
         # What each venue's live adapter was actually built to subscribe to.
         # `sync_ingest` compares against this to decide whether a rebuild is
         # needed at all.
@@ -581,6 +583,13 @@ class AppState:
                 continue
             dedup = sorted(set(outcome_ids))
             adapter = factory(dedup)
+            # Recorded rather than inferred: the factory decides between the
+            # WebSocket and REST paths from credentials, and /health should
+            # report what was actually built, not what the environment implies
+            # ought to have been.
+            self._adapter_modes[venue_id] = (
+                "websocket" if "WebSocket" in type(adapter).__name__ else "rest"
+            )
             # Duck-typed like `close` below: an adapter that can poll harder
             # for in-play markets is told how to recognise them. Only AppState
             # knows each group's start time.
@@ -619,6 +628,7 @@ class AppState:
                     await close()
         self._adapters = []
         self._subscribed = {}
+        self._adapter_modes = {}
 
     # Longest a real event is assumed to still be running. A five-set match
     # can pass five hours; nothing we list runs past six. Without an upper
@@ -750,6 +760,14 @@ class AppState:
             return
         await self._stop_ingest()
         await self._start_ingest()
+
+    def adapter_modes(self) -> dict[str, str]:
+        """Which data path each venue is actually on, as built.
+
+        Empty when ingest is off, which is the default and is not a fault —
+        `ARBYS_ENABLE_INGEST=0` means no venue is contacted at all.
+        """
+        return dict(self._adapter_modes)
 
     @property
     def draining(self) -> bool:

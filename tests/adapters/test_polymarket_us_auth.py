@@ -97,10 +97,22 @@ def test_creds_from_env_returns_none_when_unset(monkeypatch):
     assert creds_from_env() is None
 
 
-def test_creds_from_env_returns_none_when_only_one_is_set(monkeypatch, tmp_path):
+def test_creds_from_env_raises_when_only_the_id_is_set(monkeypatch, tmp_path):
+    """Half-configured credentials are a mistake, not a choice to use REST.
+
+    This test previously asserted `is None`. That was right while the REST
+    fallback was merely slower; it stopped being right once the hosting design
+    made cheap restarts a load-bearing property of the credentialed WebSocket
+    path (measured: +31s to a fully-served shard). Returning None here selects
+    REST silently, so the premise dissolves while the app still reports healthy.
+    """
+    import pytest
+
     monkeypatch.setenv("POLYMARKET_US_API_KEY_ID", "kid")
     monkeypatch.delenv("POLYMARKET_US_PRIVATE_KEY_PATH", raising=False)
-    assert creds_from_env() is None
+    monkeypatch.delenv("POLYMARKET_US_PRIVATE_KEY", raising=False)
+    with pytest.raises(RuntimeError, match="POLYMARKET_US_PRIVATE_KEY"):
+        creds_from_env()
 
 
 def test_creds_from_env_loads_a_key_file(monkeypatch, tmp_path):
@@ -116,10 +128,25 @@ def test_creds_from_env_loads_a_key_file(monkeypatch, tmp_path):
     assert creds.key_id == "kid-abc"
 
 
-def test_creds_from_env_returns_none_on_an_unreadable_key(monkeypatch, tmp_path):
-    """A bad key must not crash startup — the public gateway still works."""
+def test_creds_from_env_raises_on_an_unreadable_key(monkeypatch, tmp_path):
+    """A bad key must now crash startup — deliberately reversing this test.
+
+    Its original rationale was "the public gateway still works", which is true
+    and was the right call while REST was merely a slower equivalent. The
+    hosting design changed what is at stake: it rests on the credentialed
+    WebSocket path refilling the book in seconds, so a broken key that quietly
+    selects REST leaves the app healthy-looking, slow to restart, and with one
+    log line on a box nobody is tailing as the only evidence.
+
+    Absent credentials still return None — that is the documented no-KYC path
+    and it is covered by its own test. Only *set but unusable* raises.
+    """
+    import pytest
+
     path = tmp_path / "bad.key"
     path.write_text("garbage", encoding="utf-8")
     monkeypatch.setenv("POLYMARKET_US_API_KEY_ID", "kid")
     monkeypatch.setenv("POLYMARKET_US_PRIVATE_KEY_PATH", str(path))
-    assert creds_from_env() is None
+    monkeypatch.delenv("POLYMARKET_US_PRIVATE_KEY", raising=False)
+    with pytest.raises(RuntimeError, match="POLYMARKET_US_PRIVATE_KEY_PATH"):
+        creds_from_env()

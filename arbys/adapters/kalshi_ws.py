@@ -79,26 +79,82 @@ def _auth_headers(
     }
 
 
-def load_kalshi_private_key(pem_path: str) -> rsa.RSAPrivateKey:
-    """Load the RSA private key from a PEM file on disk."""
-    data = Path(pem_path).expanduser().read_bytes()
-    key = serialization.load_pem_private_key(data, password=None)
+def _parse_kalshi_pem(data: str, *, source: str) -> rsa.RSAPrivateKey:
+    """Parse PEM text, tolerating a key whose newlines were flattened.
+
+    A PEM is multi-line, and multi-line values are the classic thing a
+    secret store or a shell turns into literal backslash-n sequences.
+    Unflattening here means a mangled key still loads rather than failing
+    as "malformed" — which would send someone hunting for a bad key
+    instead of a bad newline.
+    """
+    if "\\n" in data and "\n" not in data:
+        data = data.replace("\\n", "\n")
+    key = serialization.load_pem_private_key(data.encode(), password=None)
     if not isinstance(key, rsa.RSAPrivateKey):
-        raise TypeError(f"expected RSA private key at {pem_path}, got {type(key).__name__}")
+        raise TypeError(
+            f"expected an RSA private key from {source}, got {type(key).__name__}"
+        )
     return key
 
 
+def load_kalshi_private_key(pem_path: str) -> rsa.RSAPrivateKey:
+    """Load the RSA private key from a PEM file on disk."""
+    data = Path(pem_path).expanduser().read_text(encoding="utf-8")
+    return _parse_kalshi_pem(data, source=pem_path)
+
+
 def kalshi_ws_creds_from_env() -> tuple[str, rsa.RSAPrivateKey] | None:
-    """Return ``(key_id, private_key)`` if both env vars are present, else None."""
+    """Return ``(key_id, private_key)``, or None when nothing is configured.
+
+    **Absent is a configuration; broken is a bug**, and they used to share a
+    code path — both logged and returned None, after which the factory built
+    the un-credentialed REST adapter. That is right when nothing is set: the
+    no-KYC REST path is documented and must keep working. It is wrong when a
+    key id is set and the key is missing, unreadable or malformed, because the
+    whole low-maintenance hosting argument rests on the credentialed WebSocket
+    path having cheap restarts. A broken key silently selects REST, where they
+    are not, so the premise dissolves while the app still reports healthy.
+
+    ``KALSHI_PRIVATE_KEY`` holds the PEM inline and takes precedence over
+    ``KALSHI_PRIVATE_KEY_PATH``. The path form is kept and stays first-class
+    for local dev, where a file genuinely is the right place; a container has
+    no repo, no .env, and no file, and the platform's secret store *is* the
+    outside-the-repo location the path convention was protecting.
+    """
     key_id = os.environ.get("KALSHI_API_KEY_ID")
+    inline = os.environ.get("KALSHI_PRIVATE_KEY")
     pem_path = os.environ.get("KALSHI_PRIVATE_KEY_PATH")
-    if not key_id or not pem_path:
+
+    if not key_id and not inline and not pem_path:
         return None
+    if not key_id:
+        raise RuntimeError(
+            "a Kalshi private key is set but KALSHI_API_KEY_ID is not. Set "
+            "both, or neither to use the un-credentialed REST path."
+        )
+    if not inline and not pem_path:
+        raise RuntimeError(
+            "KALSHI_API_KEY_ID is set but neither KALSHI_PRIVATE_KEY nor "
+            "KALSHI_PRIVATE_KEY_PATH is. Half-configured credentials are a "
+            "mistake, not a choice to use REST."
+        )
     try:
+        if inline:
+            return key_id, _parse_kalshi_pem(inline, source="KALSHI_PRIVATE_KEY")
+        assert pem_path is not None
         return key_id, load_kalshi_private_key(pem_path)
     except Exception as exc:
-        log.error("failed to load Kalshi private key from %s: %s", pem_path, exc)
-        return None
+        source = (
+            "KALSHI_PRIVATE_KEY"
+            if inline
+            else f"KALSHI_PRIVATE_KEY_PATH ({pem_path})"
+        )
+        raise RuntimeError(
+            f"KALSHI_API_KEY_ID is set but {source} could not be loaded: "
+            f"{exc}. Refusing to start rather than downgrading silently to the "
+            "REST path, where restarts are expensive and nothing would say why."
+        ) from exc
 
 
 class _MarketBook:

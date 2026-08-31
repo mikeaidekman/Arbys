@@ -108,16 +108,48 @@ def creds_from_env() -> PolymarketUsCredentials | None:
     ``POLYMARKET_US_PRIVATE_KEY_PATH``. The key file holds the base64 secret
     exactly as the portal displayed it; a trailing newline is fine.
 
-    The key lives in a file rather than an env var on purpose, matching the
-    Kalshi ``.pem`` convention: keep it **outside this repo**.
+    ``POLYMARKET_US_PRIVATE_KEY`` holds the base64 secret inline and takes
+    precedence over ``POLYMARKET_US_PRIVATE_KEY_PATH``. The path form stays
+    first-class for local dev, where a file genuinely is the right place to
+    keep a key **outside this repo**. A container has no repo, no .env and no
+    file, and the platform's secret store *is* that outside-the-repo location.
+
+    **Absent is a configuration; broken is a bug.** Nothing set returns None
+    and the caller builds the documented no-KYC REST adapter. A key id set
+    with an unusable key raises instead: the low-maintenance hosting argument
+    rests on the credentialed WebSocket path having cheap restarts, so a silent
+    downgrade to REST dissolves the premise while the app still reports
+    healthy.
     """
     key_id = os.environ.get("POLYMARKET_US_API_KEY_ID")
+    inline = os.environ.get("POLYMARKET_US_PRIVATE_KEY")
     key_path = os.environ.get("POLYMARKET_US_PRIVATE_KEY_PATH")
-    if not key_id or not key_path:
+
+    if not key_id and not inline and not key_path:
         return None
+    if not key_id:
+        raise RuntimeError(
+            "a Polymarket US secret is set but POLYMARKET_US_API_KEY_ID is "
+            "not. Set both, or neither to use the un-credentialed REST path."
+        )
+    if not inline and not key_path:
+        raise RuntimeError(
+            "POLYMARKET_US_API_KEY_ID is set but neither "
+            "POLYMARKET_US_PRIVATE_KEY nor POLYMARKET_US_PRIVATE_KEY_PATH is. "
+            "Half-configured credentials are a mistake, not a choice to use REST."
+        )
     try:
-        secret_b64 = Path(key_path).read_text(encoding="utf-8")
+        secret_b64 = inline or Path(key_path).read_text(encoding="utf-8")  # type: ignore[arg-type]
         return PolymarketUsCredentials(key_id=key_id, secret_key=load_secret_key(secret_b64))
     except (OSError, ValueError) as exc:
-        log.error("failed to load Polymarket US secret key from %s: %s", key_path, exc)
-        return None
+        source = (
+            "POLYMARKET_US_PRIVATE_KEY"
+            if inline
+            else f"POLYMARKET_US_PRIVATE_KEY_PATH ({key_path})"
+        )
+        raise RuntimeError(
+            f"POLYMARKET_US_API_KEY_ID is set but {source} could not be "
+            f"loaded: {exc}. Refusing to start rather than downgrading silently "
+            "to the REST path, where restarts are expensive and nothing would "
+            "say why."
+        ) from exc

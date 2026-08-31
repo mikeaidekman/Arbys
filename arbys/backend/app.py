@@ -118,7 +118,17 @@ def create_app() -> FastAPI:
 
     @app.get("/health")
     async def health() -> dict[str, object]:
-        return {"status": "ok", **dropped_write_stats()}
+        # `adapters` answers "am I actually on the fast path?" from outside the
+        # box, which is most of the point of hosting it. A credentialed
+        # WebSocket refills the quote book in seconds after a restart; REST
+        # takes one poll per leg against a rate-limited public tier. The two
+        # are not interchangeable, and until this was reported the only way to
+        # tell them apart was a log line on a machine nobody is tailing.
+        return {
+            "status": "ok",
+            **dropped_write_stats(),
+            "adapters": get_state().adapter_modes(),
+        }
 
     # ------------------------------------------------------------------
     # Event group management (v1 curated allowlist)

@@ -85,3 +85,20 @@ def test_a_missing_dist_does_not_break_the_api(tmp_path, monkeypatch):
     with TestClient(create_app()) as client:
         assert client.get("/health").status_code == 200
         assert client.get("/").status_code == 404
+
+
+def test_health_reports_which_data_path_each_venue_is_on(dist):
+    """"Am I actually on the fast path?" answerable from outside the box.
+
+    A credentialed WebSocket refills the quote book in seconds after a restart;
+    REST takes one poll per leg against a rate-limited public tier. The whole
+    hosting argument rests on the first, so a silent downgrade to the second
+    needs to be visible somewhere other than a log line.
+
+    Empty here because ingest is off in tests — which is a configuration, not
+    a fault, and the field says so by being absent rather than wrong.
+    """
+    with TestClient(create_app()) as client:
+        body = client.get("/health").json()
+        assert "adapters" in body
+        assert body["adapters"] == {}
