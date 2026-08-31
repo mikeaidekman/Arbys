@@ -432,10 +432,28 @@ class AppState:
         self._discovery_service = None
 
     async def bootstrap(self) -> None:
-        """Ensure schema, seed reference data, and hydrate in-memory state."""
+        """Ensure schema, seed reference data, and hydrate in-memory state.
+
+        Refuses to start if another instance already holds the singleton lock.
+        Failing loudly here is the point: a second instance that booted anyway
+        would stream both venues and auto-trade alongside the first, and the
+        only symptom would be a ledger that reconciles against nothing. A
+        platform health check surfaces a refused boot; it cannot surface a
+        quietly duplicated one.
+        """
+        from ..db.session import acquire_singleton_lock, create_all
+
+        if not await acquire_singleton_lock():
+            raise RuntimeError(
+                "another Arbys instance already holds the singleton lock on "
+                "this database. This app must run exactly once: two instances "
+                "would each stream both venues and each submit tickets against "
+                "the same credentials. Stop the other instance, or check for an "
+                "overlapping deploy (use --strategy immediate)."
+            )
+
         # Ensure schema exists (idempotent). Alembic remains the source of truth
         # for prod; this is a convenience for local dev + tests.
-        from ..db.session import create_all
         await create_all()
 
         async with session_scope() as session:

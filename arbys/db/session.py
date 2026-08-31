@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import logging
 import os
 from collections.abc import AsyncIterator, Awaitable, Callable
@@ -98,6 +99,89 @@ def normalise_asyncpg_url(url: str) -> str:
     # hand the driver a literal `***` and fail authentication with an error
     # naming the credentials rather than this function.
     return parsed.set(query=query).render_as_string(hide_password=False)
+
+
+# One arbitrary 64-bit constant, shared by every instance of this app and by
+# nothing else. Postgres advisory locks are a single global namespace per
+# database, so the value only has to be stable and unlikely to collide.
+# 0x41524259_53 is "ARBYS" in ASCII.
+SINGLETON_LOCK_KEY = 0x4152425953
+
+_lock_engine: AsyncEngine | None = None
+_lock_conn: object | None = None
+
+
+async def acquire_singleton_lock(url: str | None = None) -> bool:
+    """Take the process-wide singleton lock. False means someone else has it.
+
+    Two instances of this app would each stream both venues, each publish
+    opportunities, and each submit tickets against the same credentials —
+    producing two ledgers that agree with each other about nothing. Hosting
+    makes that reachable rather than theoretical: platforms restart on their
+    own schedule and rolling deploys start a second machine before retiring
+    the first.
+
+    Three deliberate choices:
+
+    * **`pg_try_advisory_lock`, never the blocking form.** Blocking would turn
+      a misconfiguration into a hang that reads as a slow boot; failing
+      immediately lets the caller say what is wrong.
+    * **Session-scoped, on a dedicated connection outside the application
+      pool.** The lock dies with its connection, so riding the app pool would
+      let a routine recycle drop it silently — the app would keep running
+      while the invariant it depends on had quietly stopped holding.
+    * **A no-op on SQLite**, gated on the dialect exactly as the WAL pragmas
+      above are. A file database is not reachable from a second machine, and
+      requiring Postgres would make the test suite unrunnable on a laptop —
+      a worse problem than the one this guards against.
+
+    Idempotent: calling it twice in one process is not a second instance.
+    """
+    global _lock_engine, _lock_conn
+    resolved = normalise_asyncpg_url(url or _get_db_url())
+    if make_url(resolved).get_backend_name() != "postgresql":
+        return True
+    if _lock_conn is not None:
+        return True
+
+    from sqlalchemy import text
+    from sqlalchemy.pool import NullPool
+
+    engine = create_async_engine(resolved, poolclass=NullPool)
+    conn = await engine.connect()
+    try:
+        got = await conn.scalar(
+            text("SELECT pg_try_advisory_lock(:k)"), {"k": SINGLETON_LOCK_KEY}
+        )
+    except Exception:
+        await conn.close()
+        await engine.dispose()
+        raise
+    if not got:
+        await conn.close()
+        await engine.dispose()
+        return False
+    _lock_engine, _lock_conn = engine, conn
+    return True
+
+
+async def release_singleton_lock() -> None:
+    """Drop the lock and its connection. Safe to call when nothing is held.
+
+    Rarely needed in production — a dying process releases a session-scoped
+    lock on its own, which is the property that stops a hard-killed instance
+    from wedging it forever. Tests need it, and an orderly shutdown may as well
+    use it.
+    """
+    global _lock_engine, _lock_conn
+    conn, engine = _lock_conn, _lock_engine
+    _lock_conn, _lock_engine = None, None
+    if conn is not None:
+        with contextlib.suppress(Exception):
+            await conn.close()  # type: ignore[attr-defined]
+    if engine is not None:
+        with contextlib.suppress(Exception):
+            await engine.dispose()
 
 
 def configure_engine(url: str | None = None) -> AsyncEngine:

@@ -1,4 +1,4 @@
-name: Migrations (Postgres)
+name: Postgres (migrations + lock)
 
 # Proves the Alembic chain replays on the dialect production actually uses.
 #
@@ -29,7 +29,7 @@ concurrency:
 
 jobs:
   postgres:
-    name: Replay the chain on a Neon branch
+    name: Run the Postgres-only tests on a Neon branch
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -62,7 +62,10 @@ jobs:
           url="${url/sslmode=/ssl=}"
           # Never echo it: this is a live credential and workflow logs are
           # readable by anyone with repo access.
-          ARBYS_TEST_PG_URL="$url" python -m pytest tests/db/test_migrations_postgres.py -v
+          # The whole db/ directory, not just the migration file: the singleton
+          # lock tests are Postgres-only too and would otherwise skip in CI as
+          # well as locally, which is the same as not having them.
+          ARBYS_TEST_PG_URL="$url" python -m pytest tests/db/ -v
 
       - name: Delete the branch
         # `always()` so a failed test still cleans up. A leaked branch per run
