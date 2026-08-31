@@ -1,7 +1,17 @@
 # Arbys operator runbook
 
-Practical instructions for running Arbys locally and extending it. Assumes
-you've already followed the setup in the root README.
+Practical instructions for running Arbys and extending it. Assumes you've
+already followed the setup in the root README.
+
+**The instance that trades is the hosted one.** Since 2026-08-31 Arbys runs as
+a single Fly machine (`arbys-dekman`) against a Neon Postgres with
+`ARBYS_ENABLE_AUTO_TRADE=1`. This laptop is for development. Running a second
+backend against the same venue credentials gives you two quote books, two
+opportunity sets and two ledgers agreeing with each other about nothing, and it
+doubles the WebSocket connections against the per-connection shedding ceiling
+CLAUDE.md documents. Local runs default to ingest **off** partly for that
+reason. See [section 7](#7-operating-the-hosted-instance) before touching
+production.
 
 ## 1. Daily startup
 
@@ -18,28 +28,46 @@ npm run dev
 # → http://localhost:5173
 ```
 
-By default the backend uses the Postgres URL in `ARBYS_DB_URL`
-(`postgresql+asyncpg://arbys:arbys@localhost:5432/arbys`). For a zero-infra
-smoke test, override to SQLite:
+`ARBYS_DB_URL` defaults to **SQLite** (`sqlite+aiosqlite:///./arbys-local.db`),
+so a fresh checkout needs no database service at all. Set it to Postgres only
+when you want to rehearse what production does:
 
 ```powershell
-$env:ARBYS_DB_URL = "sqlite+aiosqlite:///./arbys-local.db"
+$env:ARBYS_DB_URL = "postgresql+asyncpg://arbys:arbys@localhost:5432/arbys"
 uvicorn arbys.backend.app:app --reload
 ```
 
+**Start uvicorn from the repo root.** The SQLite default is a *relative* path,
+so launching from anywhere else silently creates a second, empty database
+rather than failing. Alembic reads the same default, so `alembic upgrade head`
+with nothing set migrates that same file.
+
+Note SQLite here enforces foreign keys (`PRAGMA foreign_keys=ON`, set per
+connection in `db/session.py`). That is not SQLite's default — constraints are
+normally parsed and then not checked — and it is on so dev can fail on a write
+Postgres would reject. It is not decoration: its absence is what let discovery
+ship code that could not write a single event group to Postgres.
+
 On startup `AppState.bootstrap()` will:
 
-1. Create tables if missing (`Base.metadata.create_all`).
-2. Ensure the three seed venues exist (`polymarket_us`, `kalshi`, `draftkings`).
-3. Ensure the `default` paper account exists.
-4. Hydrate event groups, balances, and positions from the DB.
-5. Seed `DEFAULT_STARTING_BALANCE = $1000` for any venue not previously funded.
-6. Start the periodic PnL snapshot service.
+1. Take a Postgres **advisory lock**, and refuse to start if another instance
+   holds it. This is what makes running two of these a loud failure instead of
+   two ledgers quietly diverging. (No-op on SQLite.)
+2. Create tables if missing (`Base.metadata.create_all`).
+3. Ensure the three seed venues exist (`polymarket_us`, `kalshi`, `draftkings`).
+   These are reference rows every placeholder market points at by foreign key,
+   so a schema built without them cannot be written to.
+4. Ensure the `default` paper account exists.
+5. Hydrate event groups, balances, and positions from the DB.
+6. Seed `DEFAULT_STARTING_BALANCE = $1000` for any venue not previously funded.
+7. Start the periodic PnL snapshot and auto-settle services.
+8. Start `AutoTradeService`, but only if `ARBYS_ENABLE_AUTO_TRADE=1`.
+9. Start ingest, but only if `ARBYS_ENABLE_INGEST=1`.
 
 ## 1.1 Upgrading an existing database
 
 **Run `alembic upgrade head` before starting the backend on a new version —
-not after.** Step 1 above (`create_all`) only creates *missing tables*; it
+not after.** Step 2 above (`create_all`) only creates *missing tables*; it
 never adds a *column* to a table that already exists. On a database sitting
 at migration `0005`, starting this version's backend first will create the
 new `paper_ticket` and `paper_settlement` tables but leave
@@ -307,14 +335,30 @@ heuristic calls a game wrong, the tell is a ticket whose `realized_profit`
 
 ### Turning the auto-trader on
 
-Set `ARBYS_ENABLE_AUTO_TRADE=1` in `.env` and restart the backend. There is no
-UI toggle by design. It trades paper only — `PaperExecutionAdapter` is the only
-`ExecutionAdapter` in the repo, and paper fills are atomic, so it cannot end up
-holding one naked leg.
+**On the hosted instance it is already on** — `ARBYS_ENABLE_AUTO_TRADE = "1"`
+in `fly.toml`'s `[env]`, since 2026-08-31. Changing it there means a commit and
+a deploy, which is the point: those three flag lines are the difference between
+an idle web app and a bot trading around the clock, and they belong somewhere
+reviewable rather than in a secret store.
+
+Locally, set `ARBYS_ENABLE_AUTO_TRADE=1` in `.env` and restart the backend.
+There is no UI toggle by design. It trades paper only — `PaperExecutionAdapter`
+is the only `ExecutionAdapter` in the repo, and paper fills are atomic, so it
+cannot end up holding one naked leg.
+
+Turning it on was gated on Cloudflare Access **verifying** rather than merely
+fronting the app. `POST /quotes` lets a caller inject arbitrary prices and so
+manufacture an arbitrage out of nothing; publicly writable *and* trading is the
+dangerous combination, either alone is minor. Confirm the gate still holds with
+the 403 check in section 7.4 before assuming it does.
 
 To see what it did:
 
     select source, status, count(*) from paper_ticket group by source, status;
+
+On the hosted instance you cannot run that from here — the Neon connection
+string exists only in Fly's secret store, deliberately. Use the `/account` page
+in the browser, which reads the same ticket ledger.
 
 `source='auto'` rows are the bot's. The `filled` / `missed` / `rejected` split
 is the point: `missed` counts edges that died between publication and
@@ -336,6 +380,21 @@ calls `clear_cooldowns()`.
 | Equity curve stays at 0 after trades | PnL snapshot service hasn't ticked yet, or no quotes for held outcomes | Wait ~30 s; verify quotes are flowing for the outcomes you hold |
 | Test suite fails with "NOT NULL constraint failed" on autoincrement id | New table added with `BigInteger` PK on SQLite | Use `BigInteger().with_variant(Integer(), "sqlite")` (see `Quote` and `PaperPnlSnapshot`) |
 
+### 5.1 Hosted-only symptoms
+
+Every one of these was invisible on the laptop and none of them raised. Expect
+that shape from this environment.
+
+| Symptom | Likely cause | Fix |
+|---|---|---|
+| `persistence write abandoned (discovery.groups)`, `dropped_writes` climbing | A foreign key Postgres enforces and SQLite historically did not | Flush a parent row before adding the child; SQLAlchemy orders inserts by *relationship*, not by raw `ForeignKey` |
+| Hosted page renders blank, every API call 404s | Something is serving `/api/...` without the strip | `_StripApiPrefix` in `app.py`. The vite proxy is dev-server only |
+| Hosted page renders but unstyled | A build *directory* is not mounted | `_mount_spa` mounts directories, not just root-level files. `public/design/industry/` is the whole design system |
+| Table updates but the live feed is dead | The websocket dependency failed to resolve | An app-level `Depends()` must take `HTTPConnection`, never `Request` — FastAPI cannot hand a `Request` to a socket |
+| Both venues disconnect together every ~60s, `keepalive ping timeout` | Our event loop is starved — not a venue outage, though the logs read like one | Check `loop_lag` in `/health`. Seconds there means it is ours |
+| `adapters` shows `rest` for a venue | Its credentials are absent | A *broken* key raises instead; `rest` means unset |
+| `adapters` is `{}` | Ingest is off, or no event groups are registered yet | Normal for the first minute or two after a deploy — discovery has to find groups before ingest builds adapters |
+
 ## 6. Data reset
 
 Nuke everything and start fresh:
@@ -352,3 +411,187 @@ alembic upgrade head
 
 Restart the backend and the seed data + `$1000` per venue will be recreated
 on the first request.
+
+**On the hosted instance, don't reach for the database.** The Neon connection
+string exists only in Fly's secret store and that is deliberate. Reset the
+ledger through the app instead — `POST /paper/{account_id}/reset` from the
+browser (it is behind Access), which wipes paper history, re-seeds balances,
+and clears the auto-trader's cooldowns and the auto-settle memo. It leaves
+event groups and the quote book alone, which is what you want: those are
+rediscovered, not authored.
+
+Note what a reset cannot do. `paper_position.realized_pnl` written before
+2026-08-25 is understated by roughly $132 because lock contention dropped
+`on_position` upserts while every write path swallowed its exception. `run_write`
+stops further loss but nothing can reconstruct what was never written, so a
+resync from broker state would overwrite rather than recover. Treat realized
+PnL from a pre-existing database as a lower bound.
+
+## 7. Operating the hosted instance
+
+One Fly machine, `arbys-dekman`, region `ewr`, against a Neon Postgres. It is
+deliberately singular: two instances would each hold their own quote book, each
+publish opportunities, and each submit tickets against the same venue
+credentials. Three separate things hold that line — `min_machines_running = 1`
+with autoscaling off, a Fly volume that attaches to one machine at a time, and
+the Postgres advisory lock in `bootstrap()` that makes a second process refuse
+to start rather than quietly double up.
+
+The VM is `performance-1x`, and that is a **correctness** decision rather than a
+speed one. See 7.4.
+
+### 7.1 Deploying
+
+There is no flyctl on the dev box. The `Deploy` GitHub Action is the only way
+in, and it runs on every push to `main`:
+
+```powershell
+gh workflow run "Deploy" --repo mikeaidekman/Arbys
+```
+
+`alembic upgrade head` runs as the `release_command` — in a temporary machine
+holding the app's secrets, before the new version goes live — so a broken
+migration aborts the deploy instead of reaching a running app. That is also why
+the production connection string never has to exist on anyone's laptop.
+
+Deploys are serialised (`concurrency: fly-deploy`, `cancel-in-progress: false`).
+**Don't cancel one mid-flight.** It can interrupt the shutdown drain, which is
+what makes a restart safe for in-flight tickets, and two overlapping deploys are
+exactly the condition the advisory lock exists to refuse.
+
+### 7.2 Running one-off Fly commands
+
+The `Fly admin (manual)` workflow runs an arbitrary `fly <command>`:
+
+```powershell
+gh workflow run "Fly admin (manual)" --repo mikeaidekman/Arbys -f command="logs --no-tail"
+gh workflow run "Fly admin (manual)" --repo mikeaidekman/Arbys -f command="config show"
+gh workflow run "Fly admin (manual)" --repo mikeaidekman/Arbys -f command="machines list"
+```
+
+**Never pass a secret through it.** It echoes its input into the workflow log,
+**this repository is public**, and Actions logs on a public repo are readable by
+anyone. Anything typed there must be treated as disclosed. Use it for `logs`,
+`config show`, `machines list`, `volumes` — never `secrets set`.
+
+`config show` is the honest way to answer "did that flag actually reach the
+machine?", which is a different question from "is it in `fly.toml`" and a
+different question again from "did the log say so".
+
+### 7.3 Secrets
+
+Set them in the Fly dashboard (app → Secrets). Not in `fly.toml`: the repo is
+public.
+
+| name | what it does |
+|---|---|
+| `ARBYS_DB_URL` | the Neon connection string |
+| `KALSHI_API_KEY_ID` + `KALSHI_PRIVATE_KEY` | selects the credentialed Kalshi WS path |
+| `POLYMARKET_US_API_KEY_ID` + `POLYMARKET_US_PRIVATE_KEY` | same, for Polymarket US |
+| `CF_ACCESS_TEAM_DOMAIN` + `CF_ACCESS_AUD` | Cloudflare Access verification |
+
+A new secret lands **Staged**, not Deployed. It does nothing until the next
+deploy, so trigger one.
+
+Both halves of every pair matter, and they fail differently on purpose. With
+only one `CF_ACCESS_*` set, Access is treated as unconfigured and becomes a
+no-op — which is loud, because every request then succeeds. A
+`KALSHI_API_KEY_ID` set alongside a broken key **raises** instead of falling
+back to REST: a silent downgrade would report healthy while quote freshness
+quietly degraded, and cheap restarts on the WS path are the premise the whole
+hosting design rests on.
+
+The inline `*_PRIVATE_KEY` forms exist because no platform secret store hands
+you a *file*, which is what the path-based loaders want. A PEM survives being
+flattened, CRLF'd, or pasted as one base64 blob; it does not survive being
+truncated to its first line, and that fails loudly.
+
+### 7.4 Checking on it
+
+`GET /health` is the one path exempt from Access, so it answers from a plain
+terminal — and keeps answering when Access is itself the thing misbehaving:
+
+```powershell
+Invoke-RestMethod https://arbys-dekman.fly.dev/health
+```
+
+| field | healthy | meaning |
+|---|---|---|
+| `adapters` | `{"kalshi":"websocket","polymarket_us":"websocket"}` | which data path each venue is *actually* on |
+| `dropped_writes` | `0` | non-zero means the ledger is incomplete — treat every figure derived from it as a lower bound until it is back to zero |
+| `loop_lag` | p95 under ~50ms | below |
+
+**`loop_lag` is how you tell our fault from the venue's.** Both WS adapters run
+`ping_timeout=20`, so a loop held that long drops every venue connection at once
+and reads in the logs as a venue outage. Worse:
+`ARBYS_POLYMARKET_US_PRIORITY_DARK_AFTER_S` is **6 seconds**, so a stall past
+that marks live in-play markets dark *by itself*, which escalates to a
+resubscribe and then a shard rebuild — and every rebuild replays cached books
+that can be hours old. A starved loop manufactures exactly the stale-quote
+condition the freshness rules exist to prevent.
+
+That is not hypothetical, and it is why the VM is `performance-1x`. Measured
+2026-08-31:
+
+| | shared-cpu-1x | performance-1x |
+|---|---|---|
+| `/monitored`, ~865 groups | 23.9 s | 588 ms |
+| loop lag p50 / p95 | 2,278 / 5,641 ms | 0 / 24 ms |
+| disconnects per log buffer | 22 | 1 |
+
+The same request takes 0.43s locally, so the gap was contention, not an
+algorithm. Watch `loop_lag` after any change to VM size or per-tick work.
+
+Everything other than `/health` needs a Cloudflare Access assertion, so use the
+browser on the custom domain. To confirm the origin is **verified** and not
+merely fronted — `<app>.fly.dev` stays publicly reachable, so a proxy-only
+arrangement would leave it wide open:
+
+```powershell
+# expect 403 on both of these, and 200 only on /health
+Invoke-WebRequest https://arbys-dekman.fly.dev/monitored
+Invoke-WebRequest https://arbys-dekman.fly.dev/quotes -Method POST -Body '{}' -ContentType 'application/json'
+```
+
+### 7.5 Reading the logs
+
+```powershell
+gh workflow run "Fly admin (manual)" --repo mikeaidekman/Arbys -f command="logs --no-tail"
+```
+
+The line worth reading is the Polymarket shard heartbeat, once per shard per
+30s:
+
+```
+polymarket_us WS shard 4: 24 frames/s, 49 quotes/s, live 100/100 slug(s), 47 stale-on-arrival, 0 unknown-slug, 0 non-market frame(s)
+```
+
+- **`live N/M`** is the *only* symptom the venue's silent market-shedding has.
+  Don't read one sub-100% window as a fault — plenty of pre-game markets are
+  genuinely quiet, and the first window after a reconnect is always low. Read it
+  as a trend across windows, and cross-check actual quote ages. A shard that
+  stays low while its games are in play is the fault.
+- **`stale-on-arrival`** is high immediately after a (re)connect and should fall
+  to near zero. The venue answers a fresh subscription with a *cached* book, so
+  a burst there is expected and handled: those quotes are back-dated by
+  `source_age_s` and age out instead of being traded on. A count that stays high
+  on a settled connection is worth chasing.
+
+These are `INFO`. Nothing called `configure_logging()` until 2026-08-31, so the
+root logger sat at its default and every `log.info` in the process was
+discarded — while warnings still appeared via logging's last-resort handler,
+which is what made the gap look like working logging rather than absent
+logging. If these lines vanish again, check that first.
+
+### 7.6 Stopping trading in a hurry
+
+Set `ARBYS_ENABLE_AUTO_TRADE = "0"` in `fly.toml`, commit, push. The deploy
+drains rather than cutting off: `kill_timeout = 60`, and
+`AutoTradeService.stop()` waits up to `STOP_TIMEOUT_S` for an in-flight
+submission instead of cancelling it — a `CancelledError` mid-submission is a
+`BaseException`, so every layer built to notice a dropped write catches
+`Exception` and never sees it, which could strand a `paper_ticket` at `pending`
+with nothing logged and nothing counted.
+
+To stop the *feed* as well, set `ARBYS_ENABLE_INGEST = "0"` in the same commit.
+Leaving ingest on with trading off is the intended "watch only" state.
