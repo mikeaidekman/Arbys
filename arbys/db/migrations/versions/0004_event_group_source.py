@@ -35,11 +35,29 @@ def upgrade() -> None:
         )
     # Discovery ids look like "mlb-CIN-WSH-2026-08-09" or
     # "nfl-ARI-LAC-2026-09-13-total-44.5"; anything else was hand-registered.
+    #
+    # GLOB is SQLite-only and Postgres has no equivalent operator, so the
+    # predicate is dialect-dispatched. This originally shipped as GLOB alone,
+    # which made the whole chain unreplayable on Postgres — `syntax error at
+    # or near "GLOB"` — and nothing noticed because dev builds its schema with
+    # create_all() and never runs a migration at all. Found 2026-08-31 by the
+    # Postgres migration workflow, on its first green connection.
+    #
+    # On a fresh hosted database this UPDATE matches nothing, since the table
+    # is empty. It still has to *parse*, which is the whole problem.
+    dialect = op.get_bind().dialect.name
+    if dialect == "postgresql":
+        # POSIX regex, unanchored — the leading and trailing `*` of the glob.
+        predicate = "id ~ '-[A-Z].*-[A-Z].*-[0-9]{4}-[0-9]{2}-[0-9]{2}'"
+    else:
+        predicate = (
+            "id GLOB '*-[A-Z]*-[A-Z]*-[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]*'"
+        )
     op.execute(
-        """
+        f"""
         UPDATE event_group
            SET source = 'discovery'
-         WHERE id GLOB '*-[A-Z]*-[A-Z]*-[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]*'
+         WHERE {predicate}
         """
     )
     op.execute("UPDATE event_group SET source = 'manual' WHERE source IS NULL")
