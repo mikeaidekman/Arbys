@@ -1,0 +1,75 @@
+name: Migrations (Postgres)
+
+# Proves the Alembic chain replays on the dialect production actually uses.
+#
+# Dev never runs a migration at all — `bootstrap()` builds the schema with
+# `create_all()` — so without this the first real execution of the chain would
+# be the first hosted deploy, against a database that matters. The SQLite
+# version of this test runs in the normal suite; this one covers what SQLite
+# cannot: BIGINT vs INTEGER, JSON, NUMERIC precision.
+#
+# Each run gets its own **throwaway Neon branch**, created here and deleted in
+# the final step. The test drops and recreates the `public` schema twice, so it
+# must never touch a database anyone cares about — an ephemeral branch is not a
+# convenience here, it is the safety property.
+#
+# Deliberately its own workflow rather than a job inside deploy.yml: while the
+# Neon action's contract is still being established, a failure here must not be
+# able to block a deploy. Fold it into deploy.yml's `needs` once it has proven
+# stable — a broken migration chain should eventually stop a release.
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+concurrency:
+  group: migrations-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  postgres:
+    name: Replay the chain on a Neon branch
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.14"
+      - run: pip install -e ".[dev]"
+
+      - name: Create a throwaway Neon branch
+        id: branch
+        uses: neondatabase/create-branch-action@v5
+        with:
+          project_id: ${{ vars.NEON_PROJECT_ID }}
+          branch_name: ci-migrations-${{ github.run_id }}
+          api_key: ${{ secrets.NEON_API_KEY }}
+
+      - name: Replay the chain
+        env:
+          # Two rewrites, because db/session.py hands the URL to the driver
+          # verbatim. Neon returns the psycopg-flavoured form:
+          #   postgresql://  -> postgresql+asyncpg://  (the default driver is
+          #                     synchronous; this app is not)
+          #   ?sslmode=      -> ?ssl=                  (sslmode is psycopg's;
+          #                     asyncpg rejects it outright)
+          NEON_URL: ${{ steps.branch.outputs.db_url }}
+        run: |
+          url="${NEON_URL/postgresql:\/\//postgresql+asyncpg://}"
+          url="${url/postgres:\/\//postgresql+asyncpg://}"
+          url="${url/sslmode=/ssl=}"
+          # Never echo it: this is a live credential and workflow logs are
+          # readable by anyone with repo access.
+          ARBYS_TEST_PG_URL="$url" python -m pytest tests/db/test_migrations_postgres.py -v
+
+      - name: Delete the branch
+        # `always()` so a failed test still cleans up. A leaked branch per run
+        # would quietly consume the Neon project's branch allowance.
+        if: always()
+        uses: neondatabase/delete-branch-action@v3
+        with:
+          project_id: ${{ vars.NEON_PROJECT_ID }}
+          branch: ci-migrations-${{ github.run_id }}
+          api_key: ${{ secrets.NEON_API_KEY }}
