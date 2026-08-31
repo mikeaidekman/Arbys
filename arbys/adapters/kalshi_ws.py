@@ -30,6 +30,7 @@ from __future__ import annotations
 
 import asyncio
 import base64
+import binascii
 import json
 import logging
 import os
@@ -115,6 +116,23 @@ def _parse_kalshi_pem(data: str, *, source: str) -> rsa.RSAPrivateKey:
     """
     if "\\n" in data and "\n" not in data:
         data = data.replace("\\n", "\n")
+    # A whole PEM, base64'd. A 27-line key is a poor fit for a secret store's
+    # single-line input, and the observed failure mode is the box keeping only
+    # the first line — leaving the BEGIN marker with no body, which no amount
+    # of whitespace repair can fix. Base64 makes the secret one line, which
+    # every input handles, and is unambiguous to detect: a PEM always starts
+    # with the marker, so anything else that decodes to one was encoded.
+    if "-----BEGIN" not in data:
+        try:
+            # All whitespace, not just the ends: a box that soft-wraps a long
+            # value can introduce newlines mid-string, and validate=True
+            # refuses those.
+            decoded = base64.b64decode("".join(data.split()), validate=True).decode("utf-8")
+        except (binascii.Error, ValueError, UnicodeDecodeError):
+            pass
+        else:
+            if "-----BEGIN" in decoded:
+                data = decoded
     try:
         key = serialization.load_pem_private_key(data.encode(), password=None)
     except ValueError:

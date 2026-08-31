@@ -203,3 +203,37 @@ def test_repair_does_not_rescue_a_genuinely_bad_key(monkeypatch):
     monkeypatch.delenv("KALSHI_PRIVATE_KEY_PATH", raising=False)
     with pytest.raises(RuntimeError, match="KALSHI_PRIVATE_KEY"):
         kalshi_ws_creds_from_env()
+
+
+@pytest.mark.parametrize("wrap", [False, True], ids=["one-line", "soft-wrapped"])
+def test_a_base64_encoded_pem_loads(monkeypatch, pem, wrap):
+    """A 27-line PEM is a poor fit for a secret store's single-line input.
+
+    The observed production failure was the box keeping only the first line,
+    leaving a BEGIN marker with no body — which no whitespace repair can fix,
+    because there is nothing left to repair. Base64 makes the whole key one
+    line, which every input handles.
+    """
+    import base64 as b64mod
+
+    data, _path = pem
+    encoded = b64mod.b64encode(data.encode()).decode()
+    if wrap:
+        encoded = "\n".join(encoded[i : i + 64] for i in range(0, len(encoded), 64))
+    monkeypatch.setenv("KALSHI_API_KEY_ID", "kid")
+    monkeypatch.setenv("KALSHI_PRIVATE_KEY", encoded)
+    monkeypatch.delenv("KALSHI_PRIVATE_KEY_PATH", raising=False)
+    assert kalshi_ws_creds_from_env() is not None
+
+
+def test_a_pem_truncated_to_its_first_line_still_fails(monkeypatch):
+    """The actual production failure, pinned so it stays diagnosable.
+
+    A marker with no body is unrecoverable and must say so rather than being
+    silently accepted as some other kind of empty.
+    """
+    monkeypatch.setenv("KALSHI_API_KEY_ID", "kid")
+    monkeypatch.setenv("KALSHI_PRIVATE_KEY", "-----BEGIN RSA PRIVATE KEY-----")
+    monkeypatch.delenv("KALSHI_PRIVATE_KEY_PATH", raising=False)
+    with pytest.raises(RuntimeError, match="KALSHI_PRIVATE_KEY"):
+        kalshi_ws_creds_from_env()
