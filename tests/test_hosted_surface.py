@@ -59,3 +59,46 @@ def test_the_prefix_strip_does_not_invent_routes(client):
 
 def test_a_bare_api_root_does_not_500(client):
     assert client.get("/api").status_code in (200, 404, 405)
+
+
+# --- the built SPA's static files -------------------------------------------
+
+@pytest.fixture
+def built_spa(tmp_path, monkeypatch):
+    """A dist tree shaped like the real one: a hashed bundle, a root-level file,
+    and a nested directory copied verbatim out of `frontend/public/`."""
+    dist = tmp_path / "dist"
+    (dist / "assets").mkdir(parents=True)
+    (dist / "design" / "industry").mkdir(parents=True)
+    (dist / "index.html").write_text("<html>arbys</html>", encoding="utf-8")
+    (dist / "favicon.svg").write_text("<svg/>", encoding="utf-8")
+    (dist / "assets" / "index-abc123.js").write_text("//bundle", encoding="utf-8")
+    (dist / "design" / "industry" / "styles.css").write_text(".btn{}", encoding="utf-8")
+    monkeypatch.setenv("ARBYS_SPA_DIR", str(dist))
+    with TestClient(create_app()) as c:
+        yield c
+
+
+def test_the_vendored_design_system_is_served(built_spa):
+    """`_mount_spa` served root-level *files* and the `assets` directory only,
+    so every other directory Vite copies out of `public/` was missing. That is
+    where the vendored design system lives -- the whole basis of the UI -- and
+    it 404'd in the container while `/favicon.svg` beside it worked. Nothing
+    raised; the page just rendered with its component styles gone.
+    """
+    r = built_spa.get("/design/industry/styles.css")
+    assert r.status_code == 200
+    assert ".btn" in r.text
+
+
+def test_the_hashed_bundle_and_root_files_still_serve(built_spa):
+    assert built_spa.get("/assets/index-abc123.js").status_code == 200
+    assert built_spa.get("/favicon.svg").status_code == 200
+    assert built_spa.get("/").status_code == 200
+
+
+def test_static_mounts_are_not_a_catch_all(built_spa):
+    """Named routes and real directory names only -- an unknown path must 404
+    rather than quietly returning index.html with a 200."""
+    assert built_spa.get("/not-a-real-route").status_code == 404
+    assert built_spa.get("/design/industry/nope.css").status_code == 404

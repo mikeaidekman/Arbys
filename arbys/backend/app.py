@@ -598,10 +598,11 @@ def spa_dist_dir() -> Path:
 def _mount_spa(app: FastAPI) -> None:
     """Serve the built frontend from the same origin as the API.
 
-    One origin means no CORS, one deploy, and no `/api` prefix to strip — the
-    rewrite in `frontend/vite.config.ts` is dev-server only, so a split
-    deployment has to reimplement it somewhere and 404s completely if it is
-    missed.
+    One origin means no CORS and one deploy. It does **not** remove the `/api`
+    prefix problem, which an earlier version of this docstring claimed: the
+    rewrite in `frontend/vite.config.ts` is dev-server only, and the built SPA
+    still asks for `/api/...`, so something has to strip it. That is
+    `_StripApiPrefix`, above.
 
     Mounted last, after every API route, and silently skipped when there is no
     build: `frontend/dist` is gitignored, so a checkout that has never run
@@ -613,21 +614,29 @@ def _mount_spa(app: FastAPI) -> None:
         log.info("no SPA build at %s; serving the API only", dist)
         return
 
-    assets = dist / "assets"
-    if assets.is_dir():
-        app.mount("/assets", StaticFiles(directory=assets), name="assets")
-
     def _index() -> FileResponse:
         return FileResponse(index)
 
     for route in SPA_ROUTES:
         app.get(route, include_in_schema=False)(_index)
 
-    # Root-level files Vite emits beside index.html (favicon, manifest). Named
-    # individually for the same reason as SPA_ROUTES — a directory mount at
+    # Everything else Vite emits beside index.html: the hashed `assets/` bundle,
+    # plus whatever was copied verbatim out of `frontend/public/`. Directories
+    # are mounted and root-level files are served individually — each by its own
+    # real name, for the same reason as SPA_ROUTES, since a directory mount at
     # "/" would become the catch-all this design avoids.
+    #
+    # Serving only files was a real outage: `public/design/industry/` is the
+    # vendored design system the entire UI is built on, and it is a *directory*,
+    # so `/design/industry/styles.css` 404'd in the container while
+    # `/favicon.svg` beside it worked. Nothing errored — the page rendered with
+    # its component styles simply gone.
     for extra in dist.iterdir():
-        if extra.is_file() and extra.name != "index.html":
+        if extra.is_dir():
+            app.mount(
+                f"/{extra.name}", StaticFiles(directory=extra), name=extra.name
+            )
+        elif extra.name != "index.html":
             app.get(f"/{extra.name}", include_in_schema=False)(
                 lambda _p=extra: FileResponse(_p)
             )
