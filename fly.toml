@@ -55,12 +55,30 @@ primary_region = "ewr"
   # One. Not "at least one" as a floor under a larger number — one.
   min_machines_running = 1
 
+# A dedicated core, not a shared one. This is a 24/7 feed processor: ~127
+# frames/s parsed and upserted, per-tick arb evaluation across ~864 groups, and
+# a discovery pass every 10 minutes. Fly throttles sustained shared-CPU usage,
+# and `shared-cpu-1x` was throttled hard enough to break the app's core
+# invariant rather than merely slow it down.
+#
+# Measured on shared-cpu-1x: `/monitored` took 23.9s for the same 864 groups
+# that take 0.43s locally -- ~50x, far past what a slower core explains. Event
+# loop lag ran p50 2.3s / p95 5.6s / max 9.2s. That matters twice over: both
+# venue websockets use ping_timeout=20 and were dropping every ~60s, and
+# ARBYS_POLYMARKET_US_PRIORITY_DARK_AFTER_S is *6 seconds*, so the stall alone
+# marked live in-play markets dark, escalating into shard rebuilds that each
+# replay hours-old cached books. The reconnect storm was self-inflicted by
+# starvation.
+#
+# Sub-second quote freshness is the whole safety story here (see the
+# only-tradeable invariants in CLAUDE.md), so it cannot be bought back with a
+# throttled core. Check `loop_lag` in /health after changing this.
 [[vm]]
-  size = "shared-cpu-1x"
+  size = "performance-1x"
   # The local process sits at ~148MB after 24h with 560 groups and six
-  # WebSocket shards, before Python's own overhead. 256MB is not enough
-  # headroom for a discovery pass on top of that.
-  memory = "1gb"
+  # WebSocket shards, before Python's own overhead. 2GB is what performance-1x
+  # carries by default and leaves room for a discovery pass on top.
+  memory = "2gb"
 
 # Not for storage — the ledger lives in Postgres and this app writes nothing to
 # disk. A Fly volume attaches to one machine at a time, so its presence makes
