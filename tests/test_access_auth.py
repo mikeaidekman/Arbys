@@ -146,3 +146,31 @@ def test_half_configured_is_also_a_no_op(monkeypatch):
     monkeypatch.delenv("CF_ACCESS_AUD", raising=False)
     with TestClient(create_app()) as client:
         assert client.get("/monitored").status_code == 200
+
+
+# --- websockets, which resolve dependencies down a different path -----------
+
+def test_the_websocket_is_refused_without_an_assertion(access_on):
+    """The terminal's live feed must be behind Access too. A websocket cannot
+    carry a 403, so this closes with 1008 (policy violation) instead -- and the
+    test asserts only that the connection is refused, since what surfaces to
+    the client differs between a rejected handshake and a closed socket."""
+    from starlette.websockets import WebSocketDisconnect
+
+    with (
+        TestClient(create_app()) as client,
+        pytest.raises(WebSocketDisconnect) as excinfo,
+        client.websocket_connect("/ws/opportunities"),
+    ):
+        pass
+    # Asserted precisely, and not as a bare "it raised": the bug this guards
+    # against raised TypeError from the same call, which a loose
+    # `pytest.raises(Exception)` would have accepted as a pass.
+    assert excinfo.value.code == 1008
+
+
+def test_the_websocket_is_accepted_with_a_valid_assertion(access_on, signing_key):
+    with TestClient(create_app()) as client:
+        client.cookies.set("CF_Authorization", _token(signing_key))
+        with client.websocket_connect("/ws/opportunities") as ws:
+            assert ws is not None

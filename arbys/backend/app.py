@@ -104,6 +104,40 @@ def _rank_pairs(candidates: list[_PairCandidate]) -> _PairCandidate | None:
     return max(candidates, key=lambda c: (c.qty > 0, c.net_edge))
 
 
+class _StripApiPrefix:
+    """Rewrite `/api/...` to `/...` before routing.
+
+    The SPA calls `/api/monitored`; the API is mounted at the root. In dev,
+    vite's proxy does this rewrite (`frontend/vite.config.ts`), and nothing did
+    it in the container -- so every call from the built SPA returned 404 and the
+    hosted page rendered empty. That is precisely the "`/api` prefix-strip
+    failure mode" the Dockerfile comment says single-origin serving removes.
+    It does not: one origin removes CORS and the second deploy target, but the
+    rewrite still has to exist somewhere. This is somewhere.
+
+    Done in the server rather than by branching the frontend's base URL on
+    `import.meta.env.DEV`, so that dev and production speak the same URLs and a
+    browser holding a cached bundle keeps working.
+
+    Websockets are included for symmetry; `/ws/opportunities` is not under the
+    prefix today because vite forwards `/ws` without rewriting it.
+    """
+
+    def __init__(self, app):
+        self.app = app
+
+    async def __call__(self, scope, receive, send):
+        if scope["type"] in ("http", "websocket"):
+            path = scope.get("path", "")
+            if path == "/api" or path.startswith("/api/"):
+                scope = dict(scope)
+                scope["path"] = path[len("/api") :] or "/"
+                raw = scope.get("raw_path")
+                if raw:
+                    scope["raw_path"] = raw[len("/api") :] or b"/"
+        await self.app(scope, receive, send)
+
+
 def create_app() -> FastAPI:
     @asynccontextmanager
     async def lifespan(_app: FastAPI):
@@ -125,6 +159,7 @@ def create_app() -> FastAPI:
         lifespan=lifespan,
         dependencies=[Depends(require_access)],
     )
+    app.add_middleware(_StripApiPrefix)
 
     @app.get("/health")
     async def health() -> dict[str, object]:

@@ -30,7 +30,8 @@ from typing import Any
 
 import httpx
 import jwt
-from fastapi import HTTPException, Request
+from fastapi import HTTPException, WebSocketException
+from starlette.requests import HTTPConnection
 
 log = logging.getLogger(__name__)
 
@@ -109,13 +110,35 @@ def _key_for(team: str, token: str) -> Any:
     raise HTTPException(status_code=403, detail="access assertion signed by an unknown key")
 
 
-async def require_access(request: Request) -> None:
-    """Global dependency. Rejects anything without a valid Access assertion."""
+async def require_access(conn: HTTPConnection) -> None:
+    """Global dependency. Rejects anything without a valid Access assertion.
+
+    Takes `HTTPConnection` -- the common base of `Request` and `WebSocket` --
+    rather than `Request`, because an app-level dependency is applied to
+    websocket routes too and FastAPI cannot hand a `Request` to one. Annotated
+    as `Request` this raised `TypeError: require_access() missing 1 required
+    positional argument` at dependency-resolution time, so `/ws/opportunities`
+    was rejected with a 500 and the terminal never streamed. That happened
+    *before* `enabled()` was consulted, so it broke the live feed even with
+    Access switched off -- which is how it reached production unnoticed.
+    """
     if not enabled():
         return
-    if request.url.path in EXEMPT_PATHS:
+    if conn.url.path in EXEMPT_PATHS:
         return
+    try:
+        await _verify(conn)
+    except HTTPException as exc:
+        if conn.scope.get("type") == "websocket":
+            # A websocket cannot carry a 403. 1008 is "policy violation", which
+            # is what a refused assertion is.
+            raise WebSocketException(code=1008, reason=str(exc.detail)) from exc
+        raise
 
+
+async def _verify(conn: HTTPConnection) -> None:
+    """Raises HTTPException on any failure; `require_access` adapts it."""
+    request = conn
     token = request.headers.get("Cf-Access-Jwt-Assertion") or request.cookies.get(
         "CF_Authorization"
     )
