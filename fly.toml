@@ -28,6 +28,20 @@ primary_region = "ewr"
 [deploy]
   release_command = "alembic upgrade head"
 
+# Feature flags live here rather than in the secret store precisely because
+# they should be visible in review: these three lines are the difference
+# between an idle web app and a bot trading around the clock.
+#
+# AUTO_TRADE is deliberately 0 for now. Ingest and discovery are on so the
+# credentialed WebSocket path can be verified in production — the premise the
+# whole hosting design rests on — while nothing can trade. The dangerous
+# combination is a publicly-writable app that also trades; either alone is
+# minor. Flip this to 1 once Cloudflare Access is enforcing.
+[env]
+  ARBYS_ENABLE_INGEST = "1"
+  ARBYS_ENABLE_DISCOVERY = "1"
+  ARBYS_ENABLE_AUTO_TRADE = "0"
+
 [http_service]
   internal_port = 8000
   force_https = true
