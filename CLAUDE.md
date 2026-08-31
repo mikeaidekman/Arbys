@@ -1191,12 +1191,35 @@ diagnostics matter more than they look:
   at once — which reads in the logs as a venue outage and is not one. `/health`
   reports p50/p95/max over a 60-sample window.
 
-**A `def` endpoint is not a style choice here.** `list_monitored` is ~158 lines
-of Decimal math over every registered group with no `await` anywhere, declared
-`async def` — so it froze the whole event loop for the length of a request.
-Measured on the hosted box: 5.3s per call across 864 groups, against a terminal
-that polls it every 3s. FastAPI runs a plain `def` endpoint in a threadpool; an
-`async def` that never awaits gets none of that protection.
+**The machine is `performance-1x`, and that is a correctness decision.** On
+`shared-cpu-1x` the app was throttled hard enough to break an invariant rather
+than merely run slowly: `/monitored` took **23.9s** for the same 864 groups
+that take **0.43s** locally, and event-loop lag ran p50 2.3s / p95 5.6s / max
+9.2s. `ARBYS_POLYMARKET_US_PRIORITY_DARK_AFTER_S` is **6 seconds**, so a stall
+that long marks live in-play markets dark *by itself*, which escalates to a
+resubscribe and then a shard rebuild — and every rebuild replays cached books
+that can be hours old. Both venues were dropping together every ~60s with
+`keepalive ping timeout`, 22 disconnects in one log buffer, Polymarket unable
+to complete a handshake at all. Every bit of it self-inflicted.
+
+After the move: `/monitored` 588ms at 867 groups, loop lag p50 0ms / p95 24ms,
+**1** disconnect and **0** escalations in a comparable buffer. Ruled out on the
+way: no OOM or memory pressure, and the handler profiles at 0.62ms/group
+locally — the cost was contention, not an algorithm.
+
+The lesson generalises: sub-second quote freshness is the entire safety
+argument for trading this thing, so it cannot be bought back with a throttled
+core. Watch `loop_lag` in `/health` after any change to VM size or per-tick
+work.
+
+**Separately, `list_monitored` is `def` and not `async def`.** It is ~158 lines
+of Decimal math with no `await` anywhere, so as a coroutine it ran to
+completion on the event loop and froze every other task for the length of a
+request. FastAPI runs a plain `def` endpoint in a threadpool; an `async def`
+that never awaits gets none of that protection. This was necessary but **not
+sufficient** — it was fixed first and the thrashing continued unchanged until
+the CPU was, which is worth remembering as a caution against declaring victory
+on the first plausible cause.
 
 **The container is not the dev server, and three things only it gets wrong:**
 
