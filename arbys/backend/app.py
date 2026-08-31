@@ -22,6 +22,7 @@ log = logging.getLogger(__name__)
 
 from ..db import repositories as repo  # noqa: E402
 from ..db.session import dropped_write_stats, session_scope  # noqa: E402
+from ..observability import configure_logging  # noqa: E402
 from ..shared.arb_engine import (  # noqa: E402
     DEFAULT_QTY_TICK,
     leg_unit_cost,
@@ -142,6 +143,20 @@ class _StripApiPrefix:
 def create_app() -> FastAPI:
     @asynccontextmanager
     async def lifespan(_app: FastAPI):
+        # Configure logging here, not at import: uvicorn installs its own
+        # handlers while loading the app, and this has to land after that to
+        # win. Nothing called it at all before, so the root logger sat at its
+        # default and every `log.info` in the process was dropped -- warnings
+        # still appeared, via logging's last-resort handler, which is what made
+        # the gap look like working logging rather than absent logging.
+        #
+        # What was being lost is the reason this matters: the Polymarket shard
+        # heartbeat (`live N/M slug(s)`, plus the stale-on-arrival count) is
+        # INFO, and per CLAUDE.md that count is the *only* symptom the venue's
+        # silent market-shedding has. A hosted bot trading against a feed whose
+        # sole failure indicator is discarded before it leaves the process is
+        # not an acceptable trade.
+        configure_logging()
         state = get_state()
         await state.bootstrap()
         loop_monitor().start()

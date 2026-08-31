@@ -67,3 +67,26 @@ def test_an_empty_window_reports_zeros_not_nulls():
         "p95_ms": 0.0,
         "max_ms": 0.0,
     }
+
+
+# --- logging actually reaches stderr ----------------------------------------
+
+def test_info_logging_is_enabled_once_the_app_starts():
+    """Nothing ever called `configure_logging()`, so the root logger sat at its
+    default and every `log.info` in the process was discarded.
+
+    Warnings still appeared -- logging's last-resort handler emits WARNING and
+    above with no configuration -- which is precisely what made this look like
+    working logging instead of absent logging.
+
+    The cost is specific: the Polymarket shard heartbeat (`live N/M slug(s)`
+    and the stale-on-arrival count) is INFO, and per CLAUDE.md that count is
+    the only symptom the venue's silent market-shedding has. On a hosted box
+    that is the difference between noticing a shedding feed and trading on it.
+    """
+    import logging
+
+    with TestClient(create_app()):
+        assert logging.getLogger("arbys.adapters.polymarket_us_ws").isEnabledFor(
+            logging.INFO
+        )
