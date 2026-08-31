@@ -70,10 +70,40 @@ def _register_sqlite_pragmas(engine: AsyncEngine) -> None:
     setattr(engine.sync_engine, _PRAGMA_FLAG, True)
 
 
+# Query parameters libpq understands and asyncpg does not. Managed Postgres
+# providers hand you a libpq-flavoured URL — Neon's carries both of these — and
+# asyncpg raises `TypeError: connect() got an unexpected keyword argument` on
+# each, at connect time, on the first real deploy.
+#
+# `sslmode` has a direct equivalent so it is translated; `channel_binding` has
+# none, and dropping it is safe because asyncpg negotiates SCRAM channel
+# binding on a TLS connection regardless. Add to this list rather than asking
+# whoever sets ARBYS_DB_URL to hand-edit a connection string — that is a
+# footgun that only ever fires in production.
+_LIBPQ_ONLY_PARAMS = ("channel_binding",)
+
+
+def normalise_asyncpg_url(url: str) -> str:
+    """Make a libpq-flavoured Postgres URL safe for asyncpg.
+
+    A no-op for SQLite and for URLs that name any other driver.
+    """
+    parsed = make_url(url)
+    if parsed.drivername != "postgresql+asyncpg":
+        return url
+    query = {k: v for k, v in parsed.query.items() if k not in _LIBPQ_ONLY_PARAMS}
+    if "sslmode" in query:
+        query["ssl"] = query.pop("sslmode")
+    # `str(URL)` masks the password as `***` — round-tripping through it would
+    # hand the driver a literal `***` and fail authentication with an error
+    # naming the credentials rather than this function.
+    return parsed.set(query=query).render_as_string(hide_password=False)
+
+
 def configure_engine(url: str | None = None) -> AsyncEngine:
     """(Re)configure the global engine. Call this from tests to swap DB URL."""
     global _engine, _session_factory
-    resolved = url or _get_db_url()
+    resolved = normalise_asyncpg_url(url or _get_db_url())
     kwargs: dict[str, object] = {"pool_pre_ping": True, "future": True}
     parsed = make_url(resolved)
     backend = parsed.get_backend_name()
