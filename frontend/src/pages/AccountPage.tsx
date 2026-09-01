@@ -431,6 +431,9 @@ export function AccountPage() {
           <div className="vt-panel">
             <div style={{ display: "flex", alignItems: "baseline", gap: "var(--space-3)" }}>
               <div className="vt-lab">Locked-in profit, cumulative</div>
+              <span className="vt-mono" style={{ fontSize: 11, opacity: 0.55 }}>
+                {range}
+              </span>
               <span style={{ flex: 1 }} />
               <span className="vt-mono" style={{ fontSize: 13, color: "var(--vt-green)" }}>
                 {accrual.total > 0 ? `${amount(accrual.total, { sign: true })} earned` : ""}
@@ -438,9 +441,11 @@ export function AccountPage() {
             </div>
             <AccrualCurve rows={d.rows} />
             <div style={{ fontSize: 11, opacity: 0.5 }}>
-              Settlement value accrued in this window — contracts less capital, so
-              it is fixed at fill time and cannot move with quotes. Solid is
-              settled, hatched is certain but not yet paid.
+              Contracts less capital, fixed at fill time and unable to move with
+              quotes. Solid is settled, hatched is certain but not yet paid.
+              Accrues by ticket <em>submission</em> time and follows the range
+              above, so a ticket submitted before the window is out of frame even
+              if it settled inside it.
             </div>
           </div>
 
@@ -811,6 +816,7 @@ function AccrualCurve({ rows }: { rows: LedgerRow[] }) {
     ` L${W},${H} Z`;
   const axis = [1, 0.75, 0.5, 0.25, 0].map((f) => hi * f);
   return (
+    <>
     <svg viewBox={`0 0 ${W} ${H}`} preserveAspectRatio="none" style={{ width: "100%", height: 230 }}>
       <defs>
         <pattern id="pending-hatch" width="6" height="6" patternUnits="userSpaceOnUse">
@@ -837,6 +843,23 @@ function AccrualCurve({ rows }: { rows: LedgerRow[] }) {
         strokeWidth="1.5"
       />
     </svg>
+      {/* The window's real bounds. Naming the range ("30D") is not enough on
+          its own: "All" says nothing about how much history there is, and a
+          quiet stretch at either end is indistinguishable from a short window
+          without dates on the axis. */}
+      <div
+        style={{
+          display: "flex",
+          justifyContent: "space-between",
+          fontSize: 11,
+          opacity: 0.5,
+        }}
+        className="vt-mono"
+      >
+        <span>{day(pts[0].submittedAt)}</span>
+        <span>{day(pts[pts.length - 1].submittedAt)}</span>
+      </div>
+    </>
   );
 }
 
