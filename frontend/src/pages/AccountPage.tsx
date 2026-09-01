@@ -215,10 +215,10 @@ export function AccountPage() {
     refetchInterval: 15_000,
   });
 
-  const days = RANGES.find((r) => r.key === range)?.days ?? null;
+  const rangeOption = RANGES.find((r) => r.key === range) ?? RANGES[0];
   // Snapshots arrive newest-first; the curve reads left to right.
   const snapshots = [...(pnl.data ?? [])].reverse();
-  const d = summarize(tickets.data ?? [], snapshots, days);
+  const d = summarize(tickets.data ?? [], snapshots, rangeOption);
 
   const shown = d.rows.filter(
     (r) => FILTERS.find((f) => f.key === filter)?.match(r) ?? true,

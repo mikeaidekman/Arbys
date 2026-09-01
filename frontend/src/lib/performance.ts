@@ -21,8 +21,31 @@ export type Outcome = "won" | "lost" | "flat" | "open" | "none";
 
 export interface RangeOption {
   key: string;
-  /** Null means every row, however old. */
+  /** Rolling window in days, measured back from now. Null means every row. */
   days: number | null;
+  /**
+   * Cut at local midnight today instead of rolling back from now.
+   *
+   * Deliberately not expressed as `days: 1`. A rolling 24 hours at 8pm still
+   * contains most of yesterday evening, which is not what anyone reading
+   * "Today" expects — and on a bot that trades an evening slate, yesterday
+   * evening is exactly the part that would quietly inflate the figure.
+   *
+   * Local midnight, matching how the rest of this page reads dates. Group dates
+   * are Eastern throughout (see CLAUDE.md), so this agrees with the venues'
+   * own trading day for an Eastern viewer.
+   */
+  sinceMidnight?: boolean;
+}
+
+/** The timestamp a range starts at, or null for "everything". */
+export function rangeCutoff(range: RangeOption): number | null {
+  if (range.sinceMidnight === true) {
+    const midnight = new Date();
+    midnight.setHours(0, 0, 0, 0);
+    return midnight.getTime();
+  }
+  return range.days === null ? null : Date.now() - range.days * 86_400_000;
 }
 
 /**
@@ -32,6 +55,7 @@ export interface RangeOption {
  */
 export const RANGES: RangeOption[] = [
   { key: "All", days: null },
+  { key: "Today", days: null, sinceMidnight: true },
   { key: "7D", days: 7 },
   { key: "30D", days: 30 },
   { key: "90D", days: 90 },
@@ -419,10 +443,9 @@ function groupBy(
 export function summarize(
   tickets: Ticket[],
   snapshots: PnlSnapshot[],
-  rangeDays: number | null,
+  range: RangeOption,
 ): Dashboard {
-  const cutoff =
-    rangeDays === null ? null : Date.now() - rangeDays * 86_400_000;
+  const cutoff = rangeCutoff(range);
   const inRange = (iso: string) => cutoff === null || new Date(iso).getTime() >= cutoff;
 
   const rows = tickets.filter((t) => inRange(t.submitted_at)).map(toLedgerRow);
