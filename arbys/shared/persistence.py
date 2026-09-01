@@ -64,6 +64,7 @@ class DbPaperPersistenceSink:
         realized_pnl: Decimal,
         *,
         venue_id: str,
+        open_fees: Decimal = Decimal("0"),
     ) -> None:
         await run_write(
             "sink.on_position",
@@ -75,6 +76,7 @@ class DbPaperPersistenceSink:
                 qty=qty,
                 avg_price=avg_price,
                 realized_pnl=realized_pnl,
+                open_fees=open_fees,
             ),
         )
 
@@ -135,9 +137,11 @@ class AccountScopedSink:
         realized_pnl: Decimal,
         *,
         venue_id: str,
+        open_fees: Decimal = Decimal("0"),
     ) -> None:
         await self._inner.on_position(
-            account_id, outcome_id, qty, avg_price, realized_pnl, venue_id=venue_id
+            account_id, outcome_id, qty, avg_price, realized_pnl,
+            venue_id=venue_id, open_fees=open_fees,
         )
 
     async def on_settlement(

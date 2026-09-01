@@ -330,6 +330,7 @@ async def list_paper_settlements(session: AsyncSession) -> list[dict]:
 async def upsert_paper_position(
     session: AsyncSession, *, account_id: str, venue_id: str, outcome_id: str,
     qty: Decimal, avg_price: Decimal, realized_pnl: Decimal,
+    open_fees: Decimal = Decimal("0"),
 ) -> None:
     await ensure_outcome_placeholder(session, outcome_id, venue_id=venue_id)
     row = (
@@ -350,12 +351,14 @@ async def upsert_paper_position(
                 qty=qty,
                 avg_price=avg_price,
                 realized_pnl=realized_pnl,
+                open_fees=open_fees,
             )
         )
     else:
         row.qty = qty
         row.avg_price = avg_price
         row.realized_pnl = realized_pnl
+        row.open_fees = open_fees
 
 
 async def insert_paper_pnl_snapshot(

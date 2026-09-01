@@ -60,6 +60,7 @@ class PaperPersistenceSink(Protocol):
         realized_pnl: Decimal,
         *,
         venue_id: str,
+        open_fees: Decimal = Decimal("0"),
     ) -> None: ...
     async def on_settlement(
         self, outcome_id: str, resolved_value: Decimal, *, venue_id: str, source: str
@@ -73,6 +74,18 @@ class _AccountState:
     avg_price: dict[str, Decimal] = field(default_factory=lambda: defaultdict(lambda: Decimal("0")))
     realized_pnl: Decimal = Decimal("0")
     realized_by_outcome: dict[str, Decimal] = field(
+        default_factory=lambda: defaultdict(lambda: Decimal("0"))
+    )
+    # Taker fees paid on the *currently open* quantity of each outcome, carried
+    # until that position closes. Realized P&L is reported net of fees, so the
+    # fee has to be held against the position that incurred it rather than
+    # deducted the moment it is paid -- otherwise realized would go negative on
+    # every fill and only recover at settlement.
+    #
+    # Cash is a separate story: `balances` is debited the fee immediately,
+    # because the money really has left. Equity is `cash + position_value` and
+    # does not include realized, so netting fees here cannot double-count.
+    open_fees_by_outcome: dict[str, Decimal] = field(
         default_factory=lambda: defaultdict(lambda: Decimal("0"))
     )
 
@@ -138,12 +151,16 @@ class PaperExecutionAdapter(ExecutionAdapter):
         qty: Decimal,
         avg_price: Decimal,
         realized_pnl: Decimal,
+        open_fees: Decimal = Decimal("0"),
     ) -> None:
         st = self._accounts[account_id]
         st.positions[outcome_id] = qty
         st.avg_price[outcome_id] = avg_price
         st.realized_by_outcome[outcome_id] = realized_pnl
         st.realized_pnl += realized_pnl
+        # Without this a deploy mid-position would drop the fees carried against
+        # it, and it would settle gross. Deploys are frequent.
+        st.open_fees_by_outcome[outcome_id] = open_fees
 
     def account_snapshot(self, account_id: str) -> tuple[Decimal, dict[str, tuple[Decimal, Decimal, Decimal]]]:
         st = self._accounts[account_id]
@@ -255,6 +272,7 @@ class PaperExecutionAdapter(ExecutionAdapter):
             return _rejected("insufficient_funds")
 
         fee = self._fees.fee(price=px, qty=qty, is_buy=is_buy)
+        st.open_fees_by_outcome[outcome_id] += fee
         if is_buy:
             st.balances[self.venue_id] = cash - (px * qty + fee)
             self._acquire(st, outcome_id, qty, px)
@@ -331,6 +349,7 @@ class PaperExecutionAdapter(ExecutionAdapter):
                 st.avg_price[order.outcome_id],
                 st.realized_by_outcome[order.outcome_id],
                 venue_id=self.venue_id,
+                open_fees=st.open_fees_by_outcome.get(order.outcome_id, Decimal("0")),
             )
         )
 
@@ -390,9 +409,28 @@ class PaperExecutionAdapter(ExecutionAdapter):
         cur_qty = st.positions[outcome_id]
         cur_avg = st.avg_price[outcome_id]
         realized = (price - cur_avg) * min(qty, cur_qty)
+        realized -= self._consume_fees(st, outcome_id, released=qty, held=cur_qty)
         st.realized_pnl += realized
         st.realized_by_outcome[outcome_id] += realized
         st.positions[outcome_id] = cur_qty - qty
+
+    @staticmethod
+    def _consume_fees(
+        st: _AccountState, outcome_id: str, *, released: Decimal, held: Decimal
+    ) -> Decimal:
+        """Fees attributable to the quantity being closed, removed from the
+        carried balance so they cannot be charged twice.
+
+        Prorated by the fraction of the position leaving, which matters only for
+        a partial sell-down: every detector emits buys, so in practice positions
+        close whole, at settlement.
+        """
+        carried = st.open_fees_by_outcome.get(outcome_id, Decimal("0"))
+        if carried == 0 or held <= 0:
+            return Decimal("0")
+        share = carried if released >= held else carried * (released / held)
+        st.open_fees_by_outcome[outcome_id] = carried - share
+        return share
 
     # ------------------------------------------------------------------
     # Resolution / settlement
@@ -407,6 +445,11 @@ class PaperExecutionAdapter(ExecutionAdapter):
                 continue
             avg = st.avg_price[outcome_id]
             realized = (resolved_value - avg) * qty
+            # Net of the fees carried against this position. Both settlement
+            # paths do it; they are otherwise identical and drifting apart here
+            # would make persistence and the sync path disagree on the same
+            # trade.
+            realized -= self._consume_fees(st, outcome_id, released=qty, held=qty)
             st.realized_pnl += realized
             st.realized_by_outcome[outcome_id] += realized
             st.balances[self.venue_id] = (
@@ -426,6 +469,7 @@ class PaperExecutionAdapter(ExecutionAdapter):
                         Decimal("0"),
                         st.realized_by_outcome[outcome_id],
                         venue_id=self.venue_id,
+                        open_fees=st.open_fees_by_outcome.get(outcome_id, Decimal("0")),
                     )
                 )
         if self._sink is not None:
@@ -443,6 +487,11 @@ class PaperExecutionAdapter(ExecutionAdapter):
                 continue
             avg = st.avg_price[outcome_id]
             realized = (resolved_value - avg) * qty
+            # Net of the fees carried against this position. Both settlement
+            # paths do it; they are otherwise identical and drifting apart here
+            # would make persistence and the sync path disagree on the same
+            # trade.
+            realized -= self._consume_fees(st, outcome_id, released=qty, held=qty)
             st.realized_pnl += realized
             st.realized_by_outcome[outcome_id] += realized
             st.balances[self.venue_id] = (

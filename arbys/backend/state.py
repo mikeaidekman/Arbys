@@ -523,6 +523,7 @@ class AppState:
                     qty=row.qty,
                     avg_price=row.avg_price,
                     realized_pnl=row.realized_pnl,
+                    open_fees=row.open_fees,
                 )
 
         # Seed starting balances for venues that have never been funded.

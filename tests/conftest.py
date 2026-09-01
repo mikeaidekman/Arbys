@@ -64,6 +64,32 @@ def _force_offline_test_environment() -> None:
         os.environ.pop(key, None)
 
 
+@pytest.fixture(autouse=True)
+def _isolate_database(tmp_path, monkeypatch):
+    """No test may touch the real `arbys-local.db`.
+
+    `ARBYS_DB_URL` defaults to a *relative* SQLite path, so any test that builds
+    an app without setting it bootstraps against the developer's actual ledger --
+    creating tables in it, seeding it, and writing to it. `tests/test_access_auth.py`
+    was doing exactly that, undetected, until a new column made the real database
+    fail to satisfy a query the tests had started issuing.
+
+    That is a data-safety problem rather than a tidiness one, and the failure it
+    produced was the harmless end of the range: the same path could have written
+    rows into a ledger whose integrity the rest of this project works hard to
+    protect.
+
+    Function-scoped so each test gets a fresh file, and set before the test body
+    runs so a test that manages its own URL still wins.
+    """
+    from arbys.db import session as db_session
+
+    monkeypatch.setenv("ARBYS_DB_URL", f"sqlite+aiosqlite:///{tmp_path / 'test.db'}")
+    db_session.reset_engine()
+    yield
+    db_session.reset_engine()
+
+
 async def _seed_reference_rows(
     *,
     venues: tuple[str, ...] = ("kalshi", "polymarket_us", "draftkings"),

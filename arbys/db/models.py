@@ -340,6 +340,11 @@ class PaperPosition(Base):
     qty: Mapped[Decimal] = mapped_column(NUM, nullable=False, default=Decimal("0"))
     avg_price: Mapped[Decimal] = mapped_column(NUM, nullable=False, default=Decimal("0"))
     realized_pnl: Mapped[Decimal] = mapped_column(NUM, nullable=False, default=Decimal("0"))
+    # Taker fees paid on the quantity still open here, carried until it closes.
+    # Realized P&L is reported net of fees, so the fee has to survive a restart
+    # with the position that incurred it -- otherwise a deploy mid-position
+    # would let it settle gross, and deploys are frequent.
+    open_fees: Mapped[Decimal] = mapped_column(NUM, nullable=False, default=Decimal("0"))
 
     # venue_id is part of the key: outcome_id is venue-native, but one broker
     # exists per venue and each must hydrate only its own rows on restart.

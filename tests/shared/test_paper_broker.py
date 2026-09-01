@@ -204,7 +204,7 @@ async def test_ticket_commit_is_not_interleaved_by_quote_updates():
             return None
 
         async def on_position(self, account_id, outcome_id, qty, avg_price,
-                              realized_pnl, *, venue_id):
+                              realized_pnl, *, venue_id, **_):
             return None
 
     poly.set_sink(MarketMovingSink())
@@ -483,7 +483,7 @@ async def test_settlement_notifies_the_sink_exactly_once_with_multiple_holders()
         async def on_fill(self, order, fill): ...
         async def on_balance(self, account_id, venue_id, amount): ...
         async def on_position(
-            self, account_id, outcome_id, qty, avg_price, realized_pnl, *, venue_id
+            self, account_id, outcome_id, qty, avg_price, realized_pnl, *, venue_id, **_
         ): ...
         async def on_settlement(
             self, outcome_id, resolved_value, *, venue_id, source
@@ -534,7 +534,7 @@ async def test_settlement_notifies_the_sink_when_no_account_holds():
         async def on_fill(self, order, fill): ...
         async def on_balance(self, account_id, venue_id, amount): ...
         async def on_position(
-            self, account_id, outcome_id, qty, avg_price, realized_pnl, *, venue_id
+            self, account_id, outcome_id, qty, avg_price, realized_pnl, *, venue_id, **_
         ): ...
         async def on_settlement(
             self, outcome_id, resolved_value, *, venue_id, source
@@ -557,3 +557,86 @@ async def test_settlement_notifies_the_sink_when_no_account_holds():
     await broker.settle_outcome_async("k-yes", Decimal("1"))
     assert len(recorded) == 1, f"Expected 1 settlement record, got {len(recorded)}"
     assert recorded[0] == ("k-yes", Decimal("1"), "kalshi", "heuristic")
+
+
+# --- realized P&L is reported net of fees -----------------------------------
+
+
+@pytest.mark.asyncio
+async def test_realized_pnl_is_net_of_fees():
+    """`realized_pnl` used to be gross, while cash was debited the fee.
+
+    That put two figures with the same name on two pages at different values:
+    the terminal strip read the broker (gross), the performance page scored each
+    ticket from its own fills (net). Fees are the largest cost this strategy
+    carries -- up to 3.25c per contract pair against edges of 1-2c -- so the
+    gross figure was not a rounding difference, it was most of the economics.
+    """
+    book = QuoteBook()
+    book.upsert(Quote(outcome_id="A", bid=Decimal("0.40"), ask=Decimal("0.50")))
+    broker = _make_broker("kalshi", book, fee_model=KalshiFeeModel("kalshi"))
+    broker.deposit("acct", Decimal("1000"))
+    await broker.place_order(
+        account_id="acct", outcome_id="A", is_buy=True,
+        qty=Decimal("100"), limit_price=Decimal("0.50"),
+    )
+    fee = broker.fills_for_account("acct")[0].fee if hasattr(broker, "fills_for_account") else None
+    broker.settle_outcome("A", Decimal("1"))
+    # Bought 100 at 0.50, settled at 1.00 -> 50 gross.
+    realized = broker.realized_pnl("acct")
+    assert realized < Decimal("50"), "realized is still gross of fees"
+    if fee is not None:
+        assert realized == Decimal("50") - fee
+
+
+@pytest.mark.asyncio
+async def test_realized_matches_cash_movement_after_settlement():
+    """The check that catches a double-deduction.
+
+    Cash is debited the fee at fill time and realized nets it at settlement, so
+    the two must agree once the position is closed: ending cash minus starting
+    cash is exactly realized P&L. Netting the fee in both places would show up
+    here as realized being short by one fee.
+    """
+    book = QuoteBook()
+    book.upsert(Quote(outcome_id="A", bid=Decimal("0.40"), ask=Decimal("0.50")))
+    broker = _make_broker("kalshi", book, fee_model=KalshiFeeModel("kalshi"))
+    broker.deposit("acct", Decimal("1000"))
+    await broker.place_order(
+        account_id="acct", outcome_id="A", is_buy=True,
+        qty=Decimal("100"), limit_price=Decimal("0.50"),
+    )
+    broker.settle_outcome("A", Decimal("1"))
+    cash, _positions = broker.account_snapshot("acct")
+    assert cash - Decimal("1000") == broker.realized_pnl("acct")
+
+
+@pytest.mark.asyncio
+async def test_fees_survive_a_restart_with_their_position():
+    """A deploy landing mid-position must not let it settle gross.
+
+    `hydrate_position` restores qty, cost basis and realized; without the
+    carried fee it would restore a position whose entry cost has been forgotten,
+    and deploys here are frequent enough that this would be the common case
+    rather than the edge one.
+    """
+    book = QuoteBook()
+    book.upsert(Quote(outcome_id="A", bid=Decimal("0.40"), ask=Decimal("0.50")))
+    live = _make_broker("kalshi", book, fee_model=KalshiFeeModel("kalshi"))
+    live.deposit("acct", Decimal("1000"))
+    await live.place_order(
+        account_id="acct", outcome_id="A", is_buy=True,
+        qty=Decimal("100"), limit_price=Decimal("0.50"),
+    )
+    _cash, positions = live.account_snapshot("acct")
+    qty, avg, realized = positions["A"]
+
+    restarted = _make_broker("kalshi", book, fee_model=KalshiFeeModel("kalshi"))
+    restarted.deposit("acct", Decimal("1000"))
+    restarted.hydrate_position(
+        "acct", "A", qty=qty, avg_price=avg, realized_pnl=realized,
+        open_fees=Decimal("1.75"),  # 0.07 * 0.5 * 0.5 * 100
+    )
+    restarted.settle_outcome("A", Decimal("1"))
+    live.settle_outcome("A", Decimal("1"))
+    assert restarted.realized_pnl("acct") == live.realized_pnl("acct")
