@@ -43,9 +43,11 @@ primary_region = "ewr"
 # no ExecutionAdapter places anything on either venue today. What is now at
 # risk is the honesty of the ledger, not money.
 #
-# Two caps still bind and neither is a substitute for the other:
-# ARBYS_MAX_TICKET_STAKE (200) at detection, ARBYS_MAX_OUTCOME_QTY (500) at
-# execution. Both keep their defaults.
+# Three limits bind and none substitutes for another, all on code defaults:
+# ARBYS_MAX_TICKET_STAKE ($250) caps one ticket at detection, which is the
+# legging control since a ticket is what can half-fill; ARBYS_MAX_OUTCOME_STAKE
+# ($500) caps cumulative capital in one game at execution; and
+# ARBYS_MIN_CONTRACT_QTY (5) refuses dust at detection.
 [env]
   ARBYS_ENABLE_INGEST = "1"
   ARBYS_ENABLE_DISCOVERY = "1"

@@ -278,25 +278,43 @@ def polymarket_us_priority_dark_after_s() -> float:
         return DEFAULT_POLYMARKET_US_PRIORITY_DARK_AFTER_S
 
 
-DEFAULT_MAX_OUTCOME_QTY = Decimal("500")
+DEFAULT_MAX_OUTCOME_STAKE = Decimal("500")
 
 
-def max_outcome_qty() -> Decimal | None:
-    """Cap on open units per outcome for one account. ``None`` disables it.
+def max_outcome_stake() -> Decimal | None:
+    """Cap on capital committed to one event group. ``None`` disables it.
 
-    The engine republishes an edge for as long as it exists, and nothing
-    stopped a caller taking the same ticket over and over — five clicks put on
-    five times the intended size. Units are the natural measure here: a binary
-    ticket that buys N units pays off N, so this caps guaranteed payoff
-    exposure per outcome. Set ARBYS_MAX_OUTCOME_QTY=0 to turn it off.
+    The **cumulative** limit, and the only one there is.
+    ``ARBYS_MAX_TICKET_STAKE`` bounds a single ticket — which is the legging
+    control, since a ticket is the unit that can half-fill — and says nothing
+    about how many tickets pile onto the same game. The engine republishes an
+    edge for as long as it exists and the auto-trader's cooldown only paces
+    it, so on a persistent edge a fill lands roughly once a minute. Over an
+    evening slate that is hundreds of tickets on one fixture, bounded by
+    nothing but running out of cash.
+
+    Denominated in **dollars of cost basis**, and scoped to the whole event
+    group rather than a single outcome. It replaced
+    ``ARBYS_MAX_OUTCOME_QTY``, a 500-*unit* per-outcome cap written on
+    2026-08-08 when sizing was a flat 100 contracts and no dollar cap existed
+    at all — "five clicks put on five times the intended size" was the whole
+    of it. Units were never the quantity anyone reasons about here, and
+    per-outcome was the wrong scope: a matched pair holds two outcomes, so a
+    per-outcome limit bounds the game at some price-dependent multiple of
+    itself rather than at the number you set.
+
+    The $500 default is roughly what the old 500-unit cap allowed, because a
+    matched pair costs ~$1.00 all-in per contract whatever the price split.
+    Set ARBYS_MAX_OUTCOME_STAKE=0 to turn it off — then cash is the only
+    ceiling on how much of the bankroll one game can absorb.
     """
-    raw = os.environ.get("ARBYS_MAX_OUTCOME_QTY")
+    raw = os.environ.get("ARBYS_MAX_OUTCOME_STAKE")
     if raw is None:
-        return DEFAULT_MAX_OUTCOME_QTY
+        return DEFAULT_MAX_OUTCOME_STAKE
     try:
         value = Decimal(raw)
     except (ArithmeticError, ValueError):
-        return DEFAULT_MAX_OUTCOME_QTY
+        return DEFAULT_MAX_OUTCOME_STAKE
     return None if value <= 0 else value
 
 

@@ -568,7 +568,7 @@ async def test_auto_trader_skips_silently_when_the_cap_would_be_breached(monkeyp
     write a rejected row on every fingerprint change all night.
     """
     monkeypatch.setenv("ARBYS_ENABLE_AUTO_TRADE", "1")
-    monkeypatch.setenv("ARBYS_MAX_OUTCOME_QTY", "1")
+    monkeypatch.setenv("ARBYS_MAX_OUTCOME_STAKE", "1")
     s = await _live_edge()
     await s.bootstrap()
     tickets: list[dict] = []

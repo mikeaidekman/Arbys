@@ -3,7 +3,7 @@
 Everything that submits goes through here rather than through logic living in
 the endpoint, for three reasons:
 
-* The ARBYS_MAX_OUTCOME_QTY check used to live in `app.py`, so any non-HTTP
+* The ARBYS_MAX_OUTCOME_STAKE check used to live in `app.py`, so any non-HTTP
   caller bypassed it silently and stacked positions without bound.
 * A ticket's identity has to be minted before the intent is built, so the
   legs can be grouped.
@@ -41,7 +41,7 @@ from ..db import repositories as repo
 from ..db.session import run_write
 from ..shared.arb_engine import ArbOpportunity
 from ..shared.execution_router import InsufficientLegsError
-from .state import max_leg_age_skew_s, max_outcome_qty
+from .state import max_leg_age_skew_s, max_outcome_stake
 
 if TYPE_CHECKING:  # pragma: no cover - import cycle guard
     from .state import AppState
@@ -261,36 +261,57 @@ def stale_leg_skew(state: AppState, live: ArbOpportunity) -> str | None:
 
 
 def cap_breach(state: AppState, live: ArbOpportunity, account_id: str) -> str | None:
-    """The outcome that would exceed ARBYS_MAX_OUTCOME_QTY, or None.
+    """Why this ticket would breach ARBYS_MAX_OUTCOME_STAKE, or None.
 
     Public because the auto-trader pre-checks the same condition before
     submitting. Duplicating this logic there would mean two implementations of
     one safety rule, free to drift apart; this stays the single source and
     `submit_arb_ticket` stays the authoritative enforcement point.
+
+    Measured in **dollars of cost basis** and scoped to the whole event group,
+    both legs and both venues together. Per-outcome would be the wrong
+    question: a matched pair holds two outcomes at complementary prices, so
+    capping each one separately bounds the game at a price-dependent multiple
+    of the number you actually set.
     """
-    cap = max_outcome_qty()
+    cap = max_outcome_stake()
     if cap is None:
         return None
-    for leg in live.legs:
-        if not leg.is_buy:
-            continue
-        broker = state.paper_brokers.get(leg.venue_id)
-        if broker is None:
-            continue
+    outcomes = _group_outcomes(state, live)
+    held = Decimal("0")
+    for broker in state.paper_brokers.values():
         _cash, positions = broker.account_snapshot(account_id)
-        held = positions.get(leg.outcome_id, (Decimal("0"),))[0]
-        if held + leg.qty > cap:
-            # `position_cap:` prefix is a machine-matchable marker (see
-            # test_position_cap_is_enforced_here_not_in_the_endpoint); the
-            # words "position cap" also have to appear for the HTTP endpoint,
-            # which surfaces this string verbatim as the 409 detail (see
-            # test_repeat_fills_stop_at_the_position_cap).
-            return (
-                f"position_cap:{leg.outcome_id} would exceed the position cap "
-                f"of {cap}: holds {held}, ticket adds {leg.qty}. Raise "
-                f"ARBYS_MAX_OUTCOME_QTY or reset the account."
-            )
+        for outcome_id, (qty, avg_price, _realized) in positions.items():
+            if outcome_id in outcomes:
+                held += qty * avg_price
+    if held + live.total_stake > cap:
+        # `position_cap:` prefix is a machine-matchable marker (see
+        # test_position_cap_is_enforced_here_not_in_the_endpoint); the words
+        # "position cap" also have to appear for the HTTP endpoint, which
+        # surfaces this string verbatim as the 409 detail (see
+        # test_repeat_fills_stop_at_the_position_cap).
+        return (
+            f"position_cap:{live.event_group_id} would exceed the position cap "
+            f"of ${cap}: holds ${held:.2f}, ticket adds ${live.total_stake:.2f}. "
+            f"Raise ARBYS_MAX_OUTCOME_STAKE or reset the account."
+        )
     return None
+
+
+def _group_outcomes(state: AppState, live: ArbOpportunity) -> set[str]:
+    """Every outcome belonging to this opportunity's game.
+
+    Prefers the registered group, so capital held on a *different* pair of the
+    same fixture still counts against it — a four-leg group can be traded as
+    more than one pair, and exposure to the game is exposure to the game.
+    Falls back to the ticket's own legs when the group has been retired, which
+    is the narrower but never-wrong answer.
+    """
+    base = live.event_group_id.split(":", 1)[0]
+    group = state.event_groups.get(base)
+    if group is not None:
+        return {leg.outcome_id for leg in group.legs}
+    return {leg.outcome_id for leg in live.legs}
 
 
 async def submit_arb_ticket(

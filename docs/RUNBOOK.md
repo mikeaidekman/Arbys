@@ -287,7 +287,7 @@ execution, implement `ExecutionAdapter` for the venue, then swap it into
   none. A rejection never writes a `paper_fill` row. `paper_order` rows are
   written one per attempted leg on a router-level rejection (limit price,
   balance, depth — see 4.1), but not on the pre-router
-  `ARBYS_MAX_OUTCOME_QTY` cap rejection, which stops before an
+  `ARBYS_MAX_OUTCOME_STAKE` cap rejection, which stops before an
   `ExecutionIntent` ever exists. Check `rejection_reason` on the ticket, and
   on its legs, for why.
 
@@ -330,7 +330,7 @@ A ticket's `status` is one of three terminal values:
   the response carries a real `fill_price`.
 - **`rejected`** — two different paths, and whether `legs` is populated
   tells you which:
-  - **Cap breach** — `ARBYS_MAX_OUTCOME_QTY` (enforced in
+  - **Cap breach** — `ARBYS_MAX_OUTCOME_STAKE` (enforced in
     `ticket_service.py`, not the endpoint — see CLAUDE.md) stops the ticket
     before an `ExecutionIntent` is ever built. `legs` is empty; nothing was
     attempted.

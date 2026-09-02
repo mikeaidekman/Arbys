@@ -257,7 +257,9 @@ def test_execute_prices_against_live_quotes_not_the_recorded_opportunity():
 
 def test_repeat_fills_stop_at_the_position_cap(monkeypatch):
     """The same edge stays published, so repeat clicks must not stack forever."""
-    monkeypatch.setenv("ARBYS_MAX_OUTCOME_QTY", "250")
+    # $250 of cost basis. Each ticket is 100 contracts at 0.40 + 0.50 = $90,
+    # so two fit and the third would take the game to $270.
+    monkeypatch.setenv("ARBYS_MAX_OUTCOME_STAKE", "250")
     with TestClient(create_app()) as client:
         _register(client, "eg-cap", "c-yes", "c-no")
         # 100 contracts resting on each ask, which is thinner than the stake
@@ -268,7 +270,7 @@ def test_repeat_fills_stop_at_the_position_cap(monkeypatch):
                 json={"outcome_id": oid, "bid": px, "ask": px, "ask_size": "100"},
             )
 
-        # Each ticket is 100 units, so the third would exceed a 250 cap.
+        # Each ticket commits $90, so the third would exceed the $250 cap.
         assert client.post(
             "/paper/execute",
             json={"event_group_id": "eg-cap", "outcome_ids": ["c-yes", "c-no"]},
@@ -291,7 +293,7 @@ def test_repeat_fills_stop_at_the_position_cap(monkeypatch):
 
 
 def test_position_cap_can_be_disabled(monkeypatch):
-    monkeypatch.setenv("ARBYS_MAX_OUTCOME_QTY", "0")
+    monkeypatch.setenv("ARBYS_MAX_OUTCOME_STAKE", "0")
     with TestClient(create_app()) as client:
         _register(client, "eg-nocap", "n-yes", "n-no")
         # Depth of 100 on each ask pins every ticket at 100 units.
@@ -916,3 +918,38 @@ def test_a_dust_sized_edge_is_never_published():
         opps = client.get("/opportunities").json()
         assert [o["event_group_id"] for o in opps] == ["eg-dust"]
         assert Decimal(opps[0]["legs"][0]["qty"]) == Decimal("50")
+
+
+def test_the_position_cap_counts_both_legs_of_the_game_in_dollars(monkeypatch):
+    """Cost basis across the whole group, not units on one outcome.
+
+    Each ticket here is 100 contracts at 0.40 + 0.50, so it commits $90 across
+    the two venues. With a $130 cap the second is refused because the game
+    already holds $90 -- per-outcome accounting would see only the $40 on
+    `c-yes` and wave it through. The rejection states the figure it used, so
+    the number in the config means the number on screen.
+    """
+    monkeypatch.setenv("ARBYS_MAX_OUTCOME_STAKE", "130")
+    with TestClient(create_app()) as client:
+        _register(client, "eg-scope", "c-yes", "c-no")
+        for oid, px in (("c-yes", "0.40"), ("c-no", "0.50")):
+            client.post(
+                "/quotes",
+                json={"outcome_id": oid, "bid": px, "ask": px, "ask_size": "100"},
+            )
+        first = client.post(
+            "/paper/execute",
+            json={"event_group_id": "eg-scope", "outcome_ids": ["c-yes", "c-no"]},
+        )
+        assert first.status_code == 200, first.text
+
+        second = client.post(
+            "/paper/execute",
+            json={"event_group_id": "eg-scope", "outcome_ids": ["c-yes", "c-no"]},
+        )
+        assert second.status_code == 409, second.text
+        detail = second.json()["detail"]
+        assert "position cap" in detail
+        assert "$130" in detail
+        # Both legs, not the $40.00 sitting on c-yes alone.
+        assert "holds $90.00" in detail

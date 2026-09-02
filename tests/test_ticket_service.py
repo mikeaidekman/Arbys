@@ -83,7 +83,7 @@ async def test_filled_ticket_groups_its_legs():
 
 
 async def test_position_cap_is_enforced_here_not_in_the_endpoint(monkeypatch):
-    monkeypatch.setenv("ARBYS_MAX_OUTCOME_QTY", "1")
+    monkeypatch.setenv("ARBYS_MAX_OUTCOME_STAKE", "1")
     s, _ = await _arb_group()
     opp = s.engine.evaluate_now("eg-1")[0]
     result = await submit_arb_ticket(s, opp, source="auto")

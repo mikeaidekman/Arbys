@@ -229,7 +229,7 @@ Layers, strictly inward-depending:
   both the ticket log and the cap — correctly, since it runs its own
   throwaway brokers with no DB sink, so there is nothing to log and no
   shared position to cap.) It mints the ticket id, enforces
-  `ARBYS_MAX_OUTCOME_QTY`, and writes the `paper_ticket` row. **The cap used
+  `ARBYS_MAX_OUTCOME_STAKE`, and writes the `paper_ticket` row. **The cap used
   to live in the endpoint**, so any non-HTTP caller bypassed it silently and
   stacked without bound; keep it in the service.
 - `arbys/db/` — SQLAlchemy models, repos, Alembic migrations.
@@ -463,15 +463,28 @@ Feature flags in `.env` (copy from `.env.example`; `.env` is gitignored):
   against the 600s default interval. Raise it to trade reliability for latency.
 - `ARBYS_ENABLE_DISCOVERY` / `ARBYS_DISCOVERY_INTERVAL_S` — auto-registration of
   cross-venue games. Needs ingest on to actually stream.
-- `ARBYS_MAX_OUTCOME_QTY` — max open units per outcome per paper account,
-  default 500, `0` disables. An edge stays published while it exists, so
-  without this repeat executions stack without bound.
+- `ARBYS_MAX_OUTCOME_STAKE` — max capital committed to one **event group**
+  per paper account, in dollars of cost basis, default 500, `0` disables.
+  The only *cumulative* control there is: an edge stays published while it
+  exists and the auto-trade cooldown only paces it, so on a persistent edge a
+  fill lands roughly once a minute and an evening slate is hundreds of tickets
+  on one fixture, bounded by nothing but running out of cash.
+
+  Replaced `ARBYS_MAX_OUTCOME_QTY`, a 500-*unit* per-outcome cap from
+  2026-08-08 — written when sizing was a flat 100 contracts and no dollar cap
+  existed, to stop "five clicks putting on five times the intended size".
+  Units were never the quantity anyone reasons about here, and per-outcome was
+  the wrong scope: a matched pair holds two outcomes, so a per-outcome limit
+  bounds the game at a price-dependent multiple of the configured number
+  rather than at the number itself. $500 is roughly what 500 units allowed,
+  since a matched pair costs ~$1.00 all-in per contract whatever the split.
 - `ARBYS_MAX_TICKET_STAKE` — max total capital in one arb ticket, default 250,
   `0` disables. Sizing is depth-driven and one Polymarket US level has shown
   419,882 contracts resting, so without this a single ticket would consume the
-  book. **This does not replace `ARBYS_MAX_OUTCOME_QTY`** — that caps
-  cumulative open units per outcome per account at execute time, this caps one
-  ticket at detection time. At ~$1.00 all-in per contract pair, $250 is ~248
+  book. **This does not replace `ARBYS_MAX_OUTCOME_STAKE`** — that caps
+  cumulative capital in one game at execute time, this caps one ticket at
+  detection time, which is what makes it the legging control: a ticket is the
+  unit that can half-fill. At ~$1.00 all-in per contract pair, $250 is ~248
   contracts, so roughly 2 tickets on one outcome before the position cap
   binds. Both apply. **Raising this tightens the interaction**: a matched pair
   costs ~$1.00 all-in so the two caps stay proportionate, but on a cheap
@@ -1165,7 +1178,7 @@ behind them and are individually switchable.
   stays recoverable from that tape.
 
 It adds no sizing logic. `ARBYS_MAX_TICKET_STAKE` (detection) and
-`ARBYS_MAX_OUTCOME_QTY` (execution) both still bind, and `submit_arb_ticket`
+`ARBYS_MAX_OUTCOME_STAKE` (execution) both still bind, and `submit_arb_ticket`
 stays the authoritative enforcement point for the latter. The service
 *additionally* pre-checks the cap via the shared `cap_breach` and skips
 **silently** when it would bind: opportunities republish on fingerprint change,

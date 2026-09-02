@@ -18,8 +18,8 @@ holds the `QuoteBook`, the three `paper_brokers`, `_opps_by_group`, and the WS
 subscriber queues in ordinary process memory. Nothing is shared out-of-process.
 Two instances means:
 
-- `ARBYS_MAX_OUTCOME_QTY` is enforced against in-memory broker state, so the
-  per-outcome cap silently doubles.
+- `ARBYS_MAX_OUTCOME_STAKE` is enforced against in-memory broker state, so the
+  per-game capital cap silently doubles.
 - Both instances detect the same edge and both execute it.
 
 This is a correctness bug, not a scaling inefficiency. Consequences:
@@ -178,7 +178,7 @@ ARBYS_ENABLE_KALSHI=1
 ARBYS_ENABLE_DRAFTKINGS=0
 ARBYS_ENABLE_DISCOVERY=1
 ARBYS_DISCOVERY_INTERVAL_S=60
-ARBYS_MAX_OUTCOME_QTY=500
+ARBYS_MAX_OUTCOME_STAKE=500
 ARBYS_QUOTE_MAX_AGE_S=600
 KALSHI_API_KEY_ID=...
 KALSHI_PRIVATE_KEY_PATH=/etc/arbys/kalshi.pem

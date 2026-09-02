@@ -704,7 +704,7 @@ async def list_paper_tickets(
     `realized_profit` is computed here rather than stored, from the ticket's
     **own** fills. Broker state cannot answer this: settlement uses an
     `avg_price` blended across every ticket on that outcome, and
-    ARBYS_MAX_OUTCOME_QTY permits roughly 2.5 tickets on one.
+    ARBYS_MAX_OUTCOME_STAKE permits roughly two tickets on one.
 
     `cursor` is the `(submitted_at, id)` of the previous page's last row. The
     id is in the key because `submitted_at` is **not** unique -- the
