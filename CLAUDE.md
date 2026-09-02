@@ -466,14 +466,30 @@ Feature flags in `.env` (copy from `.env.example`; `.env` is gitignored):
 - `ARBYS_MAX_OUTCOME_QTY` — max open units per outcome per paper account,
   default 500, `0` disables. An edge stays published while it exists, so
   without this repeat executions stack without bound.
-- `ARBYS_MAX_TICKET_STAKE` — max total capital in one arb ticket, default 200,
+- `ARBYS_MAX_TICKET_STAKE` — max total capital in one arb ticket, default 250,
   `0` disables. Sizing is depth-driven and one Polymarket US level has shown
   419,882 contracts resting, so without this a single ticket would consume the
   book. **This does not replace `ARBYS_MAX_OUTCOME_QTY`** — that caps
   cumulative open units per outcome per account at execute time, this caps one
-  ticket at detection time. At ~$1.00 all-in per contract pair, $200 is ~198
-  contracts, so roughly 2.5 tickets on one outcome before the position cap
-  binds. Both apply.
+  ticket at detection time. At ~$1.00 all-in per contract pair, $250 is ~248
+  contracts, so roughly 2 tickets on one outcome before the position cap
+  binds. Both apply. **Raising this tightens the interaction**: a matched pair
+  costs ~$1.00 all-in so the two caps stay proportionate, but on a cheap
+  outcome a larger budget buys more contracts and hits the 500-unit position
+  cap sooner — a test that fitted under it at $200 now sizes to 595 units and
+  is refused.
+- `ARBYS_MIN_CONTRACT_QTY` — smallest ticket worth taking, in contracts,
+  default 5, `0` disables. A floor on **size**, not on edge; the latter is an
+  explicit non-goal and this is not it — a fat 5c-per-contract edge on two
+  contracts is still refused. Depth-driven sizing produces genuine dust
+  because contracts are fractional on both venues, and a 0.01-contract ticket
+  carries a full position's bookkeeping to earn a fraction of a cent: 158
+  hosted positions on future games held ~$713 between them, $4.50 each. It
+  also defuses the cooldown interaction, where a half-cent fill starts the
+  same 60s block on a group as a real one. Applied at **detection**, and
+  `/monitored`'s pair search applies the same floor — they must agree, or a
+  pair one filtered and the other ranked leaves a live arb's Fill button
+  disabled.
 - `ARBYS_POLYMARKET_US_POLL_S` — seconds between `/bbo` sweeps, default 5,
   clamped to a 1s floor. This is the **credential-less fallback** path only;
   with credentials set the WebSocket is used instead (see **Venues**).
@@ -1025,6 +1041,62 @@ against a live Kalshi leg.
 - **Opportunities follow the group.** Retiring must call
   `clear_group_opportunities` — unregistering from the engine means no further
   evaluation, so nothing else would ever empty that group's set.
+- **A settled group is never traded again.** `submit_arb_ticket` refuses one
+  outright. Settlement pays the position out and zeroes it exactly once, so a
+  fill *after* that can never settle and its stake is locked for the life of
+  the account. The engine keeps publishing the edge — the market is still
+  quoting — so the refusal has to live at the submission chokepoint rather
+  than in the detector.
+
+## Settlement must not be inferred from prices (2026-09-02)
+
+`auto_settle_service` originally had one signal: an ask pinned at ≥0.99 for
+three polls. Resolution inferred from live prices fails at **both** ends, and
+each end cost real money:
+
+- **Too late, and permanently.** A finished game is delisted, quotes stop, and
+  `QuoteBook.get` withholds them past `ARBYS_QUOTE_MAX_AGE_S` — so
+  `_winning_side` reads `None` forever while discovery retires the group and
+  nothing looks at it again. Measured on the hosted account: **39 of 204 open
+  positions were on games already played, holding ~$2,130 of a $2,883 book**,
+  every one quoting `mark: null`. Tradeable cash had fallen to $1,177 of a
+  $4,000 start.
+- **Too early.** A heavy pre-game favourite sits at 0.99 for days. Locally
+  **908 of 2,013 settlements fired before the game date**, up to 13 days
+  early. Nothing then stopped the still-live market trading again, and those
+  positions could never settle a second time: 274 such fills spent **$3,982**,
+  85% of it buying the expensive leg at 0.90 or better.
+
+Three routes now, in descending order of trust:
+
+1. **`EventGroup.ended`** — Polymarket US publishes it per event, discovery
+   parses it onto `VenueGame`, and `CrossVenueMatch.ended()` resolves it. A
+   statement of fact, so it settles on first sighting with no confirmation
+   delay. **Kept separate from `in_play()`**, which returns `False` for both a
+   finished game and one that has not kicked off; polling does not care which,
+   settlement cares enormously, and reading `in_play is False` as "finished"
+   would settle next week's entire slate.
+2. **Retirement** — discovery dropping a group is the last moment anything
+   knows it existed, so it is settled from the final book on the way out.
+3. **The price heuristic** — retained for venues publishing no lifecycle
+   (Kalshi publishes none), now fenced on both sides.
+
+Two rules make those safe:
+
+- **Nothing settles before kickoff.** `start_time` gates every route. `None`
+  means *unknown* and does not block, or a hand-registered group with no start
+  time would never settle at all.
+- **Routes 1 and 2 read the last known quote, stale included** — a dark market
+  is the case they exist for — at a lower bar (`RESOLVED_ASK_THRESHOLD`, 0.90)
+  than a live book, because the last frame before a delisting is not always
+  the settled price and holding out for 0.99 is what froze positions
+  indefinitely. **If that book names no winner the group is left open and
+  logged**, never settled on a guess: an unsettled position is visible and
+  recoverable, a wrongly settled one silently corrupts the ledger.
+  `unresolved_groups()` answers how many are in that state.
+
+There is no manual settle endpoint, so an unresolved group stays open until a
+quote reappears or the account is reset. Worth building if the count grows.
 
 ## Trade history is ticket-level
 

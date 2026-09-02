@@ -42,6 +42,7 @@ class EngineRuntime:
         on_opportunity: OpportunityHandler | None = None,
         on_opportunities: OpportunitySetHandler | None = None,
         max_ticket_stake: Decimal | None = DEFAULT_MAX_TICKET_STAKE,
+        min_qty: Decimal = Decimal("0"),
         cross_venue_only: bool = True,
     ) -> None:
         self._book = quotebook
@@ -49,6 +50,7 @@ class EngineRuntime:
         self._on_opp = on_opportunity or (lambda _o: None)
         self._on_opps = on_opportunities
         self._max_ticket_stake = max_ticket_stake
+        self._min_qty = min_qty
         self._cross_venue_only = cross_venue_only
         self._groups: dict[str, EventGroup] = {}
         self._outcome_to_groups: dict[str, set[str]] = defaultdict(set)
@@ -86,7 +88,11 @@ class EngineRuntime:
 
         found: list[ArbOpportunity] = []
         cross = detect_cross_venue_two_leg(
-            group, quotes, self._fees, max_ticket_stake=self._max_ticket_stake
+            group,
+            quotes,
+            self._fees,
+            max_ticket_stake=self._max_ticket_stake,
+            min_qty=self._min_qty,
         )
         if cross is not None:
             found.append(cross)
@@ -114,6 +120,7 @@ class EngineRuntime:
                 quotes,
                 self._fees,
                 max_ticket_stake=self._max_ticket_stake,
+                min_qty=self._min_qty,
             )
             if comp is not None:
                 found.append(comp)

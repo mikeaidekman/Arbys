@@ -300,7 +300,7 @@ def max_outcome_qty() -> Decimal | None:
     return None if value <= 0 else value
 
 
-DEFAULT_MAX_TICKET_STAKE = Decimal("200")
+DEFAULT_MAX_TICKET_STAKE = Decimal("250")
 
 
 def max_ticket_stake() -> Decimal | None:
@@ -309,7 +309,7 @@ def max_ticket_stake() -> Decimal | None:
     Sizing is depth-driven, and some books are enormous — a single Polymarket
     US level has shown 419,882 contracts resting. Without a budget cap one
     ticket would consume the whole book. At ~$1.00 all-in per contract pair,
-    the $200 default is roughly 198 contracts.
+    the $250 default is roughly 248 contracts.
 
     This does **not** replace ``ARBYS_MAX_OUTCOME_QTY``: that caps cumulative
     open units per outcome per account and is enforced at execute time in
@@ -325,6 +325,43 @@ def max_ticket_stake() -> Decimal | None:
     except (ArithmeticError, ValueError):
         return DEFAULT_MAX_TICKET_STAKE
     return None if value <= 0 else value
+
+
+DEFAULT_MIN_CONTRACT_QTY = Decimal("5")
+
+
+def min_contract_qty() -> Decimal:
+    """Smallest ticket worth taking, in contracts. ``0`` disables it.
+
+    A floor on *size*, not on edge — the two are different and only one is a
+    non-goal. `ARBYS_MIN_CONTRACT_QTY` refuses a ticket too small to matter
+    whatever its edge; an edge floor would refuse a large ticket for earning
+    too little, which is explicitly not wanted here.
+
+    It exists because depth-driven sizing produces genuine dust. Contracts are
+    fractional on both venues (`DEFAULT_QTY_TICK` is 0.01 precisely because
+    they are), so a thin book yields tickets of 0.01 to 0.10 contracts — worth
+    fractions of a cent, and each one carrying the full operational cost of a
+    real position. Measured on the hosted account 2026-09-02: **158 open
+    positions on future games held ~$713 between them**, an average of $4.50
+    each and many of them under a tenth of a contract. They also interact
+    badly with the auto-trader's cooldown, where a half-cent fill starts the
+    same 60s block on a group as a real one and can mask a genuine edge.
+
+    Applied at *detection*, so a sub-minimum edge is never published — which
+    keeps `detect_cross_venue_two_leg` and `/monitored` describing the same
+    tradeable set. They must agree: the frontend joins a displayed pair to a
+    published opportunity by leg `outcome_id`, so a pair one of them filtered
+    and the other did not leaves a live arb's Fill button disabled.
+    """
+    raw = os.environ.get("ARBYS_MIN_CONTRACT_QTY")
+    if raw is None:
+        return DEFAULT_MIN_CONTRACT_QTY
+    try:
+        value = Decimal(raw)
+    except (ArithmeticError, ValueError):
+        return DEFAULT_MIN_CONTRACT_QTY
+    return Decimal("0") if value <= 0 else value
 
 
 # venue_id -> factory(outcome_ids) -> MarketDataAdapter
@@ -409,6 +446,7 @@ class AppState:
             fees=self.fees,
             on_opportunities=self._set_group_opportunities,
             max_ticket_stake=max_ticket_stake(),
+            min_qty=min_contract_qty(),
             cross_venue_only=cross_venue_only(),
         )
         self.pnl_service = PnlSnapshotService(

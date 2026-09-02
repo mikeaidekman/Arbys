@@ -309,13 +309,17 @@ def test_position_cap_can_be_disabled(monkeypatch):
         assert Decimal(positions["n-yes"]) == Decimal("800")
 
 
-def test_execute_by_event_group_picks_that_group(tmp_path):
+def test_execute_by_event_group_picks_that_group(tmp_path, monkeypatch):
     """Executing by descriptor must fill the named group, not a list position.
 
     The frontend merges websocket-pushed opportunities ahead of REST ones, so
     its array order differs from the server's. Passing a position from that
     array as opportunity_index can fill a different arb than the one shown.
     """
+    # Pinned rather than inherited: this test's worked numbers are
+    # arithmetic on a $200 budget, and it exists to pin *ranking*, not
+    # whatever the shipped default happens to be.
+    monkeypatch.setenv("ARBYS_MAX_TICKET_STAKE", "200")
     with TestClient(create_app()) as client:
         _register(client, "eg-alpha", "a-yes", "a-no")
         _register(client, "eg-beta", "b-yes", "b-no")
@@ -558,7 +562,7 @@ def _register_four_leg_group(client, group_id: str, quotes: list[tuple[str, str,
     return next(g for g in r.json() if g["id"] == group_id)
 
 
-def test_monitored_all_negative_pairs_rank_by_price_not_thinnest_book():
+def test_monitored_all_negative_pairs_rank_by_price_not_thinnest_book(monkeypatch):
     """With every pair net-negative, the best pair is the best *priced* one.
 
     That is the live-market regime, not an edge case: 0 of 175 monitored rows
@@ -574,6 +578,10 @@ def test_monitored_all_negative_pairs_rank_by_price_not_thinnest_book():
 
     Maximising profit picked the 3-deep same-venue pair priced 2.2c worse.
     """
+    # Pinned rather than inherited: this test's worked numbers are
+    # arithmetic on a $200 budget, and it exists to pin *ranking*, not
+    # whatever the shipped default happens to be.
+    monkeypatch.setenv("ARBYS_MAX_TICKET_STAKE", "200")
     with TestClient(create_app()) as client:
         group = _register_four_leg_group(
             client,
@@ -599,7 +607,7 @@ def test_monitored_all_negative_pairs_rank_by_price_not_thinnest_book():
         )
 
 
-def test_monitored_known_empty_pair_never_outranks_real_depth():
+def test_monitored_known_empty_pair_never_outranks_real_depth(monkeypatch):
     """A qty == 0 pair must lose to any pair with real depth.
 
     Reachable in production: a one-sided book keeps its live side and
@@ -620,6 +628,10 @@ def test_monitored_known_empty_pair_never_outranks_real_depth():
         k:YES + k:NO     -- same venue, not a candidate
         p:LONG + p:SHORT -- same venue, not a candidate
     """
+    # Pinned rather than inherited: this test's worked numbers are
+    # arithmetic on a $200 budget, and it exists to pin *ranking*, not
+    # whatever the shipped default happens to be.
+    monkeypatch.setenv("ARBYS_MAX_TICKET_STAKE", "200")
     with TestClient(create_app()) as client:
         group = _register_four_leg_group(
             client,
@@ -640,7 +652,7 @@ def test_monitored_known_empty_pair_never_outranks_real_depth():
         assert Decimal(group["net_edge"]) == Decimal("-0.101342")
 
 
-def test_monitored_positive_pairs_still_rank_by_absolute_profit():
+def test_monitored_positive_pairs_still_rank_by_absolute_profit(monkeypatch):
     """When a pair clears fees, ranking stays net_edge * qty.
 
     This is the invariant the fix must not break: `detect_cross_venue_two_leg`
@@ -654,6 +666,10 @@ def test_monitored_positive_pairs_still_rank_by_absolute_profit():
         k:YES + k:NO     edge 0.068500  qty   2.00  profit 0.1370
         p:LONG + p:SHORT edge 0.065286  qty   2.00  profit 0.1306
     """
+    # Pinned rather than inherited: this test's worked numbers are
+    # arithmetic on a $200 budget, and it exists to pin *ranking*, not
+    # whatever the shipped default happens to be.
+    monkeypatch.setenv("ARBYS_MAX_TICKET_STAKE", "200")
     with TestClient(create_app()) as client:
         group = _register_four_leg_group(
             client,
@@ -871,3 +887,32 @@ def test_health_reports_dropped_writes():
         assert body["status"] == "ok"
         assert body["dropped_writes"] == 0
         assert body["last_dropped_write"] is None
+
+
+def test_a_dust_sized_edge_is_never_published():
+    """`ARBYS_MIN_CONTRACT_QTY` gates at detection, so no dust reaches the tape.
+
+    The book here carries a fat 10c gross edge but only 2 contracts a side.
+    Refusing it is a floor on *size*, not on edge — the distinction matters,
+    because an edge floor is an explicit non-goal. Measured on the hosted
+    account, 158 open positions on future games held ~$713 between them,
+    averaging $4.50 each, many under a tenth of a contract.
+    """
+    with TestClient(create_app()) as client:
+        _register(client, "eg-dust", "p-yes", "k-no")
+        for oid, px in (("p-yes", "0.40"), ("k-no", "0.50")):
+            client.post(
+                "/quotes",
+                json={"outcome_id": oid, "bid": px, "ask": px, "ask_size": "2"},
+            )
+        assert client.get("/opportunities").json() == []
+
+        # The same book, deep enough to clear the floor, still trades.
+        for oid, px in (("p-yes", "0.40"), ("k-no", "0.50")):
+            client.post(
+                "/quotes",
+                json={"outcome_id": oid, "bid": px, "ask": px, "ask_size": "50"},
+            )
+        opps = client.get("/opportunities").json()
+        assert [o["event_group_id"] for o in opps] == ["eg-dust"]
+        assert Decimal(opps[0]["legs"][0]["qty"]) == Decimal("50")

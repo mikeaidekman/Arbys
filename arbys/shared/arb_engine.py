@@ -97,6 +97,7 @@ def detect_cross_venue_two_leg(
     fees: FeeModelRegistry,
     *,
     max_ticket_stake: Decimal | None = None,
+    min_qty: Decimal = Decimal("0"),
     tick_by_venue: dict[str, Decimal] | None = None,
 ) -> ArbOpportunity | None:
     """Detect the most profitable YES-leg + NO-leg cross-venue arb for a group.
@@ -167,7 +168,13 @@ def detect_cross_venue_two_leg(
                 max_stake=max_ticket_stake,
                 tick=tick,
             )
-            if qty <= 0:
+            # A floor on size, not on edge. Depth-driven sizing produces
+            # real dust -- contracts are fractional on both venues -- and a
+            # 0.01-contract ticket costs a full position's bookkeeping to earn
+            # a fraction of a cent. Filtered here rather than downstream so
+            # the edge is never published, keeping this and `/monitored`
+            # describing the same tradeable set.
+            if qty <= 0 or qty < min_qty:
                 continue
 
             y_fee = y_fee_model.fee(price=yq.ask, qty=qty, is_buy=True)
@@ -215,6 +222,7 @@ def detect_complementary_set(
     fees: FeeModelRegistry,
     *,
     max_ticket_stake: Decimal | None = None,
+    min_qty: Decimal = Decimal("0"),
     tick_by_venue: dict[str, Decimal] | None = None,
 ) -> ArbOpportunity | None:
     """Single-venue multi-outcome arb: buy every outcome so exactly one pays 1.
@@ -256,7 +264,7 @@ def detect_complementary_set(
         max_stake=max_ticket_stake,
         tick=tick,
     )
-    if qty <= 0:
+    if qty <= 0 or qty < min_qty:
         return None
 
     total_stake = Decimal("0")

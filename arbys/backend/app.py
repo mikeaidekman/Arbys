@@ -50,7 +50,12 @@ from .schemas import (  # noqa: E402
     QuoteIn,
     TicketPageOut,
 )
-from .state import get_state, max_ticket_stake, reset_state  # noqa: E402
+from .state import (  # noqa: E402
+    get_state,
+    max_ticket_stake,
+    min_contract_qty,
+    reset_state,
+)
 from .ticket_service import submit_arb_ticket, submit_arb_ticket_for_descriptor  # noqa: E402
 
 # Settlement outcomes the ledger can filter on. Validated rather than passed
@@ -113,7 +118,9 @@ class _PairCandidate(NamedTuple):
     no_outcome_id: str
 
 
-def _rank_pairs(candidates: list[_PairCandidate]) -> _PairCandidate | None:
+def _rank_pairs(
+    candidates: list[_PairCandidate], *, min_qty: Decimal = Decimal("0")
+) -> _PairCandidate | None:
     """Pick the pair /monitored should describe. None when there are no pairs.
 
     The objective flips with the sign of the edge, so there are two regimes.
@@ -140,7 +147,13 @@ def _rank_pairs(candidates: list[_PairCandidate]) -> _PairCandidate | None:
     nothing in this regime, so there is no opportunity to disagree with, and
     the row's job is just to state its position honestly.
     """
-    fillable = [c for c in candidates if c.net_edge > 0 and c.qty > 0]
+    # `min_qty` mirrors the detector's size floor. It has to: the frontend
+    # joins a displayed pair to a published opportunity by leg outcome_id, so
+    # ranking a pair the engine filtered out as dust would leave the row's
+    # Fill button disabled with no explanation.
+    fillable = [
+        c for c in candidates if c.net_edge > 0 and c.qty > 0 and c.qty >= min_qty
+    ]
     if fillable:
         return max(fillable, key=lambda c: c.net_edge * c.qty)
     if not candidates:
@@ -474,7 +487,7 @@ def create_app() -> FastAPI:
                         )
                     )
 
-            best = _rank_pairs(candidates)
+            best = _rank_pairs(candidates, min_qty=min_contract_qty())
             net_edge: Decimal | None = None
             max_qty: Decimal | None = None
             net_max_profit: Decimal | None = None

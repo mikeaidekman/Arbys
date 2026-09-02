@@ -6,10 +6,10 @@ from arbys.backend import state as state_module
 from arbys.backend.state import DEFAULT_MAX_TICKET_STAKE, max_ticket_stake
 
 
-def test_default_is_200(monkeypatch):
+def test_default_is_250(monkeypatch):
     monkeypatch.delenv("ARBYS_MAX_TICKET_STAKE", raising=False)
-    assert max_ticket_stake() == Decimal("200")
-    assert Decimal("200") == DEFAULT_MAX_TICKET_STAKE
+    assert max_ticket_stake() == Decimal("250")
+    assert Decimal("250") == DEFAULT_MAX_TICKET_STAKE
 
 
 def test_explicit_value_is_honoured(monkeypatch):
@@ -25,7 +25,7 @@ def test_zero_disables_the_cap(monkeypatch):
 @pytest.mark.parametrize("bad", ["", "abc", "1.2.3"])
 def test_garbage_falls_back_to_default(monkeypatch, bad):
     monkeypatch.setenv("ARBYS_MAX_TICKET_STAKE", bad)
-    assert max_ticket_stake() == Decimal("200")
+    assert max_ticket_stake() == Decimal("250")
 
 
 def test_auto_trade_is_off_by_default(monkeypatch):
@@ -86,3 +86,19 @@ def test_asyncpg_url_normalisation():
 
     # No query string at all is the common local case and must not gain one.
     assert n("postgresql+asyncpg://u:p@h/db") == "postgresql+asyncpg://u:p@h/db"
+
+
+def test_min_contract_qty_defaults_to_five(monkeypatch):
+    monkeypatch.delenv("ARBYS_MIN_CONTRACT_QTY", raising=False)
+    assert state_module.min_contract_qty() == Decimal("5")
+
+
+def test_min_contract_qty_zero_disables_the_floor(monkeypatch):
+    monkeypatch.setenv("ARBYS_MIN_CONTRACT_QTY", "0")
+    assert state_module.min_contract_qty() == Decimal("0")
+
+
+@pytest.mark.parametrize("bad", ["", "abc", "1.2.3"])
+def test_min_contract_qty_garbage_falls_back(monkeypatch, bad):
+    monkeypatch.setenv("ARBYS_MIN_CONTRACT_QTY", bad)
+    assert state_module.min_contract_qty() == Decimal("5")

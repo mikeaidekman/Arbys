@@ -390,3 +390,52 @@ def test_cross_venue_returns_nothing_when_only_one_venue_is_quoted():
         "k_no": _q("k_no", "0.40", ask_size="10"),
     }
     assert detect_cross_venue_two_leg(eg, quotes, {"kals": ZeroFeeModel("kals")}) is None
+
+
+def test_min_qty_refuses_a_dust_ticket():
+    """A floor on size, not on edge.
+
+    Depth-driven sizing produces real dust: contracts are fractional on both
+    venues, so a thin book yields tickets worth fractions of a cent that carry
+    a full position's bookkeeping. The edge here is a fat 5c per contract and
+    is still refused -- which is the distinction from an edge floor, an
+    explicit non-goal.
+    """
+    quotes = {
+        "y": _q("y", "0.45", ask_size="2"),
+        "n": _q("n", "0.50", ask_size="2"),
+    }
+    assert (
+        detect_cross_venue_two_leg(
+            _two_venue_group(), quotes, _fees(),
+            max_ticket_stake=Decimal("200"), min_qty=Decimal("5"),
+        )
+        is None
+    )
+
+
+def test_min_qty_lets_a_real_ticket_through_unchanged():
+    """At or above the floor nothing is resized -- it only gates."""
+    quotes = {
+        "y": _q("y", "0.45", ask_size="7"),
+        "n": _q("n", "0.50", ask_size="7"),
+    }
+    opp = detect_cross_venue_two_leg(
+        _two_venue_group(), quotes, _fees(),
+        max_ticket_stake=Decimal("200"), min_qty=Decimal("5"),
+    )
+    assert opp is not None
+    assert all(leg.qty == Decimal("7") for leg in opp.legs)
+
+
+def test_min_qty_defaults_to_off_in_the_detector():
+    """The floor is policy, injected by state.py -- not baked into the engine."""
+    quotes = {
+        "y": _q("y", "0.45", ask_size="2"),
+        "n": _q("n", "0.50", ask_size="2"),
+    }
+    opp = detect_cross_venue_two_leg(
+        _two_venue_group(), quotes, _fees(), max_ticket_stake=Decimal("200")
+    )
+    assert opp is not None
+    assert all(leg.qty == Decimal("2") for leg in opp.legs)
