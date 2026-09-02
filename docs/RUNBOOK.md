@@ -444,6 +444,30 @@ and clears the auto-trader's cooldowns and the auto-settle memo. It leaves
 event groups and the quote book alone, which is what you want: those are
 rediscovered, not authored.
 
+### Capital that will not come back
+
+If buying power is falling and fills are drying up, the question is not "how
+much cash is left" but **where the deployed capital went**. Compare the two:
+
+```
+/paper/{account_id}            -> position_value, open_ticket_count, balances
+/paper/{account_id}/positions  -> every position, with `mark`
+```
+
+A position whose `mark` is `null` has no live quote — its market is delisted.
+If its game has already been played and it is still held, it did not settle.
+Measured on the hosted account on 2026-09-02, before the settlement rework:
+**39 of 204 positions were on games already finished, holding ~$2,130 of a
+$2,883 book**, with tradeable cash down to $1,177 of a $4,000 start. Bucketing
+positions by the date in the `outcome_id` is the quickest way to see it —
+anything dated before today and still open is the population to look at.
+
+Since the rework those should resolve by themselves, via the venue's `ended`
+flag or on retirement. What can still stick is a group whose final book named
+no winner; the service logs `auto-settle cannot resolve group=...` once per
+group and `unresolved_groups()` counts them. There is no manual settle
+endpoint, so those stay open until a quote reappears or the account is reset.
+
 Note what a reset cannot do. `paper_position.realized_pnl` written before
 2026-08-25 is understated by roughly $132 because lock contention dropped
 `on_position` upserts while every write path swallowed its exception. `run_write`

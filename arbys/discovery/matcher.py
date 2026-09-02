@@ -70,6 +70,29 @@ class CrossVenueMatch:
                 playing = True
         return playing if seen else None
 
+    def ended(self) -> bool | None:
+        """Whether any venue says this event has finished.
+
+        Deliberately separate from ``in_play()``, which returns ``False`` both
+        for a game that is over and for one that has not kicked off. Polling
+        cares only that neither is live; **settlement** cares a great deal,
+        because only one of them has a result. Reading `in_play is False` as
+        "finished" would settle every fixture on next week's slate.
+
+        Same abstention rule as ``in_play()``: a venue that reported nothing
+        is not evidence of anything, so ``None`` means nobody said. Kalshi
+        publishes no live state at all, so a Kalshi-only group always
+        abstains.
+        """
+        seen = False
+        for game in self.per_venue.values():
+            if game.ended is None:
+                continue
+            seen = True
+            if game.ended:
+                return True
+        return False if seen else None
+
     def event_group_id(self) -> str:
         base = f"{self.sport}-{self.team_a.code}-{self.team_b.code}-{self.game_date}"
         if self.market_type != "moneyline":
@@ -244,5 +267,6 @@ def match_to_event_group(match: CrossVenueMatch) -> EventGroup:
         legs=tuple(legs),
         start_time=match.start_time(),
         in_play=match.in_play(),
+        ended=match.ended(),
         source="discovery",
     )

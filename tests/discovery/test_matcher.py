@@ -267,3 +267,48 @@ def test_opposite_anchors_on_the_same_line_do_not_match():
 def test_same_anchor_different_lines_do_not_match():
     """Already true for totals; asserted here for spreads too."""
     assert match_games([_spread("kalshi", "LAD", "-2.5")], [_spread("polymarket_us", "LAD", "-1.5")]) == []
+
+
+def _matched(**per_venue_flags):
+    """One matched MLB game, with per-venue (live, ended) as given."""
+    games = []
+    for venue, (live, ended) in per_venue_flags.items():
+        g = _game(
+            venue,
+            ("LAD", "CHC"),
+            "2026-08-05",
+            {"LAD": f"{venue}-LAD", "CHC": f"{venue}-CHC"},
+        )
+        games.append(replace(g, live=live, ended=ended))
+    kalshi = [g for g in games if g.venue_id == "kalshi"]
+    poly = [g for g in games if g.venue_id == "polymarket_us"]
+    matches = match_games(kalshi, poly)
+    assert len(matches) == 1
+    return matches[0]
+
+
+def test_ended_separates_finished_from_not_yet_started():
+    """`in_play() is False` conflates the two; settlement must not.
+
+    Only one of "over" and "hasn't kicked off" has a result, so reading
+    `in_play is False` as finished would settle next week's whole slate.
+    """
+    finished = _matched(kalshi=(None, None), polymarket_us=(False, True))
+    assert finished.ended() is True
+    assert finished.in_play() is False
+
+    scheduled = _matched(kalshi=(None, None), polymarket_us=(False, False))
+    assert scheduled.ended() is False
+    assert scheduled.in_play() is False
+
+
+def test_ended_abstains_when_no_venue_reports_lifecycle():
+    """Kalshi publishes none, so a Kalshi-only report must stay None."""
+    silent = _matched(kalshi=(None, None), polymarket_us=(None, None))
+    assert silent.ended() is None
+
+
+def test_a_single_venue_reporting_finished_is_enough():
+    """One venue saying `ended` beats another still calling it live."""
+    disagreeing = _matched(kalshi=(True, False), polymarket_us=(False, True))
+    assert disagreeing.ended() is True

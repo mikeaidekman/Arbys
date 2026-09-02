@@ -99,6 +99,19 @@ def _starts_at(state: AppState, event_group_id: str) -> datetime | None:
     return group.start_time if group is not None else None
 
 
+def _is_settled(state: AppState, event_group_id: str) -> bool:
+    """Whether auto-settlement has already paid this group out.
+
+    Read through `getattr` because the service is optional wiring: a few
+    tests build an `AppState` without it, and a missing settler must mean
+    "nothing has been settled" rather than an AttributeError on the trading
+    path. The id may be a synthetic `<group>:<venue>` opportunity id;
+    `is_settled` strips that itself.
+    """
+    settler = getattr(state, "auto_settle_service", None)
+    return settler is not None and settler.is_settled(event_group_id)
+
+
 async def _write_ticket(
     *, ticket_id: str, account_id: str, opp: ArbOpportunity, title: str,
     source: str, status: str, reason: str | None,
@@ -318,6 +331,24 @@ async def submit_arb_ticket(
             await _write_ticket(
                 ticket_id=ticket_id, account_id=account_id, opp=opp, title=title, starts_at=starts_at,
                 source=source, status="rejected", reason=reason, economics=None,
+            )
+        return TicketResult(ticket_id, "rejected", (), reason)
+
+    # A settled group must never be traded again. Settlement pays out the
+    # position and zeroes it; a fill *after* that can never settle a second
+    # time, so its capital is locked for the life of the account. That is not
+    # hypothetical -- the price heuristic used to resolve heavy pre-game
+    # favourites days early, the market stayed live and quoting, and the
+    # engine kept finding real-looking edges in it: on the local ledger 274
+    # such fills spent $3,982, 85% of it buying the expensive leg at 0.90 or
+    # better, and none of it ever came back.
+    if _is_settled(state, opp.event_group_id):
+        reason = f"already_settled:{opp.event_group_id}"
+        if record_nonfill:
+            await _write_ticket(
+                ticket_id=ticket_id, account_id=account_id, opp=opp, title=title,
+                starts_at=starts_at, source=source, status="rejected",
+                reason=reason, economics=None,
             )
         return TicketResult(ticket_id, "rejected", (), reason)
 

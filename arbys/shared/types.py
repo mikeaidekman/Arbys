@@ -122,6 +122,15 @@ class EventGroup:
     # start and finish, so a value rehydrated from the database would be a
     # confident lie, whereas ``None`` correctly means "ask again".
     in_play: bool | None = None
+    # Whether a venue says the real-world event has *finished*. Distinct from
+    # ``in_play is False``, which conflates "not started yet" with "over" --
+    # and settlement needs to tell those apart, since only one of them has a
+    # result. ``None`` means nobody said; Kalshi never does.
+    #
+    # Not persisted, for the same reason as ``in_play``: it flips as games
+    # finish, so a rehydrated value would be a confident lie where ``None``
+    # correctly means "ask again".
+    ended: bool | None = None
     # "discovery" for auto-registered groups, "manual" for hand-registered
     # ones. Discovery retires its own groups when they stop matching; manual
     # groups are never touched.

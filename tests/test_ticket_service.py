@@ -8,6 +8,7 @@ shared path instead.
 from __future__ import annotations
 
 import os
+from dataclasses import replace
 from decimal import Decimal
 from pathlib import Path
 
@@ -92,6 +93,46 @@ async def test_position_cap_is_enforced_here_not_in_the_endpoint(monkeypatch):
     async with session_scope() as session:
         tickets = await repo.list_paper_tickets(session, s.default_account_id)
     assert tickets[0]["status"] == "rejected"
+
+
+async def test_a_settled_group_is_never_traded_again():
+    """Capital bought after settlement can never be paid out.
+
+    Settlement zeroes the position and credits the payout once. A fill after
+    that point locks its stake for the life of the account -- on the local
+    ledger, 274 such fills spent $3,982, 85% of it buying the expensive leg at
+    0.90 or better, and none of it came back. The engine keeps publishing the
+    edge because the market is still quoting, so the refusal has to live at
+    the submission chokepoint.
+    """
+    s, group = await _arb_group()
+    opp = s.engine.evaluate_now("eg-1")[0]
+    await s.auto_settle_service._settle_group(group, True, reason="test")
+    s.auto_settle_service._settled.add(group.id)
+
+    result = await submit_arb_ticket(s, opp, source="auto")
+
+    assert result.status == "rejected"
+    assert result.reason is not None
+    assert result.reason.startswith("already_settled:")
+    assert result.order_ids == ()
+    async with session_scope() as session:
+        tickets = await repo.list_paper_tickets(session, s.default_account_id)
+    assert [t["status"] for t in tickets] == ["rejected"]
+
+
+async def test_the_settled_guard_matches_a_synthetic_intra_venue_id():
+    """`engine_runtime` publishes `<group>:<venue>` for an intra-venue edge."""
+    s, group = await _arb_group()
+    opp = s.engine.evaluate_now("eg-1")[0]
+    s.auto_settle_service._settled.add(group.id)
+    synthetic = replace(opp, event_group_id=f"{group.id}:kalshi")
+
+    result = await submit_arb_ticket(s, synthetic, source="auto")
+
+    assert result.status == "rejected"
+    assert result.reason is not None
+    assert result.reason.startswith("already_settled:")
 
 
 async def test_vanished_edge_writes_a_missed_ticket_and_no_orders():
