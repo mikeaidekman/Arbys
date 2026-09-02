@@ -28,7 +28,32 @@ from sqlalchemy import (
     UniqueConstraint,
     func,
 )
+from sqlalchemy.dialects import sqlite
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column, relationship
+
+# A timestamp that can be used as a keyset-pagination cursor.
+#
+# **SQLite stores DateTime as text and compares it as text**, so two rows only
+# order correctly if they were written in the same format -- and this table has
+# two writers that disagree. `server_default=func.now()` is SQLite's
+# `CURRENT_TIMESTAMP`, which writes whole seconds (`2026-09-02 10:57:34`),
+# while SQLAlchemy's default SQLite DATETIME bind always appends a fraction
+# (`…34.000000`). Compared as text the bare form sorts *before* the fractional
+# one, so a cursor bound by SQLAlchemy looked strictly newer than every
+# `CURRENT_TIMESTAMP` row in its own second and re-served that whole tie group
+# on the next page. Walking four pages of 50 over the local database returned
+# 200 rows of which 196 were distinct.
+#
+# Pinning the SQLite format to whole seconds makes both writers agree. The
+# precision loss is nominal -- `CURRENT_TIMESTAMP`, which writes nearly every
+# row, has only second resolution anyway -- and Postgres is untouched, keeping
+# its real timestamp type and full precision.
+#
+# None of this is visible on Postgres, which is why it had to be caught in a
+# SQLite test: see `test_paging_survives_the_real_write_path`.
+CURSOR_TS = DateTime(timezone=True).with_variant(
+    sqlite.DATETIME(truncate_microseconds=True), "sqlite"
+)
 
 
 def _uuid() -> str:
@@ -282,7 +307,7 @@ class PaperTicket(Base):
     expected_profit: Mapped[Decimal | None] = mapped_column(NUM)
     expected_edge_bps: Mapped[Decimal | None] = mapped_column(NUM)
     submitted_at: Mapped[datetime] = mapped_column(
-        DateTime(timezone=True), nullable=False, server_default=func.now()
+        CURSOR_TS, nullable=False, server_default=func.now()
     )
 
     __table_args__ = (
