@@ -382,7 +382,10 @@ def test_execute_records_a_missed_ticket_when_the_edge_is_gone():
         )
         assert r.status_code == 409
 
-        tickets = client.get("/paper/default/tickets").json()
+        page = client.get("/paper/default/tickets").json()
+        assert page["total"] == 1
+        assert page["next_cursor"] is None
+        tickets = page["items"]
         assert len(tickets) == 1
         assert tickets[0]["status"] == "missed"
         assert tickets[0]["legs"] == []
@@ -706,7 +709,7 @@ def test_tickets_endpoint_groups_legs_and_names_the_event():
             "/paper/execute",
             json={"event_group_id": "eg-tk", "outcome_ids": ["p-yes", "k-no"]},
         )
-        tickets = client.get("/paper/default/tickets").json()
+        tickets = client.get("/paper/default/tickets").json()["items"]
         assert len(tickets) == 1
         assert tickets[0]["status"] == "filled"
         assert tickets[0]["source"] == "manual"

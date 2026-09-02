@@ -129,6 +129,113 @@ export interface Ticket {
   legs: TicketLeg[];
 }
 
+/**
+ * One page of the ledger, plus what it could not show.
+ *
+ * `total` is counted server-side over the same filters as `items`, so the
+ * footer can say "50 of 5,595". The page used to fetch a flat 1000 rows and
+ * say nothing — which at ~1,500 tickets/day was under ten hours of an active
+ * day rendered under a 90-day label.
+ */
+export interface TicketPage {
+  items: Ticket[];
+  total: number;
+  /** Opaque key for the next page. Null at the end of the ledger. */
+  next_cursor: string | null;
+}
+
+export interface RejectionReason {
+  /** A literal reason, or a rolled-up `other (N distinct)` bucket. The tail is
+   *  mostly one-off strings — `edge_no_longer_available` carries the event
+   *  group id — so it is summarised rather than enumerated. */
+  reason: string;
+  count: number;
+}
+
+export interface DimensionRow {
+  name: string;
+  /** Every attempt, rejections included. */
+  tickets: number;
+  /** Null is *unknown*: this dimension had no settled economics. Not zero. */
+  net: string | null;
+  capital: string | null;
+  roi_pct: number | null;
+}
+
+export interface VenueRow {
+  name: string;
+  /** Cost of every filled leg on this venue, settled or not. */
+  deployed: string;
+  /** Payout of the settled legs only. */
+  returned: string;
+  /** `returned` less the cost of *those same* legs — never the full deployed. */
+  net: string;
+  /** Cost still riding on unsettled legs. `deployed = settled cost + open`. */
+  open: string;
+}
+
+export interface EdgeBucket {
+  label: string;
+  count: number;
+}
+
+export interface OutcomeSlice {
+  name: string;
+  count: number;
+  share_pct: number;
+}
+
+export interface AccrualPoint {
+  ts: string;
+  /** Cumulative guaranteed profit from every matched pair up to this point. */
+  total: string;
+  /** The resolved part of `total`. The gap is what is still owed. */
+  settled: string;
+}
+
+/**
+ * Dashboard figures for a window, aggregated server-side.
+ *
+ * Fixed size whatever the ledger holds — that is the point. Every money field
+ * is a decimal string and may be null, meaning *unknown* (nothing in the
+ * window contributed), never zero.
+ */
+export interface Performance {
+  attempted: number;
+  filled: number;
+  by_status: Record<string, number>;
+  rejection_reasons: RejectionReason[];
+  /** Bounds of the data actually in the window, so the UI can say what it
+   *  holds rather than implying a 90-day window contains 90 days. */
+  first_submitted_at: string | null;
+  last_submitted_at: string | null;
+
+  net_profit: string | null;
+  gross_profit: string | null;
+  fees_paid: string;
+  fee_drag_pct: number | null;
+  capital_deployed: string | null;
+  capital_returned: string | null;
+  return_on_capital_pct: number | null;
+  hit_rate_pct: number | null;
+  settled_count: number;
+  won_count: number;
+  open_exposure: string;
+  open_count: number;
+  both_legs_filled_pct: number | null;
+  median_slippage_cents: number | null;
+  mean_edge_cents: number | null;
+
+  edge_buckets: EdgeBucket[];
+  by_league: DimensionRow[];
+  by_market_type: DimensionRow[];
+  by_venue: VenueRow[];
+  outcome_mix: OutcomeSlice[];
+  /** Downsampled to at most 400 points — the chart is 800px wide. */
+  accrual_curve: AccrualPoint[];
+  accrual_total: string;
+}
+
 export interface PaperPosition {
   venue_id: string;
   outcome_id: string;

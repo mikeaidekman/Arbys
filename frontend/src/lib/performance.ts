@@ -14,7 +14,12 @@
  *   so it has no settlement outcome at all — that is `"none"`, and it is not
  *   the same thing as breaking even.
  */
-import type { PnlSnapshot, Ticket, TicketLeg } from "../api/types";
+import type {
+  DimensionRow,
+  Performance,
+  Ticket,
+  TicketLeg,
+} from "../api/types";
 
 /** Settlement axis. Orthogonal to `Ticket.status`, which is the submission axis. */
 export type Outcome = "won" | "lost" | "flat" | "open" | "none";
@@ -351,13 +356,13 @@ export interface MixSlice {
   color: string;
 }
 
-export interface CurvePoint {
+export interface AccrualPointView {
   ts: string;
-  value: number;
+  total: number;
+  settled: number;
 }
 
 export interface Dashboard {
-  rows: LedgerRow[];
   netProfit: number | null;
   /** Settled net BEFORE fees, i.e. netProfit + feesPaid. The pair is what
    *  makes fee drag legible: net alone cannot show what it cost to earn. */
@@ -365,8 +370,8 @@ export interface Dashboard {
   /** Fees on settled tickets only, so it reconciles against netProfit rather
    *  than against a different population. */
   feesPaid: number;
-  /** Fees as a share of gross. Measured at 62% on 2026-08-29 — the dominant
-   *  fact about this strategy and previously not on screen anywhere. */
+  /** Fees as a share of gross. Measured at 62% over the full ledger — the
+   *  dominant fact about this strategy. */
   feeDragPct: number | null;
   capitalDeployed: number | null;
   capitalReturned: number | null;
@@ -386,194 +391,141 @@ export interface Dashboard {
   outcomeMix: MixSlice[];
   bothLegsFilled: number | null;
   medianSlippageCents: number | null;
-  curve: CurvePoint[];
+  /** Submission-side tallies over every ticket in the window, rejections
+   *  included. These are the ~83% of rows that never traded, and they are a
+   *  rate signal rather than ledger entries. */
+  byStatus: Record<string, number>;
+  rejectionReasons: { reason: string; count: number }[];
+  /** Bounds of the data actually present, so the page can state what it holds
+   *  instead of implying a 90-day window contains 90 days. */
+  firstSubmittedAt: string | null;
+  lastSubmittedAt: string | null;
+  /** Cumulative guaranteed value from matched pairs. `total` is the whole
+   *  window's; `curve` is the series, already downsampled by the server. */
+  accrualTotal: number;
+  accrualCurve: AccrualPointView[];
+}
+
+/** Decimal string to number, preserving null as *unknown*. */
+function num(value: string | null): number | null {
+  return value === null ? null : Number(value);
 }
 
 /**
- * Captured-edge buckets, in cents per contract pair.
+ * The shape to render before the aggregate has arrived.
  *
- * Deliberately sub-cent, unlike the 3/5/7/9¢ steps the mockup drew. Both
- * venues charge a fee peaking at 1.75¢ and 1.5¢ per contract at even money,
- * and measured gross divergence between them topped out at 2.75¢ — so a real
- * *net* edge lives well inside the first cent. Cent-wide buckets would put
- * every row this system has ever produced in one bar.
+ * Every money figure is null — *unknown* — rather than zero, so a page that is
+ * still loading never shows "$0.00 net profit" as if it were a measurement.
+ * The counts are genuinely zero: nothing has been counted yet.
  */
-const EDGE_BUCKETS: { label: string; lo: number; hi: number }[] = [
-  { label: "<0.25¢", lo: 0, hi: 0.25 },
-  { label: "0.25–0.5¢", lo: 0.25, hi: 0.5 },
-  { label: "0.5–1¢", lo: 0.5, hi: 1 },
-  { label: "1–2¢", lo: 1, hi: 2 },
-  { label: "2¢+", lo: 2, hi: Infinity },
-];
-
-function median(values: number[]): number | null {
-  if (values.length === 0) return null;
-  const s = [...values].sort((a, b) => a - b);
-  const mid = Math.floor(s.length / 2);
-  return s.length % 2 === 1 ? s[mid] : (s[mid - 1] + s[mid]) / 2;
-}
-
-function groupBy(
-  rows: LedgerRow[],
-  key: (r: LedgerRow) => string,
-): LeagueRow[] {
-  const map = new Map<string, LeagueRow>();
-  for (const r of rows) {
-    const name = key(r);
-    let row = map.get(name);
-    if (row === undefined) {
-      row = { name, net: null, capital: null, tickets: 0, roi: null };
-      map.set(name, row);
-    }
-    row.tickets += 1;
-    row.net = sumOrNull([row.net, r.net]);
-    row.capital = sumOrNull([row.capital, r.capital]);
-  }
-  for (const row of map.values()) {
-    row.roi =
-      row.net !== null && row.capital !== null && row.capital > 0
-        ? (row.net / row.capital) * 100
-        : null;
-  }
-  // Rows with no settled economics sort last rather than as zero — unknown is
-  // not the same as flat.
-  return [...map.values()].sort((a, b) => (b.net ?? -Infinity) - (a.net ?? -Infinity));
-}
-
-export function summarize(
-  tickets: Ticket[],
-  snapshots: PnlSnapshot[],
-  range: RangeOption,
-): Dashboard {
-  const cutoff = rangeCutoff(range);
-  const inRange = (iso: string) => cutoff === null || new Date(iso).getTime() >= cutoff;
-
-  const rows = tickets.filter((t) => inRange(t.submitted_at)).map(toLedgerRow);
-  const traded = rows.filter((r) => r.status === "filled" || r.status === "pending");
-  const settled = rows.filter((r) => r.outcome === "won" || r.outcome === "lost" || r.outcome === "flat");
-  const open = rows.filter((r) => r.outcome === "open");
-
-  const netProfit = sumOrNull(settled.map((r) => r.net));
-  // Settled scope, matching netProfit. Fees on open tickets are real money
-  // already spent, but pairing them with a profit that has not happened yet
-  // would produce a drag figure that reconciles against nothing.
-  const feesPaid = settled.reduce((a, r) => a + r.fees, 0);
-  const grossProfit = netProfit === null ? null : netProfit + feesPaid;
-  const capitalDeployed = sumOrNull(traded.map((r) => r.capital));
-  const capitalReturned = sumOrNull(settled.map((r) => r.returned));
-  const settledCapital = sumOrNull(settled.map((r) => r.capital));
-  const openExposure = open.reduce((a, r) => a + (r.capital ?? 0), 0);
-
-  const venues = new Map<string, VenueRow>();
-  for (const t of tickets) {
-    if (!inRange(t.submitted_at)) continue;
-    for (const leg of t.legs) {
-      const cost = legCost(leg);
-      if (cost === null) continue;
-      let v = venues.get(leg.venue_id);
-      if (v === undefined) {
-        v = {
-          name: leg.venue_id.replace(/_/g, " "),
-          deployed: 0,
-          returned: 0,
-          net: 0,
-          open: 0,
-        };
-        venues.set(leg.venue_id, v);
-      }
-      v.deployed += cost;
-      const back = legReturned(leg);
-      if (back === null) {
-        v.open += cost;
-      } else {
-        v.returned += back;
-        // Net is returned less the cost of the settled legs alone. Netting
-        // against `deployed` would book every open leg as a total loss.
-        v.net += back - cost;
-      }
-    }
-  }
-
-  const edges = rows.map((r) => r.edgeCents).filter((e): e is number => e !== null);
-  const slippage: number[] = [];
-  for (const t of tickets) {
-    if (!inRange(t.submitted_at)) continue;
-    for (const leg of t.legs) {
-      if (leg.fill_price === null) continue;
-      // Buying above the limit is adverse; selling below it is. The sign
-      // convention makes positive mean "worse than asked for" either way.
-      const delta = Number(leg.fill_price) - Number(leg.limit_price);
-      slippage.push((leg.is_buy ? delta : -delta) * 100);
-    }
-  }
-
-  const filledTickets = rows.filter((r) => r.status === "filled");
-  const bothLegs = filledTickets.filter(
-    (r) => r.capital !== null && r.qty !== null,
-  ).length;
-
-  const mixDefs: { name: string; match: (r: LedgerRow) => boolean; color: string }[] = [
-    { name: "Settled won", match: (r) => r.outcome === "won", color: "var(--vt-green)" },
-    { name: "Open", match: (r) => r.outcome === "open", color: "var(--color-accent)" },
-    { name: "Settled lost", match: (r) => r.outcome === "lost", color: "var(--vt-red-dark)" },
-    { name: "Flat", match: (r) => r.outcome === "flat", color: "var(--color-neutral-400)" },
-    // Kept as its own slice on purpose: a ticket that never traded is the
-    // measurement that says whether latency work is worth anything, and
-    // folding it in with a loss would hide it.
-    { name: "Never filled", match: (r) => r.outcome === "none", color: "var(--color-neutral-400)" },
-  ];
-
-  // Equity change from the start of the window: cumulative net P&L including
-  // open marks, which is what the snapshot series actually measures. Derived
-  // from snapshots rather than from the ledger because 30-second snapshots are
-  // dense where tickets are sparse.
-  const scoped = snapshots.filter((s) => inRange(s.ts));
-  const base = scoped.length > 0 ? Number(scoped[0].total_equity) : 0;
-  const curve = scoped.map((s) => ({
-    ts: s.ts,
-    value: Number(s.total_equity) - base,
-  }));
-
+export function emptyDashboard(): Dashboard {
   return {
-    rows,
-    netProfit,
-    grossProfit,
-    feesPaid,
-    feeDragPct:
-      grossProfit !== null && grossProfit > 0 ? (feesPaid / grossProfit) * 100 : null,
-    capitalDeployed,
-    capitalReturned,
-    returnOnCapital:
-      netProfit !== null && settledCapital !== null && settledCapital > 0
-        ? (netProfit / settledCapital) * 100
-        : null,
-    hitRate: settled.length > 0 ? (settled.filter((r) => r.outcome === "won").length / settled.length) * 100 : null,
-    settledCount: settled.length,
-    wonCount: settled.filter((r) => r.outcome === "won").length,
-    openExposure,
-    openCount: open.length,
-    attempted: rows.length,
-    filled: filledTickets.length,
-    meanEdgeCents: edges.length > 0 ? edges.reduce((a, b) => a + b, 0) / edges.length : null,
-    byLeague: groupBy(rows, (r) => r.sport.toUpperCase()),
-    byMarketType: groupBy(rows, (r) => r.marketType),
-    byVenue: [...venues.values()].sort((a, b) => b.deployed - a.deployed),
-    edgeBuckets: EDGE_BUCKETS.map((b) => ({
-      label: b.label,
-      count: edges.filter((e) => e >= b.lo && e < b.hi).length,
+    netProfit: null,
+    grossProfit: null,
+    feesPaid: 0,
+    feeDragPct: null,
+    capitalDeployed: null,
+    capitalReturned: null,
+    returnOnCapital: null,
+    hitRate: null,
+    settledCount: 0,
+    wonCount: 0,
+    openExposure: 0,
+    openCount: 0,
+    attempted: 0,
+    filled: 0,
+    meanEdgeCents: null,
+    byLeague: [],
+    byMarketType: [],
+    byVenue: [],
+    edgeBuckets: [],
+    outcomeMix: [],
+    bothLegsFilled: null,
+    medianSlippageCents: null,
+    byStatus: {},
+    rejectionReasons: [],
+    firstSubmittedAt: null,
+    lastSubmittedAt: null,
+    accrualTotal: 0,
+    accrualCurve: [],
+  };
+}
+
+/** The design system has no profit/loss pair, so these are the terminal's own. */
+const MIX_COLORS: Record<string, string> = {
+  "Settled won": "var(--vt-green)",
+  Open: "var(--color-accent)",
+  "Settled lost": "var(--vt-red-dark)",
+  Flat: "var(--color-neutral-400)",
+  "Never filled": "var(--color-neutral-400)",
+};
+
+/**
+ * Adapt the aggregate the server computed into the page's view model.
+ *
+ * This used to be a `summarize(tickets, ...)` that did the arithmetic here,
+ * over whatever slice of the ledger one request could carry. That slice was
+ * 1000 rows, which at the auto-trader's ~1,500 tickets/day covered **9h38m**
+ * — so `All`, `7D`, `30D` and `90D` all rendered the same morning. The
+ * arithmetic now lives in `arbys/backend/performance.py`, over every ticket in
+ * the window, and this is the rename layer between snake_case JSON and the
+ * camelCase the components read. Keep it dumb: anything that computes belongs
+ * on the server, where it is not bounded by a page size.
+ */
+export function fromPerformance(p: Performance): Dashboard {
+  return {
+    netProfit: num(p.net_profit),
+    grossProfit: num(p.gross_profit),
+    feesPaid: Number(p.fees_paid),
+    feeDragPct: p.fee_drag_pct,
+    capitalDeployed: num(p.capital_deployed),
+    capitalReturned: num(p.capital_returned),
+    returnOnCapital: p.return_on_capital_pct,
+    hitRate: p.hit_rate_pct,
+    settledCount: p.settled_count,
+    wonCount: p.won_count,
+    openExposure: Number(p.open_exposure),
+    openCount: p.open_count,
+    attempted: p.attempted,
+    filled: p.filled,
+    meanEdgeCents: p.mean_edge_cents,
+    byLeague: p.by_league.map(toLeagueRow),
+    byMarketType: p.by_market_type.map(toLeagueRow),
+    byVenue: p.by_venue.map((v) => ({
+      name: v.name,
+      deployed: Number(v.deployed),
+      returned: Number(v.returned),
+      net: Number(v.net),
+      open: Number(v.open),
     })),
-    outcomeMix: mixDefs.map((d) => {
-      const count = rows.filter(d.match).length;
-      return {
-        name: d.name,
-        count,
-        share: rows.length > 0 ? (count / rows.length) * 100 : 0,
-        color: d.color,
-      };
-    }),
-    bothLegsFilled:
-      filledTickets.length > 0 ? (bothLegs / filledTickets.length) * 100 : null,
-    medianSlippageCents: median(slippage),
-    curve,
+    edgeBuckets: p.edge_buckets,
+    outcomeMix: p.outcome_mix.map((o) => ({
+      name: o.name,
+      count: o.count,
+      share: o.share_pct,
+      color: MIX_COLORS[o.name] ?? "var(--color-neutral-400)",
+    })),
+    bothLegsFilled: p.both_legs_filled_pct,
+    medianSlippageCents: p.median_slippage_cents,
+    byStatus: p.by_status,
+    rejectionReasons: p.rejection_reasons,
+    firstSubmittedAt: p.first_submitted_at,
+    lastSubmittedAt: p.last_submitted_at,
+    accrualTotal: Number(p.accrual_total),
+    accrualCurve: p.accrual_curve.map((a) => ({
+      ts: a.ts,
+      total: Number(a.total),
+      settled: Number(a.settled),
+    })),
+  };
+}
+
+function toLeagueRow(r: DimensionRow): LeagueRow {
+  return {
+    name: r.name,
+    tickets: r.tickets,
+    net: num(r.net),
+    capital: num(r.capital),
+    roi: r.roi_pct,
   };
 }

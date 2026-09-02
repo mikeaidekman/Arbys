@@ -22,7 +22,7 @@ Run everything from the repo root with the venv Python — `venv\Scripts\python.
 — rather than a bare `python`.
 
 ```powershell
-venv\Scripts\python.exe -m pytest -q            # 382 tests, must stay green
+venv\Scripts\python.exe -m pytest -q            # 483 tests, must stay green
 venv\Scripts\python.exe -m ruff check .         # must stay clean
 venv\Scripts\python.exe -m mypy arbys           # see caveat below — NOT clean today
 ```
@@ -255,6 +255,22 @@ with Kalshi-NO on the same question.
 - `pytest` runs with `asyncio_mode = "auto"` — async tests need no decorator.
 - Fee models gate whether something is called an arbitrage. Write the test in
   `tests/shared/test_fees.py` **first** when adding one.
+- **SQLite compares datetimes as text, so the storage format is load-bearing.**
+  A column written by *both* `server_default=func.now()` and SQLAlchemy has two
+  formats in one table: `CURRENT_TIMESTAMP` writes whole seconds
+  (`2026-09-02 10:57:34`), SQLAlchemy's SQLite DATETIME bind always appends
+  `.000000`. Compared as text the bare form sorts *before* the fractional one,
+  so a bound cursor looked strictly newer than every `CURRENT_TIMESTAMP` row in
+  its own second. That made keyset pagination re-serve each page's tie group:
+  walking the local ledger four pages of 50 returned 200 rows of which 196 were
+  distinct, and 950 seconds in that database hold more than one ticket.
+  `models.CURSOR_TS` pins the SQLite format to whole seconds so both writers
+  agree; `paper_ticket.submitted_at` uses it. **Postgres is immune** — real
+  timestamp type — so this is a dev-only defect that would otherwise reach
+  production behaviour untested, and
+  `test_paging_survives_the_real_write_path` exists because a test that sets
+  timestamps *through SQLAlchemy* reproduces neither format mismatch nor bug.
+  Any new keyset cursor on a datetime needs the same treatment.
 - SQLite gotcha: autoincrement PKs need
   `BigInteger().with_variant(Integer(), "sqlite")` or inserts fail on a NOT NULL
   constraint. See `Quote` and `PaperPnlSnapshot`.
@@ -298,12 +314,44 @@ Single-page terminal at `/`, with `/admin` and `/account` as secondary routes.
 and neither does `TicketHistory` (the performance dashboard took its place in
 `770c57e`). `AccountStrip` — full-width, above the opportunity table — is what
 survives of it, and it is rendered on the **terminal only**. `/account` has
-its own KPI tile row, fed from the ticket ledger and the positions endpoint
-rather than from the account summary, so the two show overlapping figures from
-different sources and *can* drift. (An earlier version of this note and the
+its own KPI tile row, fed from `GET /paper/{id}/performance` rather than from
+the account summary, so the two show overlapping figures from different
+sources and *can* drift. (An earlier version of this note and the
 component's own docstring both claimed the strip was reused as `/account`'s
 header. Neither was true.) The UI is built on an external design system copied in
 verbatim at `frontend/public/design/industry/styles.css`.
+
+#### `/account` aggregates on the server, and must keep doing so (2026-09-02)
+
+Every figure on the page came from a single `GET /tickets?limit=1000` and was
+summed in `lib/performance.ts`. At the auto-trader's ~1,500 tickets/day that
+1000-row cap covered **9 hours 38 minutes**, so `All`, `7D`, `30D` and `90D`
+rendered the identical slice of one morning, and nothing on screen could tell
+a truncated ledger from a short one. Raising the cap only moves the cliff:
+the ledger grows ~1,500 rows a day.
+
+So the arithmetic lives in `arbys/backend/performance.py` and the page renders
+what it is given. Three rules hold that line:
+
+- **`lib/performance.ts:fromPerformance` is a rename layer, not a
+  calculation.** Anything that computes belongs on the server, where it is not
+  bounded by a page size.
+- **The ledger table pages** (keyset, `?cursor=`), and its footer totals are
+  labelled *this page*. The window's real totals are the KPI tiles.
+- **Filter chips filter server-side** (`?outcome=`). Filtering the fetched
+  rows would show the wins *on the current page*, which is the same quiet lie
+  in a smaller box.
+
+What makes an unbounded window affordable is that **rejections are never
+hydrated**. They are ~83% of rows (5,609 rejected + 560 missed of 7,407 on
+2026-09-02, almost all of them the paper account being out of cash) and they
+have no fills, so one scan of six scalar columns covers them, and only the
+filled and pending subset is joined to its legs — 80ms versus 356ms locally.
+They surface as the "Why tickets did not fill" tally, which is what that
+population is actually good for. Its long tail is rolled up server-side
+because `edge_no_longer_available` embeds the event group id: 852 of 1,011
+distinct reason strings occurred exactly once, and enumerating them was 141KB
+of a 185KB response.
 
 Style via that system's semantic classes (`.btn.btn-primary`, `.tag`, `.table`,
 `.field`, `.input`) and its CSS custom properties

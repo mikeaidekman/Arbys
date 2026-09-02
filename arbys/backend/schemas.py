@@ -178,6 +178,108 @@ class TicketOut(BaseModel):
     legs: list[TicketLegOut]
 
 
+class TicketPageOut(BaseModel):
+    """One page of the ledger, plus what it could not show.
+
+    `total` is counted in SQL over the *same* filters as `items`, so the page
+    can say "50 of 5,595" rather than implying it is the whole ledger. That
+    silence was the defect: the page fetched a flat 1000 rows, which at the
+    auto-trader's rate covered under ten hours, and rendered identical figures
+    for `7D`, `30D`, `90D` and `All` with nothing on screen to say so.
+    """
+
+    items: list[TicketOut]
+    total: int
+    # Opaque `<iso>|<id>` key for the next page, or None at the end of the
+    # ledger. Compound because `submitted_at` is not unique -- the auto-trader
+    # writes bursts inside one second.
+    next_cursor: str | None
+
+
+class RejectionReasonOut(BaseModel):
+    reason: str
+    count: int
+
+
+class DimensionRowOut(BaseModel):
+    name: str
+    tickets: int
+    net: Decimal | None
+    capital: Decimal | None
+    roi_pct: float | None
+
+
+class VenueRowOut(BaseModel):
+    name: str
+    deployed: Decimal
+    returned: Decimal
+    net: Decimal
+    open: Decimal
+
+
+class EdgeBucketOut(BaseModel):
+    label: str
+    count: int
+
+
+class OutcomeSliceOut(BaseModel):
+    name: str
+    count: int
+    share_pct: float
+
+
+class AccrualPointOut(BaseModel):
+    ts: datetime
+    # Cumulative guaranteed profit from every matched pair up to this point.
+    total: Decimal
+    # The part of `total` already resolved. The gap is what is still owed.
+    settled: Decimal
+
+
+class PerformanceOut(BaseModel):
+    """Dashboard figures for a window, aggregated server-side.
+
+    Fixed size whatever the ledger holds -- that is the point. Every money
+    field is `Decimal` and may be None, which means *unknown* (nothing in the
+    window contributed) and never zero.
+    """
+
+    attempted: int
+    filled: int
+    by_status: dict[str, int]
+    rejection_reasons: list[RejectionReasonOut]
+    # Bounds of the window's actual data, so the UI can say what it is really
+    # showing instead of implying a 90-day window holds 90 days.
+    first_submitted_at: datetime | None
+    last_submitted_at: datetime | None
+
+    net_profit: Decimal | None
+    gross_profit: Decimal | None
+    fees_paid: Decimal
+    fee_drag_pct: float | None
+    capital_deployed: Decimal | None
+    capital_returned: Decimal | None
+    return_on_capital_pct: float | None
+    hit_rate_pct: float | None
+    settled_count: int
+    won_count: int
+    open_exposure: Decimal
+    open_count: int
+    both_legs_filled_pct: float | None
+    median_slippage_cents: float | None
+    mean_edge_cents: float | None
+
+    edge_buckets: list[EdgeBucketOut]
+    by_league: list[DimensionRowOut]
+    by_market_type: list[DimensionRowOut]
+    by_venue: list[VenueRowOut]
+    outcome_mix: list[OutcomeSliceOut]
+    # Downsampled to at most 400 points -- the chart is 800px wide, and one
+    # point per ticket is how the raw ledger ended up in the browser.
+    accrual_curve: list[AccrualPointOut]
+    accrual_total: Decimal
+
+
 class PositionOut(BaseModel):
     venue_id: str
     outcome_id: str

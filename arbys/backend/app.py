@@ -2,9 +2,11 @@
 
 from __future__ import annotations
 
+import asyncio
 import logging
 import os
 from contextlib import asynccontextmanager
+from datetime import datetime
 from decimal import Decimal
 from pathlib import Path
 from typing import NamedTuple
@@ -33,6 +35,7 @@ from ..shared.qty import tradeable_qty  # noqa: E402
 from ..shared.types import EventGroup, EventGroupLeg, Quote  # noqa: E402
 from .access import require_access  # noqa: E402
 from .loop_health import monitor as loop_monitor  # noqa: E402
+from .performance import summarize as summarize_performance  # noqa: E402
 from .schemas import (  # noqa: E402
     ArbLegOut,
     ArbOpportunityOut,
@@ -42,12 +45,51 @@ from .schemas import (  # noqa: E402
     MonitoredGroupOut,
     MonitoredLegOut,
     PaperAccountSummary,
+    PerformanceOut,
     PositionOut,
     QuoteIn,
-    TicketOut,
+    TicketPageOut,
 )
 from .state import get_state, max_ticket_stake, reset_state  # noqa: E402
 from .ticket_service import submit_arb_ticket, submit_arb_ticket_for_descriptor  # noqa: E402
+
+# Settlement outcomes the ledger can filter on. Validated rather than passed
+# through, so a typo returns 422 instead of an empty page that looks like a
+# quiet day.
+_LEDGER_OUTCOMES = frozenset({"won", "lost", "flat", "open", "none"})
+
+# Ceiling on one ledger page. The point of paging is that no single request
+# can be asked for the whole table, so the client cannot opt back into the
+# behaviour this replaced by passing a large limit.
+_MAX_PAGE = 500
+
+# Ceiling on tickets hydrated for one performance window. Only filled and
+# pending rows reach it -- roughly 17% of the ledger -- so this is a far
+# larger window than it looks. It exists so a pathological window degrades by
+# understating rather than by stalling the event loop; the response reports
+# `attempted` from a SQL count, which is never truncated.
+_MAX_TRADED = 20_000
+
+
+def _encode_cursor(row: dict) -> str:
+    """`<iso>|<id>` for the row a page ended on."""
+    return f"{row['submitted_at'].isoformat()}|{row['id']}"
+
+
+def _decode_cursor(cursor: str | None) -> tuple[datetime, str] | None:
+    """Parse a page cursor, or 422 if it is malformed.
+
+    Rejected rather than ignored: silently dropping an unreadable cursor
+    restarts the caller at page one, which reads as a loop rather than an
+    error.
+    """
+    if cursor is None:
+        return None
+    raw, _, ticket_id = cursor.rpartition("|")
+    try:
+        return (datetime.fromisoformat(raw), ticket_id)
+    except ValueError:
+        raise HTTPException(status_code=422, detail="malformed cursor") from None
 
 
 class _PairCandidate(NamedTuple):
@@ -534,17 +576,77 @@ def create_app() -> FastAPI:
             open_ticket_count=open_count,
         )
 
-    @app.get("/paper/{account_id}/tickets", response_model=list[TicketOut])
+    @app.get("/paper/{account_id}/tickets", response_model=TicketPageOut)
     async def paper_tickets(
         account_id: str,
-        limit: int = 200,
+        limit: int = 100,
         status: str | None = None,
         source: str | None = None,
-    ) -> list[dict]:
-        async with session_scope() as session:
-            return await repo.list_paper_tickets(
-                session, account_id, limit=limit, status=status, source=source
+        since: datetime | None = None,
+        outcome: str | None = None,
+        cursor: str | None = None,
+    ) -> dict:
+        """One page of the ledger, newest first, with its true total.
+
+        Paged rather than capped. The previous shape returned a flat slice and
+        said nothing about what it left out, so the account page rendered
+        under ten hours of an active day while offering a 90-day selector.
+        `total` is counted over the same filters, so the page footer can be
+        honest about the remainder.
+        """
+        if outcome is not None and outcome not in _LEDGER_OUTCOMES:
+            raise HTTPException(
+                status_code=422,
+                detail=f"outcome must be one of {sorted(_LEDGER_OUTCOMES)}",
             )
+        limit = max(1, min(limit, _MAX_PAGE))
+        async with session_scope() as session:
+            items = await repo.list_paper_tickets(
+                session, account_id, limit=limit, status=status, source=source,
+                since=since, outcome=outcome, cursor=_decode_cursor(cursor),
+            )
+            total = await repo.count_paper_tickets(
+                session, account_id, since=since, status=status, source=source,
+                outcome=outcome,
+            )
+        # A short page is the last page. Only a full one can have a successor,
+        # and paying for a lookahead row to prove it is not worth the query.
+        next_cursor = (
+            _encode_cursor(items[-1]) if len(items) == limit else None
+        )
+        return {"items": items, "total": total, "next_cursor": next_cursor}
+
+    @app.get("/paper/{account_id}/performance", response_model=PerformanceOut)
+    async def paper_performance(
+        account_id: str,
+        since: datetime | None = None,
+        source: str | None = None,
+    ) -> dict:
+        """Dashboard figures for a window, over every ticket in it.
+
+        Fixed-size response whatever the ledger holds, which is what lets `All`
+        actually mean all. Two reads feed it and the split is deliberate: one
+        scan of six scalar columns covers every ticket including the ~83% that
+        never traded, and only the filled and pending subset is hydrated with
+        its legs.
+        """
+        async with session_scope() as session:
+            scalars = await repo.paper_ticket_scalars(
+                session, account_id, since=since, source=source
+            )
+            traded = await repo.list_paper_tickets(
+                session, account_id, limit=_MAX_TRADED, since=since,
+                source=source, status=repo.TRADED_STATUSES,
+            )
+        # Decimal arithmetic over every traded ticket, off the event loop. A
+        # handler that never awaits holds it for its whole duration, and
+        # `list_monitored` is the standing lesson here: 23.9s on a throttled
+        # core tripped the 6s in-play dark threshold and set the Polymarket
+        # shards rebuilding. Quote freshness is the safety argument for this
+        # system, so no report may compete with it.
+        return await asyncio.to_thread(
+            summarize_performance, scalars=scalars, traded=traded
+        )
 
     @app.get("/paper/{account_id}/positions", response_model=list[PositionOut])
     async def paper_positions(account_id: str) -> list[PositionOut]:

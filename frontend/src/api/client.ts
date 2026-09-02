@@ -5,8 +5,9 @@ import type {
   PaperAccountSummary,
   PaperOrder,
   PaperPosition,
+  Performance,
   PnlSnapshot,
-  Ticket,
+  TicketPage,
 } from "./types";
 
 const BASE = "/api";
@@ -68,15 +69,40 @@ export const api = {
     req<PnlSnapshot[]>(`/paper/${account_id}/pnl-snapshots?limit=${limit}`),
   paperReset: (account_id: string) =>
     req<PaperAccountSummary>(`/paper/${account_id}/reset`, { method: "POST" }),
+  /**
+   * One page of the ledger, newest first.
+   *
+   * Paged rather than capped: pass `cursor` from the previous page's
+   * `next_cursor` to continue. `since` is an ISO instant — the client owns the
+   * range because "Today" means the viewer's local midnight, which the server
+   * cannot know.
+   */
   paperTickets: (
     account_id: string,
-    opts: { limit?: number; status?: string; source?: string } = {},
+    opts: {
+      limit?: number;
+      status?: string;
+      source?: string;
+      since?: string | null;
+      outcome?: string | null;
+      cursor?: string | null;
+    } = {},
   ) => {
     const q = new URLSearchParams();
-    q.set("limit", String(opts.limit ?? 200));
+    q.set("limit", String(opts.limit ?? 100));
     if (opts.status) q.set("status", opts.status);
     if (opts.source) q.set("source", opts.source);
-    return req<Ticket[]>(`/paper/${account_id}/tickets?${q.toString()}`);
+    if (opts.since) q.set("since", opts.since);
+    if (opts.outcome) q.set("outcome", opts.outcome);
+    if (opts.cursor) q.set("cursor", opts.cursor);
+    return req<TicketPage>(`/paper/${account_id}/tickets?${q.toString()}`);
+  },
+
+  /** Dashboard figures over every ticket in the window, aggregated server-side. */
+  paperPerformance: (account_id: string, since?: string | null) => {
+    const q = new URLSearchParams();
+    if (since) q.set("since", since);
+    return req<Performance>(`/paper/${account_id}/performance?${q.toString()}`);
   },
   paperPositions: (account_id: string) =>
     req<PaperPosition[]>(`/paper/${account_id}/positions`),

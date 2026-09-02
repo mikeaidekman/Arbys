@@ -295,10 +295,34 @@ execution, implement `ExecutionAdapter` for the venue, then swap it into
 
 Every submission attempt — `POST /paper/execute` today, the auto-trader
 later — goes through `submit_arb_ticket` and writes one `paper_ticket` row.
-Read the log with `GET /paper/{account_id}/tickets` (`?status=` and
-`?source=` filter it). This is the only place "the bot tried and failed" is
-distinguishable from "the bot never saw an edge" — a detector run that finds
-nothing writes no row at all.
+This is the only place "the bot tried and failed" is distinguishable from
+"the bot never saw an edge" — a detector run that finds nothing writes no row
+at all.
+
+Two endpoints read it, and which one you want depends on whether you are
+after rows or figures:
+
+- **`GET /paper/{account_id}/tickets`** — one page of rows, newest first.
+  Returns `{items, total, next_cursor}`; pass `next_cursor` back as `?cursor=`
+  for the following page. Filters: `?status=`, `?source=`, `?since=<iso>`, and
+  `?outcome=` (`won`/`lost`/`flat`/`open`/`none`, the *settlement* axis).
+  `total` is counted over the same filters, so it tells you what the page left
+  out. Page size is capped at 500.
+- **`GET /paper/{account_id}/performance`** — the aggregate the account page
+  renders, over **every** ticket in the window (`?since=<iso>`). Fixed-size
+  response whatever the ledger holds.
+
+The account page used to build its figures from a flat 1000-row fetch, which
+at the auto-trader's ~1,500 tickets/day covered **9h38m** — so `All`, `7D`,
+`30D` and `90D` all rendered the same slice of one morning with nothing on
+screen saying so. Anything that needs a total should ask for one, not count
+rows it happened to receive.
+
+Note the cost: `/performance` reads every ticket in the window and takes
+0.5–0.9s over a 7.4k-row ledger locally, growing with the table. The page
+polls it once a minute for that reason. If it ever gets slow enough to matter,
+watch `loop_lag` in `/health` — see **Hosting** in CLAUDE.md for why that
+number is a correctness signal and not just a speed one.
 
 A ticket's `status` is one of three terminal values:
 

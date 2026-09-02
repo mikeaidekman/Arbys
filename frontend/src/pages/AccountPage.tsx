@@ -1,13 +1,20 @@
 import { useState } from "react";
-import { useQuery } from "@tanstack/react-query";
+import { keepPreviousData, useQuery } from "@tanstack/react-query";
 import { api } from "../api/client";
-import type { PaperAccountSummary, PnlSnapshot, Ticket } from "../api/types";
+import type {
+  PaperAccountSummary,
+  Performance,
+  TicketPage,
+} from "../api/types";
 import { Logo } from "../components/Logo";
 import {
   RANGES,
+  emptyDashboard,
+  fromPerformance,
+  rangeCutoff,
   settlementBuckets,
-  summarize,
   toLedgerRow,
+  type AccrualPointView,
   type Dashboard,
   type LedgerRow,
   type Outcome,
@@ -16,8 +23,37 @@ import {
 
 const ACCOUNT = "default";
 
-/** Well above the 200 default: a 90-day window must not silently truncate. */
-const TICKET_LIMIT = 1000;
+/**
+ * Rows per ledger page.
+ *
+ * There is no "fetch the whole ledger" mode any more, and that is the fix. The
+ * page used to ask for a flat 1000 tickets and render whatever came back as if
+ * it were everything — at the auto-trader's ~1,500/day that was **9h38m** of
+ * one morning shown under an `All` label. Figures now come from the aggregate
+ * endpoint, which covers every ticket in the window; this table is for reading
+ * individual rows, and 50 is what fits on a screen.
+ */
+const PAGE_SIZE = 50;
+
+/**
+ * Cap on the unsettled tickets fetched for the settlement calendar.
+ *
+ * Bounded because it is deliberately *not* windowed — a ticket is owed to you
+ * or it is not, regardless of which range is selected. The population is small
+ * and self-limiting (37 open against 7,407 total on 2026-09-02) because
+ * everything here settles within days, but the calendar states its own total
+ * so a truncation would be visible rather than silent.
+ */
+const OPEN_LIMIT = 500;
+
+/** Ledger filter chip -> the settlement outcome the server filters on. */
+const FILTER_OUTCOME: Record<string, string | null> = {
+  All: null,
+  Open: "open",
+  Won: "won",
+  Lost: "lost",
+  "Never filled": "none",
+};
 
 function amount(n: number | null, opts: { sign?: boolean } = {}): string {
   if (n === null) return "—";
@@ -103,14 +139,56 @@ function Empty({ children }: { children: React.ReactNode }) {
 }
 
 /**
- * Cumulative net P&L over the window.
+ * Ledger pager.
  *
- * Plots equity change from the first snapshot in range, so it includes open
- * marks — which is what the snapshot series measures and what the "net profit"
- * tile above it reports. Unlike the artboard's version this handles a negative
- * excursion: an arb book can and does dip, and a chart that assumes monotonic
- * profit would clip the dip rather than draw it.
+ * Keyset, not offset: pages are cut on `(submitted_at, id)`, so a ticket
+ * written while you are reading page 3 cannot shuffle a row you have already
+ * seen onto page 4. There is no page count because computing one means a
+ * second `COUNT` per click for a number the footer already gives as a total.
  */
+function Pager({
+  page,
+  hasNext,
+  busy,
+  onPrev,
+  onNext,
+}: {
+  page: number;
+  hasNext: boolean;
+  busy: boolean;
+  onPrev: () => void;
+  onNext: () => void;
+}) {
+  if (page === 0 && !hasNext) return null;
+  return (
+    <div
+      style={{
+        display: "flex",
+        alignItems: "center",
+        gap: "var(--space-3)",
+        marginTop: "var(--space-3)",
+      }}
+    >
+      <button
+        type="button"
+        className="btn"
+        disabled={page === 0 || busy}
+        onClick={onPrev}
+      >
+        ← Newer
+      </button>
+      <button type="button" className="btn" disabled={!hasNext || busy} onClick={onNext}>
+        Older →
+      </button>
+      <span className="vt-mono" style={{ fontSize: 11, opacity: 0.5 }}>
+        page {page + 1}
+        {busy ? " · loading…" : ""}
+      </span>
+    </div>
+  );
+}
+
+/** A single horizontal magnitude bar, shared by every breakdown panel. */
 function Bar({ value, max, color }: { value: number | null; max: number; color: string }) {
   const width = value === null || max <= 0 ? 0 : (Math.abs(value) / max) * 100;
   return (
@@ -123,6 +201,62 @@ function Bar({ value, max, color }: { value: number | null; max: number; color: 
           background: color,
         }}
       />
+    </div>
+  );
+}
+
+/**
+ * Why tickets did not trade, counted rather than scrolled.
+ *
+ * Rejections are the majority of the ledger — 5,609 of 7,407 rows on
+ * 2026-09-02, of which most are the paper account being out of money — and as
+ * individual rows they are noise that buries the fills. As a tally they answer
+ * the one question they are good for: is the bot being stopped by the market,
+ * by its own caps, or by running out of cash?
+ *
+ * The list is capped server-side with the tail rolled into `other`, because
+ * `edge_no_longer_available` carries the event group id and `stale_leg_skew`
+ * carries each leg's age — 852 of the 1,011 distinct strings occurred exactly
+ * once. The counts still sum to the rejected and missed totals.
+ */
+function WhyNotFilled({ d }: { d: Dashboard }) {
+  const notFilled = (d.byStatus.rejected ?? 0) + (d.byStatus.missed ?? 0);
+  const max = Math.max(...d.rejectionReasons.map((r) => r.count), 1);
+  return (
+    <div className="vt-panel">
+      <div className="vt-lab">Why tickets did not fill</div>
+      {d.rejectionReasons.length === 0 ? (
+        <Empty>Nothing was rejected in this window.</Empty>
+      ) : (
+        <div style={{ display: "flex", flexDirection: "column", gap: "var(--space-3)" }}>
+          {d.rejectionReasons.map((r) => (
+            <div key={r.reason} style={{ display: "flex", flexDirection: "column", gap: 4 }}>
+              <div style={{ display: "flex", justifyContent: "space-between", fontSize: 12 }}>
+                <span
+                  className="vt-mono"
+                  style={{
+                    overflow: "hidden",
+                    textOverflow: "ellipsis",
+                    whiteSpace: "nowrap",
+                  }}
+                  title={r.reason}
+                >
+                  {r.reason}
+                </span>
+                <span className="vt-mono" style={{ opacity: 0.75, paddingLeft: 8 }}>
+                  {r.count.toLocaleString()}
+                </span>
+              </div>
+              <Bar value={r.count} max={max} color="var(--color-neutral-400)" />
+            </div>
+          ))}
+        </div>
+      )}
+      <div style={{ fontSize: 11, opacity: 0.55, marginTop: "auto" }}>
+        {notFilled.toLocaleString()} ticket{notFilled === 1 ? "" : "s"} never traded in
+        this window. `insufficient_funds` is the paper account being out of cash, not
+        the market refusing the trade.
+      </div>
     </div>
   );
 }
@@ -185,26 +319,74 @@ const OUTCOME_TAG: Record<Outcome, string> = {
   none: "tag-neutral",
 };
 
-const FILTERS: { key: string; match: (r: LedgerRow) => boolean }[] = [
-  { key: "All", match: () => true },
-  { key: "Open", match: (r) => r.outcome === "open" },
-  { key: "Won", match: (r) => r.outcome === "won" },
-  { key: "Lost", match: (r) => r.outcome === "lost" },
-  { key: "Never filled", match: (r) => r.outcome === "none" },
-];
+// Chip order. The predicates that used to live here moved to the server (see
+// FILTER_OUTCOME): filtering client-side would filter only the rows this page
+// happens to hold, so "Won" would show the wins *on page 3* rather than the
+// wins in the window.
+const FILTERS = ["All", "Open", "Won", "Lost", "Never filled"];
 
 export function AccountPage() {
   const [range, setRange] = useState<string>(RANGES[0].key);
   const [filter, setFilter] = useState<string>("All");
+  // Cursor stack, one entry per page visited. Index 0 is null — the first
+  // page. Keyset paging can only step forward, so "back" means returning to a
+  // cursor already held rather than computing one.
+  const [cursors, setCursors] = useState<(string | null)[]>([null]);
+  const [page, setPage] = useState(0);
 
-  const tickets = useQuery<Ticket[]>({
-    queryKey: ["paper", "tickets", ACCOUNT, "performance"],
-    queryFn: () => api.paperTickets(ACCOUNT, { limit: TICKET_LIMIT }),
+  // Changing the window or the filter changes the population, so every cursor
+  // held for the old one now points into a different result set. Reset with
+  // the selection rather than in an effect, so there is never a render where
+  // a stale cursor is paired with a fresh filter.
+  const resetPaging = () => {
+    setCursors([null]);
+    setPage(0);
+  };
+  const chooseRange = (key: string) => {
+    setRange(key);
+    resetPaging();
+  };
+  const chooseFilter = (key: string) => {
+    setFilter(key);
+    resetPaging();
+  };
+
+  const rangeOption = RANGES.find((r) => r.key === range) ?? RANGES[0];
+  // The client owns the cutoff because "Today" means the *viewer's* local
+  // midnight, which the server cannot know. Everything downstream of here is
+  // scoped by this one instant.
+  const cutoff = rangeCutoff(rangeOption);
+  const since = cutoff === null ? null : new Date(cutoff).toISOString();
+  const outcome = FILTER_OUTCOME[filter] ?? null;
+  const cursor = cursors[page] ?? null;
+
+  const perf = useQuery<Performance>({
+    queryKey: ["paper", "performance", ACCOUNT, since],
+    queryFn: () => api.paperPerformance(ACCOUNT, since),
+    // Slower than the ledger on purpose. This reads every ticket in the window
+    // — 0.5–0.9s over the full 7.4k-row ledger locally, and it grows with the
+    // table — while a window summary barely moves between polls. The Fly notes
+    // are the reason to care: sub-second quote freshness is the safety
+    // argument for this system, and a reporting query must not compete with
+    // it. See `loop_lag` in /health after changing this.
+    refetchInterval: 60_000,
+  });
+  const ledger = useQuery<TicketPage>({
+    queryKey: ["paper", "ledger", ACCOUNT, since, outcome, cursor],
+    queryFn: () =>
+      api.paperTickets(ACCOUNT, { since, outcome, cursor, limit: PAGE_SIZE }),
+    // Hold the previous page while the next one loads. Without it the table
+    // empties on every click, which reads as "no rows" rather than "loading".
+    placeholderData: keepPreviousData,
     refetchInterval: 15_000,
   });
-  const pnl = useQuery<PnlSnapshot[]>({
-    queryKey: ["paper", "pnl", ACCOUNT, "performance"],
-    queryFn: () => api.paperPnl(ACCOUNT, 1000),
+  // Unsettled tickets, deliberately NOT windowed by `range` — a ticket is
+  // awaiting settlement now or it is not, and one submitted before the window
+  // opened is still owed to you. `outcome=open` is exactly the old
+  // `status === "filled" && net === null`, evaluated server-side.
+  const openTickets = useQuery<TicketPage>({
+    queryKey: ["paper", "open", ACCOUNT],
+    queryFn: () => api.paperTickets(ACCOUNT, { outcome: "open", limit: OPEN_LIMIT }),
     refetchInterval: 30_000,
   });
   // Balances only — the rest of this page is computed from the ticket ledger.
@@ -215,14 +397,19 @@ export function AccountPage() {
     refetchInterval: 15_000,
   });
 
-  const rangeOption = RANGES.find((r) => r.key === range) ?? RANGES[0];
-  // Snapshots arrive newest-first; the curve reads left to right.
-  const snapshots = [...(pnl.data ?? [])].reverse();
-  const d = summarize(tickets.data ?? [], snapshots, rangeOption);
+  const d = perf.data ? fromPerformance(perf.data) : emptyDashboard();
 
-  const shown = d.rows.filter(
-    (r) => FILTERS.find((f) => f.key === filter)?.match(r) ?? true,
-  );
+  // One page of rows. Filtering is server-side now: doing it here would filter
+  // only what this page happens to hold, which is the same class of quiet lie
+  // the row cap was.
+  const shown = (ledger.data?.items ?? []).map(toLedgerRow);
+  const ledgerTotal = ledger.data?.total ?? 0;
+  const hasNext = (ledger.data?.next_cursor ?? null) !== null;
+  const firstRow = ledgerTotal === 0 ? 0 : page * PAGE_SIZE + 1;
+  const lastRow = page * PAGE_SIZE + shown.length;
+
+  // Page-scoped, and labelled as such in the footer. The window's real totals
+  // are the KPI tiles above, which come from the aggregate over every ticket.
   // Null qty means the ticket has no legs — a miss or a pre-execution
   // rejection never traded — so it contributes 0 contracts rather than making
   // the total unknown. Same reasoning as capital below.
@@ -233,17 +420,11 @@ export function AccountPage() {
     ? shown.reduce((a, r) => a + (r.net ?? 0), 0)
     : null;
 
-  // Deliberately NOT windowed by `range`, unlike every other tile in the row.
-  // A ticket is awaiting settlement now or it is not; asking what was pending
-  // "in the last 7 days" has no meaning, and a ticket submitted before the
-  // window opened is still owed to you.
-  //
   // Computed from the ticket ledger rather than the positions endpoint, which
   // this page no longer queries at all. Positions are marked at mid, and a mark
   // is noise on a hedged book: the pair settles for $1 whoever wins, so the
   // profit was fixed at fill time and no quote can change it.
-  const allRows = (tickets.data ?? []).map(toLedgerRow);
-  const pendingRows = allRows.filter((r) => r.status === "filled" && r.net === null);
+  const pendingRows = (openTickets.data?.items ?? []).map(toLedgerRow);
   const hedged = pendingRows.filter((r) => r.settlementValue !== null);
   // Legged: one side filled, the other not, or the two filled at different
   // sizes. It has no guaranteed payout, so it is excluded from every total on
@@ -256,14 +437,12 @@ export function AccountPage() {
     : null;
   const pendingContracts = hedged.reduce((a, r) => a + (r.qty ?? 0), 0);
   const buckets = settlementBuckets(pendingRows);
-  // Windowed, unlike the tiles above: this is the header for the accrual chart
-  // and must agree with what the chart actually draws.
-  const accrual = {
-    total: d.rows.reduce((a, r) => a + (r.settlementValue ?? 0), 0),
-  };
+  // Truncation here would understate what is owed, so say so rather than
+  // quietly showing a short calendar.
+  const openTruncated = (openTickets.data?.total ?? 0) > pendingRows.length;
 
   const maxBucket = Math.max(...d.edgeBuckets.map((b) => b.count), 1);
-  const loading = tickets.isLoading || pnl.isLoading;
+  const loading = perf.isLoading;
 
   return (
     <div
@@ -308,7 +487,7 @@ export function AccountPage() {
               animation: "vt-pulse 1.6s ease-in-out infinite",
             }}
           />
-          {tickets.isFetching || pnl.isFetching ? "refreshing" : "live"}
+          {perf.isFetching || ledger.isFetching ? "refreshing" : "live"}
         </span>
       </nav>
 
@@ -343,7 +522,7 @@ export function AccountPage() {
                 key={r.key}
                 type="button"
                 className={`vt-tab ${range === r.key ? "vt-tab-on" : ""}`}
-                onClick={() => setRange(r.key)}
+                onClick={() => chooseRange(r.key)}
               >
                 {r.key}
               </button>
@@ -351,10 +530,12 @@ export function AccountPage() {
           </div>
         </div>
 
-        {tickets.isError ? (
+        {perf.isError || ledger.isError ? (
           <div style={{ fontSize: 12, color: "var(--vt-red-dark)" }}>
             Couldn't load tickets
-            {tickets.error instanceof Error ? `: ${tickets.error.message}` : "."}
+            {(perf.error ?? ledger.error) instanceof Error
+              ? `: ${((perf.error ?? ledger.error) as Error).message}`
+              : "."}
           </div>
         ) : null}
 
@@ -436,10 +617,10 @@ export function AccountPage() {
               </span>
               <span style={{ flex: 1 }} />
               <span className="vt-mono" style={{ fontSize: 13, color: "var(--vt-green)" }}>
-                {accrual.total > 0 ? `${amount(accrual.total, { sign: true })} earned` : ""}
+                {d.accrualTotal > 0 ? `${amount(d.accrualTotal, { sign: true })} earned` : ""}
               </span>
             </div>
-            <AccrualCurve rows={d.rows} />
+            <AccrualCurve points={d.accrualCurve} />
             <div style={{ fontSize: 11, opacity: 0.5 }}>
               Contracts less capital, fixed at fill time and unable to move with
               quotes. Solid is settled, hatched is certain but not yet paid.
@@ -585,7 +766,7 @@ export function AccountPage() {
 
           <div className="vt-panel">
             <div className="vt-lab">Outcome mix</div>
-            {d.rows.length === 0 ? (
+            {d.attempted === 0 ? (
               <Empty>No tickets in this window.</Empty>
             ) : (
               <div
@@ -599,7 +780,7 @@ export function AccountPage() {
                         {o.count} · {o.share.toFixed(0)}%
                       </span>
                     </div>
-                    <Bar value={o.count} max={d.rows.length} color={o.color} />
+                    <Bar value={o.count} max={d.attempted} color={o.color} />
                   </div>
                 ))}
               </div>
@@ -610,6 +791,8 @@ export function AccountPage() {
               whether latency work would pay.
             </div>
           </div>
+
+          <WhyNotFilled d={d} />
         </div>
 
         <div className="vt-panel">
@@ -622,16 +805,24 @@ export function AccountPage() {
             }}
           >
             <div className="vt-lab">Trade ledger</div>
+            {/* The count the page could never state before. `total` is
+                counted server-side over the same filters as the rows, so this
+                is the whole matching population, not the page. */}
+            <span className="vt-mono" style={{ fontSize: 11, opacity: 0.6 }}>
+              {ledgerTotal === 0
+                ? "no tickets"
+                : `${firstRow.toLocaleString()}–${lastRow.toLocaleString()} of ${ledgerTotal.toLocaleString()}`}
+            </span>
             <span style={{ flex: 1 }} />
             <div style={{ display: "flex", gap: 2 }}>
               {FILTERS.map((f) => (
                 <button
-                  key={f.key}
+                  key={f}
                   type="button"
-                  className={`vt-tab ${filter === f.key ? "vt-tab-on" : ""}`}
-                  onClick={() => setFilter(f.key)}
+                  className={`vt-tab ${filter === f ? "vt-tab-on" : ""}`}
+                  onClick={() => chooseFilter(f)}
                 >
-                  {f.key}
+                  {f}
                 </button>
               ))}
             </div>
@@ -725,8 +916,14 @@ export function AccountPage() {
               {shown.length > 0 ? (
                 <tfoot>
                   <tr style={{ borderTop: "2px solid var(--color-divider)" }}>
+                    {/* Scoped to this page, and said so. The window's real
+                        totals are the KPI tiles, which come from the
+                        aggregate over every ticket — summing a page and
+                        labelling it "Totals" is what made the old figures
+                        wrong without looking wrong. */}
                     <td colSpan={5} className="vt-lab">
-                      Totals · {shown.length} ticket{shown.length === 1 ? "" : "s"} shown
+                      This page · {shown.length} of {ledgerTotal.toLocaleString()}{" "}
+                      ticket{ledgerTotal === 1 ? "" : "s"}
                     </td>
                     <td className="vt-mono" style={{ textAlign: "right", fontWeight: 600 }}>
                       {shownQty.toFixed(2)}
@@ -761,6 +958,21 @@ export function AccountPage() {
               ) : null}
             </table>
           </div>
+          <Pager
+            page={page}
+            hasNext={hasNext}
+            busy={ledger.isFetching}
+            onPrev={() => setPage((p) => Math.max(0, p - 1))}
+            onNext={() => {
+              const next = ledger.data?.next_cursor ?? null;
+              if (next === null) return;
+              // Push the cursor only the first time this boundary is crossed;
+              // stepping forward again after going back must reuse the cursor
+              // already held, or the stack and the page index drift apart.
+              setCursors((c) => (c.length > page + 1 ? c : [...c, next]));
+              setPage((p) => p + 1);
+            }}
+          />
         </div>
 
         <BreakdownPanel
@@ -771,7 +983,7 @@ export function AccountPage() {
 
         <NetOfCosts d={d} summary={summary.data} />
 
-        <SettlementCalendar buckets={buckets} unhedged={unhedged} />
+        <SettlementCalendar buckets={buckets} unhedged={unhedged} truncated={openTruncated} />
       </div>
     </div>
   );
@@ -788,21 +1000,15 @@ export function AccountPage() {
  * it. This accrues `qty - capital` by submit time and splits the total into
  * what has already paid out and what is merely certain.
  */
-function AccrualCurve({ rows }: { rows: LedgerRow[] }) {
-  const pts = rows
-    .filter((r) => r.settlementValue !== null)
-    .slice()
-    .sort((a, b) => (a.submittedAt < b.submittedAt ? -1 : 1));
-  if (pts.length < 2) {
+function AccrualCurve({ points }: { points: AccrualPointView[] }) {
+  // Already cumulative, already sorted, already downsampled to at most 400
+  // points — the accumulation moved to the server with the rest of the
+  // aggregation, so this draws the series rather than deriving it. That is
+  // what lets the chart cover the whole window instead of one page of rows.
+  const series = points;
+  if (series.length < 2) {
     return <Empty>Not enough filled tickets in this window to plot.</Empty>;
   }
-  let total = 0;
-  let settled = 0;
-  const series = pts.map((r) => {
-    total += r.settlementValue ?? 0;
-    if (r.net !== null) settled += r.settlementValue ?? 0;
-    return { total, settled };
-  });
   const W = 800;
   const H = 230;
   // Zero-based on purpose: this series only ever goes up, so a floor at its own
@@ -856,8 +1062,8 @@ function AccrualCurve({ rows }: { rows: LedgerRow[] }) {
         }}
         className="vt-mono"
       >
-        <span>{day(pts[0].submittedAt)}</span>
-        <span>{day(pts[pts.length - 1].submittedAt)}</span>
+        <span>{day(series[0].ts)}</span>
+        <span>{day(series[series.length - 1].ts)}</span>
       </div>
     </>
   );
@@ -884,9 +1090,14 @@ function bucketLabel(date: string | null): string {
 function SettlementCalendar({
   buckets,
   unhedged,
+  truncated,
 }: {
   buckets: SettlementBucket[];
   unhedged: LedgerRow[];
+  /** True when more tickets are awaiting settlement than were fetched. Said
+   *  out loud rather than swallowed: this panel is a claim about what is owed,
+   *  and a quietly short one understates it. */
+  truncated: boolean;
 }) {
   const max = Math.max(...buckets.map((b) => b.value), 0.01);
   const total = buckets.reduce((a, b) => a + b.value, 0);
@@ -901,6 +1112,11 @@ function SettlementCalendar({
             ? `${amount(total, { sign: true })} over ${round0(contracts)} contracts`
             : ""}
         </span>
+        {truncated ? (
+          <span className="tag tag-outline" style={{ fontSize: 10 }}>
+            partial
+          </span>
+        ) : null}
       </div>
       {buckets.length === 0 ? (
         <Empty>Nothing awaiting settlement.</Empty>
