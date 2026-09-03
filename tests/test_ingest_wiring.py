@@ -4,6 +4,8 @@ from __future__ import annotations
 import asyncio
 import os
 from collections.abc import AsyncIterator
+from dataclasses import replace
+from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 from pathlib import Path
 
@@ -591,6 +593,39 @@ async def test_auto_trader_skips_silently_when_the_cap_would_be_breached(monkeyp
     finally:
         await s.shutdown()
     assert tickets == [], "the cap pre-check must skip the submission, not write a ticket"
+
+
+async def test_auto_trader_skips_silently_when_the_game_is_too_far_out(monkeypatch):
+    """AppState._auto_would_start_too_late has to actually stop a submission.
+
+    The unit tests inject the callable as a plain boolean; this is the one
+    place the real AppState wiring runs end to end. Zero ticket rows is the
+    assertion: the pre-check exists so a far-out edge does not write a
+    rejected row on every fingerprint change for a week.
+    """
+    monkeypatch.setenv("ARBYS_ENABLE_AUTO_TRADE", "1")
+    monkeypatch.delenv("ARBYS_MAX_DAYS_TO_START", raising=False)  # default: 7
+    s = await _live_edge()
+    # `_starts_at` reads `state.event_groups`, so replacing the mapping entry
+    # is enough; the engine's own registration is by id and unaffected.
+    s.event_groups["eg-1"] = replace(
+        s.event_groups["eg-1"], start_time=datetime.now(UTC) + timedelta(days=8)
+    )
+    await s.bootstrap()
+    tickets: list[dict] = []
+    try:
+        opps = s.engine.evaluate_now("eg-1")
+        assert opps, "fixture must produce a live net-positive opportunity"
+        s._set_group_opportunities("eg-1", opps)
+        for _ in range(200):
+            async with session_scope() as session:
+                tickets = await repo.list_paper_tickets(session, s.default_account_id)
+            if tickets:
+                break
+            await asyncio.sleep(0.005)
+    finally:
+        await s.shutdown()
+    assert tickets == [], "the far-out pre-check must skip the submission, not write a ticket"
 
 
 async def test_reset_clears_the_auto_trade_cooldowns(seed_reference_rows):

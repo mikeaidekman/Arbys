@@ -56,6 +56,7 @@ class _Harness:
         self.status = status
         self.enabled = enabled
         self.breach = False
+        self.too_late = False
         self.cross_venue_only = True
         self.submitted: list[ArbOpportunity] = []
         # (opportunity, record_nonfill) for every submission, so a test can
@@ -81,6 +82,7 @@ class _Harness:
             unsubscribe=self.unsubscribed.append,
             submit=self.submit,
             would_breach_cap=lambda _opp: self.breach,
+            would_start_too_late=lambda _opp: self.too_late,
             enabled=lambda: self.enabled,
             cooldown_s=cooldown_s,
             cross_venue_only=lambda: self.cross_venue_only,
@@ -159,6 +161,33 @@ async def test_the_cap_precheck_skips_silently_without_submitting():
     h.breach = True
     assert await h.service().handle(_opp()) is None
     assert h.submitted == []
+
+
+async def test_the_far_out_precheck_skips_silently_without_submitting():
+    """An edge on a game a fortnight away persists for days and republishes on
+    every depth tick; recording each refusal would fill the ledger with rows
+    saying only "still too early". Same treatment as the cap, same reason."""
+    h = _Harness()
+    h.too_late = True
+    assert await h.service().handle(_opp()) is None
+    assert h.submitted == []
+
+
+async def test_the_far_out_precheck_defaults_to_never():
+    """A caller that does not wire the callable gets the old behaviour."""
+    h = _Harness()
+    service = AutoTradeService(
+        subscribe=lambda: h.queue,
+        unsubscribe=h.unsubscribed.append,
+        submit=h.submit,
+        would_breach_cap=lambda _opp: False,
+        enabled=lambda: True,
+        cooldown_s=0.0,
+        nonfill_log_s=0.0,
+        clock=lambda: h.now,
+    )
+    assert await service.handle(_opp()) == "filled"
+    assert len(h.submitted) == 1
 
 
 async def test_clear_cooldowns_forgets_everything():

@@ -513,6 +513,7 @@ class AppState:
             unsubscribe=self.unsubscribe_opportunities,
             submit=self._auto_submit_ticket,
             would_breach_cap=self._auto_would_breach_cap,
+            would_start_too_late=self._auto_would_start_too_late,
             enabled=_auto_trade_enabled,
             cooldown_s=_auto_trade_cooldown_s(),
             cross_venue_only=cross_venue_only,
@@ -1022,6 +1023,18 @@ class AppState:
         from .ticket_service import cap_breach
 
         return cap_breach(self, opp, self.default_account_id) is not None
+
+    def _auto_would_start_too_late(self, opp: ArbOpportunity) -> bool:
+        """Whether the time-to-start rule would reject this ticket.
+
+        Same shape as `_auto_would_breach_cap`: reuses the ticket service's
+        own rule so there is one implementation, and decides only whether the
+        submission is worth an audit row. The authoritative check still runs
+        inside `submit_arb_ticket`.
+        """
+        from .ticket_service import starts_too_far_out
+
+        return starts_too_far_out(self, opp) is not None
 
     def subscribe_opportunities(self) -> asyncio.Queue[ArbOpportunity]:
         q: asyncio.Queue[ArbOpportunity] = asyncio.Queue(maxsize=100)

@@ -97,6 +97,7 @@ class AutoTradeService:
         unsubscribe: Callable[[asyncio.Queue[ArbOpportunity]], None],
         submit: SubmitTicket,
         would_breach_cap: Callable[[ArbOpportunity], bool],
+        would_start_too_late: Callable[[ArbOpportunity], bool] = lambda _opp: False,
         enabled: Callable[[], bool],
         cooldown_s: float,
         cross_venue_only: Callable[[], bool] = lambda: True,
@@ -107,6 +108,7 @@ class AutoTradeService:
         self._unsubscribe = unsubscribe
         self._submit = submit
         self._would_breach_cap = would_breach_cap
+        self._would_start_too_late = would_start_too_late
         self._enabled = enabled
         self._cooldown_s = cooldown_s
         self._cross_venue_only = cross_venue_only
@@ -230,6 +232,13 @@ class AutoTradeService:
         # rejected ticket on every tick for the rest of the night, filling the
         # audit log with rows that say only "still capped".
         if self._would_breach_cap(opp):
+            return None
+
+        # Same treatment as the cap, for the same reason: an edge on a game a
+        # fortnight away can persist for days and republishes on every depth
+        # tick, so a recorded rejection per tick would say only "still too
+        # early" all night. `submit_arb_ticket` remains authoritative.
+        if self._would_start_too_late(opp):
             return None
 
         record = self._should_record_nonfill(group_id)
