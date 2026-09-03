@@ -3,7 +3,12 @@ from decimal import Decimal
 import pytest
 
 from arbys.backend import state as state_module
-from arbys.backend.state import DEFAULT_MAX_TICKET_STAKE, max_ticket_stake
+from arbys.backend.state import (
+    DEFAULT_MAX_DAYS_TO_START,
+    DEFAULT_MAX_TICKET_STAKE,
+    max_days_to_start,
+    max_ticket_stake,
+)
 
 
 def test_default_is_250(monkeypatch):
@@ -102,3 +107,27 @@ def test_min_contract_qty_zero_disables_the_floor(monkeypatch):
 def test_min_contract_qty_garbage_falls_back(monkeypatch, bad):
     monkeypatch.setenv("ARBYS_MIN_CONTRACT_QTY", bad)
     assert state_module.min_contract_qty() == Decimal("5")
+
+
+def test_max_days_to_start_defaults_to_seven(monkeypatch):
+    monkeypatch.delenv("ARBYS_MAX_DAYS_TO_START", raising=False)
+    assert max_days_to_start() == 7.0
+    assert DEFAULT_MAX_DAYS_TO_START == 7.0
+
+
+def test_max_days_to_start_reads_the_env(monkeypatch):
+    monkeypatch.setenv("ARBYS_MAX_DAYS_TO_START", "3.5")
+    assert max_days_to_start() == 3.5
+
+
+def test_max_days_to_start_zero_disables_the_rule(monkeypatch):
+    monkeypatch.setenv("ARBYS_MAX_DAYS_TO_START", "0")
+    assert max_days_to_start() is None
+    monkeypatch.setenv("ARBYS_MAX_DAYS_TO_START", "-2")
+    assert max_days_to_start() is None
+
+
+@pytest.mark.parametrize("bad", ["", "abc", "1.2.3"])
+def test_max_days_to_start_garbage_falls_back(monkeypatch, bad):
+    monkeypatch.setenv("ARBYS_MAX_DAYS_TO_START", bad)
+    assert max_days_to_start() == 7.0

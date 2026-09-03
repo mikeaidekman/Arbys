@@ -382,6 +382,35 @@ def min_contract_qty() -> Decimal:
     return Decimal("0") if value <= 0 else value
 
 
+DEFAULT_MAX_DAYS_TO_START = 7.0
+
+
+def max_days_to_start() -> float | None:
+    """Furthest-out game the paper account will trade, in days. ``None`` disables.
+
+    A pre-game edge locks its stake until the game settles, so a fixture two
+    weeks away holds capital for two weeks. With ``ARBYS_MAX_OUTCOME_STAKE`` at
+    $500 a game and a few thousand dollars a venue, a handful of far-out
+    fixtures is the bankroll -- and on 2026-09-03 that is exactly what
+    happened: both venues out of buying power, no new trades all day.
+
+    Enforced at the submission chokepoint (`ticket_service.starts_too_far_out`)
+    and pre-checked by the auto-trader so a far-out edge, which republishes on
+    every depth tick for as long as it exists, does not write a rejected ticket
+    per tick. It is a rule about *tying up capital*, not about edge: the engine
+    still detects, publishes and displays far-out edges. Set
+    ARBYS_MAX_DAYS_TO_START=0 to turn it off.
+    """
+    raw = os.environ.get("ARBYS_MAX_DAYS_TO_START")
+    if raw is None:
+        return DEFAULT_MAX_DAYS_TO_START
+    try:
+        value = float(raw)
+    except ValueError:
+        return DEFAULT_MAX_DAYS_TO_START
+    return None if value <= 0 else value
+
+
 # venue_id -> factory(outcome_ids) -> MarketDataAdapter
 AdapterFactory = Callable[[list[str]], MarketDataAdapter]
 
