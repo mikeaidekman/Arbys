@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import os
 from dataclasses import replace
+from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 from pathlib import Path
 
@@ -37,12 +38,15 @@ async def _fresh_state(tmp_path: Path, seed_reference_rows):
     os.environ.pop("ARBYS_DB_URL", None)
 
 
-async def _arb_group(*, ask_size: Decimal | None = None):
+async def _arb_group(
+    *, ask_size: Decimal | None = None, start_time: datetime | None = None
+):
     """An eg-1 group quoted 0.40 / 0.50 — a live 10c gross edge."""
     s = get_state()
     group = EventGroup(
         id="eg-1",
         title="MLB: ATL @ LAD",
+        start_time=start_time,
         legs=(
             EventGroupLeg(outcome_id="p-yes", venue_id="polymarket_us", is_yes_side=True),
             EventGroupLeg(outcome_id="k-no", venue_id="kalshi", is_yes_side=False),
@@ -600,3 +604,98 @@ async def test_shutdown_gives_up_at_the_bound_rather_than_hanging(monkeypatch):
         await asyncio.wait_for(s.shutdown(), timeout=5.0)
     finally:
         s.exit_ticket()
+
+
+# --- ARBYS_MAX_DAYS_TO_START: capital is not tied up in far-out games -------
+
+
+async def test_a_game_more_than_the_window_away_is_refused(monkeypatch):
+    """A pre-game edge locks its stake until the game settles. On 2026-09-03
+    a slate one to two weeks out had both venues out of buying power."""
+    monkeypatch.delenv("ARBYS_MAX_DAYS_TO_START", raising=False)  # default: 7
+    s, _ = await _arb_group(start_time=datetime.now(UTC) + timedelta(days=8))
+    opp = s.engine.evaluate_now("eg-1")[0]
+
+    result = await submit_arb_ticket(s, opp, source="manual")
+
+    assert result.status == "rejected"
+    assert result.reason is not None
+    assert result.reason.startswith("starts_too_far_out:eg-1")
+    assert "limit 7" in result.reason
+    assert result.order_ids == ()
+    async with session_scope() as session:
+        tickets = await repo.list_paper_tickets(session, s.default_account_id)
+    assert [t["status"] for t in tickets] == ["rejected"]
+
+
+async def test_a_game_inside_the_window_fills(monkeypatch):
+    monkeypatch.delenv("ARBYS_MAX_DAYS_TO_START", raising=False)
+    s, _ = await _arb_group(start_time=datetime.now(UTC) + timedelta(days=6))
+    opp = s.engine.evaluate_now("eg-1")[0]
+
+    result = await submit_arb_ticket(s, opp, source="manual")
+
+    assert result.status == "filled", result.reason
+
+
+async def test_a_game_already_under_way_is_not_refused(monkeypatch):
+    """Negative distance to kickoff is in-play, which is the best case."""
+    monkeypatch.delenv("ARBYS_MAX_DAYS_TO_START", raising=False)
+    s, _ = await _arb_group(start_time=datetime.now(UTC) - timedelta(hours=1))
+    opp = s.engine.evaluate_now("eg-1")[0]
+
+    result = await submit_arb_ticket(s, opp, source="manual")
+
+    assert result.status == "filled", result.reason
+
+
+async def test_an_unknown_start_time_does_not_block(monkeypatch):
+    """None means unknown, never "far away" -- a hand-registered group without
+    a start time must stay tradeable, as it does for settlement."""
+    monkeypatch.delenv("ARBYS_MAX_DAYS_TO_START", raising=False)
+    s, _ = await _arb_group(start_time=None)
+    opp = s.engine.evaluate_now("eg-1")[0]
+
+    result = await submit_arb_ticket(s, opp, source="manual")
+
+    assert result.status == "filled", result.reason
+
+
+async def test_the_start_window_can_be_disabled(monkeypatch):
+    monkeypatch.setenv("ARBYS_MAX_DAYS_TO_START", "0")
+    s, _ = await _arb_group(start_time=datetime.now(UTC) + timedelta(days=30))
+    opp = s.engine.evaluate_now("eg-1")[0]
+
+    result = await submit_arb_ticket(s, opp, source="manual")
+
+    assert result.status == "filled", result.reason
+
+
+async def test_a_naive_start_time_is_read_as_utc(monkeypatch):
+    """Discovery writes aware datetimes, but a hand-registered group may not;
+    `in_play_slugs` already reads naive as UTC and this must agree."""
+    monkeypatch.delenv("ARBYS_MAX_DAYS_TO_START", raising=False)
+    naive = (datetime.now(UTC) + timedelta(days=8)).replace(tzinfo=None)
+    s, _ = await _arb_group(start_time=naive)
+    opp = s.engine.evaluate_now("eg-1")[0]
+
+    result = await submit_arb_ticket(s, opp, source="manual")
+
+    assert result.status == "rejected"
+    assert result.reason is not None
+    assert result.reason.startswith("starts_too_far_out:")
+
+
+async def test_the_far_out_refusal_honours_record_nonfill_false(monkeypatch):
+    """The auto-trader's duplicate-row suppression applies here as it does to
+    every other pre-execution refusal."""
+    monkeypatch.delenv("ARBYS_MAX_DAYS_TO_START", raising=False)
+    s, _ = await _arb_group(start_time=datetime.now(UTC) + timedelta(days=8))
+    opp = s.engine.evaluate_now("eg-1")[0]
+
+    result = await submit_arb_ticket(s, opp, source="auto", record_nonfill=False)
+
+    assert result.status == "rejected"
+    async with session_scope() as session:
+        tickets = await repo.list_paper_tickets(session, s.default_account_id)
+    assert tickets == []

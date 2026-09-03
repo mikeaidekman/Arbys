@@ -30,7 +30,7 @@ from __future__ import annotations
 
 import uuid
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import UTC, datetime
 from decimal import Decimal
 from typing import TYPE_CHECKING
 
@@ -41,7 +41,7 @@ from ..db import repositories as repo
 from ..db.session import run_write
 from ..shared.arb_engine import ArbOpportunity
 from ..shared.execution_router import InsufficientLegsError
-from .state import max_leg_age_skew_s, max_outcome_stake
+from .state import max_days_to_start, max_leg_age_skew_s, max_outcome_stake
 
 if TYPE_CHECKING:  # pragma: no cover - import cycle guard
     from .state import AppState
@@ -298,6 +298,41 @@ def cap_breach(state: AppState, live: ArbOpportunity, account_id: str) -> str | 
     return None
 
 
+def starts_too_far_out(state: AppState, opp: ArbOpportunity) -> str | None:
+    """Why this ticket's game starts too far ahead to tie capital up in, or None.
+
+    Public because the auto-trader pre-checks it, as it does `cap_breach`, and
+    for the same reason: one implementation of the rule, with
+    `submit_arb_ticket` the authoritative enforcement point.
+
+    A pre-game edge locks its stake until the game settles. With a $500 cap
+    per game and a few thousand dollars per venue, a handful of fixtures a
+    fortnight out is the whole bankroll -- which is what stopped the hosted
+    account on 2026-09-03: both venues out of buying power, no new trades.
+
+    `None` for a group with no start time: unknown is not "far away", and a
+    hand-registered group without one must stay tradeable, as it does for
+    settlement. A naive datetime is read as UTC, as `in_play_slugs` reads it.
+    A game already under way has a negative distance and is never refused
+    here. The reason carries the distance because nothing else records it.
+    """
+    limit_days = max_days_to_start()
+    if limit_days is None:
+        return None
+    start = _starts_at(state, opp.event_group_id)
+    if start is None:
+        return None
+    if start.tzinfo is None:
+        start = start.replace(tzinfo=UTC)
+    days_ahead = (start - datetime.now(UTC)).total_seconds() / 86400
+    if days_ahead <= limit_days:
+        return None
+    return (
+        f"starts_too_far_out:{opp.event_group_id} starts in {days_ahead:.1f} days; "
+        f"limit {limit_days:g} (ARBYS_MAX_DAYS_TO_START)"
+    )[:256]
+
+
 def _group_outcomes(state: AppState, live: ArbOpportunity) -> set[str]:
     """Every outcome belonging to this opportunity's game.
 
@@ -372,6 +407,19 @@ async def submit_arb_ticket(
                 reason=reason, economics=None,
             )
         return TicketResult(ticket_id, "rejected", (), reason)
+
+    # A game more than ARBYS_MAX_DAYS_TO_START away locks its stake until it
+    # settles. A property of the game rather than of the edge, so it is judged
+    # here beside settlement and not inside the in-flight section below.
+    too_far = starts_too_far_out(state, opp)
+    if too_far is not None:
+        if record_nonfill:
+            await _write_ticket(
+                ticket_id=ticket_id, account_id=account_id, opp=opp, title=title,
+                starts_at=starts_at, source=source, status="rejected",
+                reason=too_far, economics=None,
+            )
+        return TicketResult(ticket_id, "rejected", (), too_far)
 
     state.enter_ticket()
     try:
