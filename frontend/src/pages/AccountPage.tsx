@@ -1198,10 +1198,9 @@ function NetOfCosts({
   summary: PaperAccountSummary | undefined;
 }) {
   const START = 2000; // seeded per venue by bootstrap and by every reset
+  // The server reports only venues that hold a paper balance, so every entry
+  // here is real buying power; the page renders what it is given.
   const balances = Object.entries(summary?.balances ?? {})
-    // draftkings is seeded but never traded; showing it as 100% headroom
-    // implies capacity that does not exist.
-    .filter(([v]) => v === "kalshi" || v === "polymarket_us")
     .map(([venue, amt]) => ({ venue, cash: Number(amt), pct: (Number(amt) / START) * 100 }))
     .sort((a, b) => a.cash - b.cash);
 

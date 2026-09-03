@@ -641,3 +641,26 @@ async def test_reset_clears_the_auto_trade_cooldowns(seed_reference_rows):
     s.auto_trade_service._cooldown_until["eg-1"] = 1e9
     await s.reset_paper_account(s.default_account_id)
     assert s.auto_trade_service._cooldown_until == {}
+
+
+# --- the paper book follows the venue flags ---------------------------------
+
+
+def test_draftkings_has_no_paper_broker_unless_enabled(monkeypatch):
+    """A venue whose data adapter is not built has no business holding a paper
+    balance. DraftKings used to be registered unconditionally, so a broker was
+    seeded with DEFAULT_STARTING_BALANCE every time: $2,000 of headline cash
+    and equity that could never be traded, on a venue that never carried a leg."""
+    monkeypatch.setenv("ARBYS_ENABLE_DRAFTKINGS", "0")
+    state_module.reset_state()
+    s = get_state()
+    assert set(s.paper_brokers) == {"kalshi", "polymarket_us"}
+    assert set(s.fees) == {"kalshi", "polymarket_us"}
+
+
+def test_draftkings_gets_a_paper_broker_when_enabled(monkeypatch):
+    monkeypatch.setenv("ARBYS_ENABLE_DRAFTKINGS", "1")
+    state_module.reset_state()
+    s = get_state()
+    assert "draftkings" in s.paper_brokers
+    assert "draftkings" in s.fees

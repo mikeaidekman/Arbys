@@ -460,8 +460,15 @@ class AppState:
         self.fees: FeeModelRegistry = {
             "polymarket_us": PolymarketUsFeeModel(),
             "kalshi": KalshiFeeModel(),
-            "draftkings": SportsbookFeeModel("draftkings"),
         }
+        # Everything downstream -- the broker map, the router, the venue rows
+        # bootstrap ensures, the balance bootstrap seeds -- is built from this
+        # registry, so a venue listed here holds paper cash. DraftKings was
+        # listed unconditionally while its adapter was behind a flag, which
+        # put $2,000 of untradeable cash into the headline equity of every
+        # account. The same flag now governs both.
+        if draftkings_enabled():
+            self.fees["draftkings"] = SportsbookFeeModel("draftkings")
         self.event_groups: dict[str, EventGroup] = {}
         # source group id -> that group's currently-executable opportunities.
         # Keyed by group so an evaluation can replace the whole set, including
