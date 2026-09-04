@@ -54,12 +54,13 @@ On startup `AppState.bootstrap()` will:
    holds it. This is what makes running two of these a loud failure instead of
    two ledgers quietly diverging. (No-op on SQLite.)
 2. Create tables if missing (`Base.metadata.create_all`).
-3. Ensure the three seed venues exist (`polymarket_us`, `kalshi`, `draftkings`).
+3. Ensure the seed venues exist (`polymarket_us`, `kalshi`, plus `draftkings`
+   only when `ARBYS_ENABLE_DRAFTKINGS=1` — the same flag gates its paper broker).
    These are reference rows every placeholder market points at by foreign key,
    so a schema built without them cannot be written to.
 4. Ensure the `default` paper account exists.
 5. Hydrate event groups, balances, and positions from the DB.
-6. Seed `DEFAULT_STARTING_BALANCE = $1000` for any venue not previously funded.
+6. Seed `DEFAULT_STARTING_BALANCE = $4000` for any venue not previously funded.
 7. Start the periodic PnL snapshot and auto-settle services.
 8. Start `AutoTradeService`, but only if `ARBYS_ENABLE_AUTO_TRADE=1`.
 9. Start ingest, but only if `ARBYS_ENABLE_INGEST=1`.
@@ -265,9 +266,12 @@ execution, implement `ExecutionAdapter` for the venue, then swap it into
 ## 4. Operating the paper broker
 
 - **Starting balances** live in `DEFAULT_STARTING_BALANCE` in
-  `arbys/backend/state.py`. They only apply to venues never previously funded
-  — hydrated balances always win, so bumping the constant won't retroactively
-  top up an existing account.
+  `arbys/backend/state.py` ($4,000 a venue since 2026-09-03). They only apply
+  to venues never previously funded — hydrated balances always win, so bumping
+  the constant won't retroactively top up an existing account. To fund a live
+  account, write a data migration: `0010_fund_trading_venues` is the
+  precedent, and the deploy's `release_command` is what carries it to the
+  hosted database.
 - **Slippage / latency** are configured on `PaperExecutionAdapter` construction
   (in `state.py`). Defaults are conservative for local demo; tune per venue
   once you have real quote history.
@@ -433,7 +437,7 @@ docker compose up -d postgres
 alembic upgrade head
 ```
 
-Restart the backend and the seed data + `$1000` per venue will be recreated
+Restart the backend and the seed data + `$4000` per venue will be recreated
 on the first request.
 
 **On the hosted instance, don't reach for the database.** The Neon connection

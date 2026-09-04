@@ -503,6 +503,22 @@ Feature flags in `.env` (copy from `.env.example`; `.env` is gitignored):
   `/monitored`'s pair search applies the same floor — they must agree, or a
   pair one filtered and the other ranked leaves a live arb's Fill button
   disabled.
+- `ARBYS_MAX_DAYS_TO_START` — furthest-out game worth tying capital up in,
+  in days to scheduled start, default 7, `0` disables. A pre-game edge locks
+  its stake until the game settles, and on 2026-09-03 a slate one to two
+  weeks out had both venues out of buying power with no new trades all day.
+  A rule about **capital**, not edge: the engine still detects, publishes and
+  displays far-out edges, `/monitored` still ranks them, and only filling
+  stops. Enforced at the submission chokepoint
+  (`ticket_service.starts_too_far_out`, beside `cap_breach`) so a manual
+  Fill click on a far-out row is recorded as `rejected` with the days to
+  kickoff in the reason; the auto-trader pre-checks it and skips **silently**
+  for the same reason it pre-checks the cap — a far-out edge persists for
+  days and republishes on every depth tick. `start_time=None` does not
+  block: unknown is not "far away", matching the settlement convention. Note
+  the Fill button therefore stays live on a far-out row; greying it needs a
+  flag on `/monitored` and is deferred until a click actually hits the
+  refusal.
 - `ARBYS_POLYMARKET_US_POLL_S` — seconds between `/bbo` sweeps, default 5,
   clamped to a 1s floor. This is the **credential-less fallback** path only;
   with credentials set the WebSocket is used instead (see **Venues**).
@@ -521,8 +537,16 @@ Feature flags in `.env` (copy from `.env.example`; `.env` is gitignored):
   authenticated WS adapter is used instead of 5s REST polling. **Keep the .pem
   outside this repo.**
 
-`.env.example` also lists `ARBYS_ENABLE_DRAFTKINGS`, which *is* read. Note
-that `ARBYS_ENABLE_POLYMARKET` / `ARBYS_ENABLE_KALSHI` / `POLYMARKET_API_KEY`
+`.env.example` also lists `ARBYS_ENABLE_DRAFTKINGS`, which *is* read — and as
+of 2026-09-03 it gates the **paper broker** as well as the adapter. DraftKings
+used to be in `AppState.fees` unconditionally, so a broker was built and
+seeded with `DEFAULT_STARTING_BALANCE` for a venue that never carried a leg:
+$2,000 of headline cash and equity that could never trade. Migration `0010`
+removed that balance row and deposited $2,000 into each trading venue;
+`DEFAULT_STARTING_BALANCE` is **$4,000** so a reset seeds the same level.
+Hydrated balances always win over the constant, so funding an existing
+account is a data migration, not a constant change. Note that
+`ARBYS_ENABLE_POLYMARKET` / `ARBYS_ENABLE_KALSHI` / `POLYMARKET_API_KEY`
 were **dead config** — nothing ever read them — and have been removed.
 
 Run the backend **from the repo root**: `ARBYS_DB_URL` defaults to a relative
