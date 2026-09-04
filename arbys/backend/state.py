@@ -65,8 +65,14 @@ def _opp_fingerprint(opp: ArbOpportunity) -> tuple:
 # `reset_paper_account`. Raised from 1000 on 2026-08-26 so a fresh paper
 # account has room to hold several concurrent tickets: ARBYS_MAX_TICKET_STAKE
 # is 200, so 1000 bound the account at five open tickets on one venue before
-# cash ran out - and a two-leg arb draws on both venues at once.
-DEFAULT_STARTING_BALANCE = Decimal("2000")
+# cash ran out - and a two-leg arb draws on both venues at once. Raised again
+# to 4000 on 2026-09-03, when both venues ran dry at 2000: migration 0010
+# deposited the difference into the live account, and this constant follows so
+# a reset seeds the same level rather than quietly undoing the deposit. Only
+# venues that have never been funded are seeded from it -- hydrated balances
+# always win -- so changing it does nothing to an existing account; fund one
+# with a data migration, as 0010 does.
+DEFAULT_STARTING_BALANCE = Decimal("4000")
 
 
 def _ingest_enabled() -> bool:

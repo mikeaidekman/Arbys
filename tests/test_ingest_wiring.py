@@ -477,7 +477,7 @@ async def _live_edge():
     """An eg-1 group quoted 0.40 / 0.50 — a live net-positive edge.
 
     Balance is whatever ``bootstrap()`` seeds per venue (``DEFAULT_STARTING_BALANCE``,
-    $2000 as of this writing): it runs after this helper and ``hydrate_balance``
+    $4000 as of this writing): it runs after this helper and ``hydrate_balance``
     overwrites rather than adds, so depositing here would be silently discarded.
 
     Every caller of this helper writes to the DB before its own ``bootstrap()``

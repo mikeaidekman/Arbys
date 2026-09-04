@@ -1197,7 +1197,9 @@ function NetOfCosts({
   d: Dashboard;
   summary: PaperAccountSummary | undefined;
 }) {
-  const START = 2000; // seeded per venue by bootstrap and by every reset
+  // Seeded per venue by bootstrap and by every reset: DEFAULT_STARTING_BALANCE
+  // in arbys/backend/state.py. The two must move together.
+  const START = 4000;
   // The server reports only venues that hold a paper balance, so every entry
   // here is real buying power; the page renders what it is given.
   const balances = Object.entries(summary?.balances ?? {})
