@@ -97,6 +97,15 @@ class AutoTradeService:
         unsubscribe: Callable[[asyncio.Queue[ArbOpportunity]], None],
         submit: SubmitTicket,
         would_breach_cap: Callable[[ArbOpportunity], bool],
+        # Defaults to "never too late" rather than being required like
+        # `would_breach_cap`, so existing construction sites (and the test
+        # that pins this default) keep working without threading the
+        # time-to-start check through them. `submit_arb_ticket` remains the
+        # authoritative check either way -- this is only a pre-check that
+        # decides whether an attempt is worth an audit row -- so a caller
+        # that omits it loses a quiet-log optimisation, not a safety
+        # property: a far-out edge would still be refused at submission, just
+        # with a rejected ticket written on every tick instead of none.
         would_start_too_late: Callable[[ArbOpportunity], bool] = lambda _opp: False,
         enabled: Callable[[], bool],
         cooldown_s: float,

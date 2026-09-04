@@ -664,3 +664,37 @@ def test_draftkings_gets_a_paper_broker_when_enabled(monkeypatch):
     s = get_state()
     assert "draftkings" in s.paper_brokers
     assert "draftkings" in s.fees
+
+
+async def test_bootstrap_seeds_a_draftkings_venue_row_even_when_disabled(monkeypatch):
+    """A `venue` row is reference data, deliberately separate from a paper
+    balance: DraftKings holds no paper cash while its flag is off, but
+    /admin's leg-venue picker still offers it (a real flagged integration),
+    and `ensure_outcome_placeholder` writes `market.venue_id` as a real
+    foreign key to `venue.id`. With SQLite enforcing foreign keys, a fresh
+    database that never got a `draftkings` venue row would raise
+    IntegrityError the moment someone registered a DraftKings leg -- which is
+    exactly what happens if `bootstrap()`'s venue-upsert loop iterates
+    `self.fees` (draftkings-gated) instead of a fixed reference set.
+    """
+    from sqlalchemy import select
+
+    from arbys.db import models as m
+
+    monkeypatch.setenv("ARBYS_ENABLE_DRAFTKINGS", "0")
+    state_module.reset_state()
+    s = get_state()
+    await s.bootstrap()
+    try:
+        assert "draftkings" not in s.paper_brokers, "flag off must still mean no paper broker"
+        async with session_scope() as session:
+            venue_ids = set(
+                (await session.execute(select(m.Venue.id))).scalars().all()
+            )
+        assert "draftkings" in venue_ids, (
+            "a fresh database must get a draftkings venue row even with the "
+            "flag off, so a manually registered DraftKings leg can still be "
+            "written"
+        )
+    finally:
+        await s.shutdown()

@@ -189,13 +189,20 @@ Edit `arbys/backend/state.py`:
 self.fees: FeeModelRegistry = {
     "polymarket_us": PolymarketUsFeeModel(),
     "kalshi": KalshiFeeModel(),
-    "draftkings": SportsbookFeeModel("draftkings"),
     "manifold": ManifoldFeeModel(),   # ← new
 }
+if draftkings_enabled():
+    self.fees["draftkings"] = SportsbookFeeModel("draftkings")
 ```
 
-The `AppState.bootstrap()` upsert loop will create the venue row on next
-startup.
+DraftKings is listed here only when `draftkings_enabled()` — its adapter is a
+real flagged integration, and listing it unconditionally puts untradeable cash
+into every account's headline balance while the flag is off. That is about
+paper cash, not the venue row: `AppState.bootstrap()`'s venue-upsert loop
+iterates a fixed `REFERENCE_VENUES` tuple, not `self.fees`, so `venue` rows for
+all three venues exist regardless of the flag — reference data is deliberately
+separate from a paper balance, and `market.venue_id` is a real foreign key to
+it.
 
 ### 3.2 Implement a fee model
 

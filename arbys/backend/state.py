@@ -10,6 +10,7 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import logging
+import math
 import os
 from collections import defaultdict
 from collections.abc import Callable
@@ -73,6 +74,14 @@ def _opp_fingerprint(opp: ArbOpportunity) -> tuple:
 # always win -- so changing it does nothing to an existing account; fund one
 # with a data migration, as 0010 does.
 DEFAULT_STARTING_BALANCE = Decimal("4000")
+
+# Venue reference rows always exist, whatever the fee registry holds. A `venue`
+# row is reference data -- `market.venue_id` is a real foreign key to it, and
+# SQLite enforces foreign keys here -- and it is deliberately separate from a
+# paper balance. DraftKings holds no paper cash while its flag is off, but a
+# hand-pushed quote or a manually registered leg on it must still be writable,
+# which is what /admin's venue picker offers.
+REFERENCE_VENUES = ("polymarket_us", "kalshi", "draftkings")
 
 
 def _ingest_enabled() -> bool:
@@ -406,6 +415,12 @@ def max_days_to_start() -> float | None:
     per tick. It is a rule about *tying up capital*, not about edge: the engine
     still detects, publishes and displays far-out edges. Set
     ARBYS_MAX_DAYS_TO_START=0 to turn it off.
+
+    ``float()`` parses ``"nan"`` and ``"inf"`` without raising, and both are as
+    dangerous as garbage: ``days_ahead <= nan`` is always false, so every
+    ticket is silently refused with no error anywhere, and ``inf`` silently
+    disables the rule the same way ``0`` does but without saying so. Both fall
+    back to the default, same as unparseable input.
     """
     raw = os.environ.get("ARBYS_MAX_DAYS_TO_START")
     if raw is None:
@@ -413,6 +428,8 @@ def max_days_to_start() -> float | None:
     try:
         value = float(raw)
     except ValueError:
+        return DEFAULT_MAX_DAYS_TO_START
+    if not math.isfinite(value):
         return DEFAULT_MAX_DAYS_TO_START
     return None if value <= 0 else value
 
@@ -570,7 +587,7 @@ class AppState:
         await create_all()
 
         async with session_scope() as session:
-            for venue_id in self.fees:
+            for venue_id in REFERENCE_VENUES:
                 await repo.ensure_venue(session, venue_id, name=venue_id.title(), kind="exchange")
             await repo.ensure_paper_account(
                 session, self.default_account_id, name=self.default_account_id

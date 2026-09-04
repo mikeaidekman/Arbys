@@ -23,6 +23,22 @@ On an empty database (a fresh deploy, the CI replay) both statements touch
 zero rows and bootstrap seeds the new default afterwards. `downgrade()`
 subtracts the deposit again; it does not restore the DraftKings row, because
 there is no broker to hydrate it into and nothing that reads it.
+
+Only the balance row is deleted, deliberately -- checked against the real
+local ledger on 2026-09-03: `paper_position` held 570 `kalshi` and 570
+`polymarket_us` rows and zero `draftkings`; `paper_order` and `market` were
+zero for `draftkings` too. DraftKings was never wired into discovery, event
+groups or the engine, so it could never have taken a position -- the balance
+row was the only DraftKings paper state anywhere, which is why deleting it
+alone is a complete cleanup rather than a partial one.
+
+Not idempotent, on purpose -- a schema-vs-model diff would fail if this built
+DDL from `Base.metadata` (see the project's migration conventions), but this
+is data, not schema, and it deposits by addition. `alembic_version` guards the
+normal path, but a re-stamp to `0009` followed by another `upgrade head` would
+add another $2,000 to each trading venue with nothing in the data to reveal
+the double deposit -- there is no "already applied" marker on the rows
+themselves, only on the revision. Do not re-stamp past this revision.
 """
 
 from __future__ import annotations

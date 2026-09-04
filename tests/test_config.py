@@ -131,3 +131,14 @@ def test_max_days_to_start_zero_disables_the_rule(monkeypatch):
 def test_max_days_to_start_garbage_falls_back(monkeypatch, bad):
     monkeypatch.setenv("ARBYS_MAX_DAYS_TO_START", bad)
     assert max_days_to_start() == 7.0
+
+
+@pytest.mark.parametrize("bad", ["nan", "NaN", "inf", "-inf", "Infinity"])
+def test_max_days_to_start_non_finite_falls_back(monkeypatch, bad):
+    """`float()` parses these without raising, so a bare `float()` conversion
+    accepts them silently. `nan` makes every `days_ahead <= nan` comparison
+    false, refusing every ticket with no error anywhere; `inf` disables the
+    rule the same way `0` does but without saying so. Both must fall back to
+    the default like any other unparseable input."""
+    monkeypatch.setenv("ARBYS_MAX_DAYS_TO_START", bad)
+    assert max_days_to_start() == 7.0

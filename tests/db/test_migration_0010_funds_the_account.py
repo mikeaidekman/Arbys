@@ -105,9 +105,27 @@ def test_0010_adds_2000_to_each_trading_venue_and_drops_draftkings(tmp_path):
     }
 
 
+def _current_revision(url: str) -> str | None:
+    engine = sa.create_engine(url)
+    try:
+        with engine.connect() as conn:
+            row = conn.execute(sa.text("SELECT version_num FROM alembic_version")).first()
+    finally:
+        engine.dispose()
+    return None if row is None else row[0]
+
+
 def test_0010_is_a_no_op_on_an_unfunded_database(tmp_path):
     """A fresh deploy, the CI replay and the SQLite replay test all run this
-    against empty tables; bootstrap() then seeds the new default."""
+    against empty tables; bootstrap() then seeds the new default.
+
+    Asserting empty balances alone would pass whether or not 0010's statements
+    ever ran -- an empty table stays empty either way. So this also checks
+    `alembic_version` to prove the revision actually applied, which is the
+    part that matters: that the UPDATE/DELETE executed without error against
+    tables holding no rows for them to touch.
+    """
     url = f"sqlite:///{tmp_path / 'empty.db'}"
     _alembic(url, "head")
+    assert _current_revision(url) == "0010_fund_trading_venues"
     assert _balances(url) == {}
