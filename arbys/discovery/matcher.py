@@ -93,8 +93,22 @@ class CrossVenueMatch:
                 return True
         return False if seen else None
 
+    def anchor_participant(self) -> Participant:
+        """The team a spread's line is stated for. ``team_a`` when unset, which
+        keeps this in step with ``yes_key()``."""
+        if self.anchor == self.team_b.code:
+            return self.team_b
+        return self.team_a
+
     def event_group_id(self) -> str:
         base = f"{self.sport}-{self.team_a.code}-{self.team_b.code}-{self.game_date}"
+        if self.market_type == "spread":
+            # The anchor is part of identity: CIN -2.5 and MIL -2.5 on the same
+            # game are different bets and must not share an id. Downstream id
+            # parsers read the segment after the date as the market type and
+            # the rest as opaque, so `spread-CIN-2.5` slices as "spread".
+            anchor = self.anchor_participant().code
+            return f"{base}-spread-{anchor}-{_fmt_line(self.line)}"
         if self.market_type != "moneyline":
             return f"{base}-{self.market_type}-{_fmt_line(self.line)}"
         return base
@@ -103,6 +117,9 @@ class CrossVenueMatch:
         matchup = f"{self.team_a.full_name} vs {self.team_b.full_name}"
         if self.market_type == "total":
             return f"{matchup} — Over {_fmt_line(self.line)} ({self.game_date})"
+        if self.market_type == "spread":
+            anchor = self.anchor_participant().full_name
+            return f"{matchup} — {anchor} -{_fmt_line(self.line)} ({self.game_date})"
         return f"{matchup} ({self.game_date})"
 
 
@@ -247,8 +264,9 @@ def match_games(
 def match_to_event_group(match: CrossVenueMatch) -> EventGroup:
     """Turn a cross-venue match into an EventGroup with 4 legs.
 
-    The canonical proposition is "team_a wins" for a moneyline and "the total
-    goes over the line" for a total; legs matching it are ``is_yes_side=True``.
+    The canonical proposition is "team_a wins" for a moneyline, "the total goes
+    over the line" for a total and "the anchor wins by more than the line" for
+    a spread; legs matching it are ``is_yes_side=True``.
     """
     legs: list[EventGroupLeg] = []
     yes_key = match.yes_key()

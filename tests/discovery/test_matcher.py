@@ -269,6 +269,61 @@ def test_same_anchor_different_lines_do_not_match():
     assert match_games([_spread("kalshi", "LAD", "-2.5")], [_spread("polymarket_us", "LAD", "-1.5")]) == []
 
 
+def _spread_match(anchor: str, line: str):
+    matches = match_games(
+        [_spread("kalshi", anchor, line)], [_spread("polymarket_us", anchor, line)]
+    )
+    assert len(matches) == 1
+    return matches[0]
+
+
+def test_spread_group_id_carries_anchor_and_line():
+    """CIN -2.5 and MIL -2.5 on the same game are different bets, so the
+    anchor is part of identity, not just of the bucket key."""
+    m = _spread_match("CHC", "2.5")
+    assert m.event_group_id() == "mlb-CHC-LAD-2026-08-05-spread-CHC-2.5"
+    assert m.event_group_title() == (
+        "Chicago Cubs vs Los Angeles Dodgers — Chicago Cubs -2.5 (2026-08-05)"
+    )
+
+
+def test_spread_anchored_on_team_b_names_team_b():
+    m = _spread_match("LAD", "1.5")
+    assert m.event_group_id() == "mlb-CHC-LAD-2026-08-05-spread-LAD-1.5"
+    assert m.event_group_title().endswith("— Los Angeles Dodgers -1.5 (2026-08-05)")
+
+
+def test_opposite_anchors_get_distinct_ids():
+    assert _spread_match("LAD", "2.5").event_group_id() != _spread_match("CHC", "2.5").event_group_id()
+
+
+def test_spread_group_marks_the_anchor_legs_as_yes_on_both_venues():
+    group = match_to_event_group(_spread_match("CHC", "2.5"))
+    assert len(group.legs) == 4
+    yes = {leg.outcome_id for leg in group.legs if leg.is_yes_side}
+    assert yes == {"kalshi-C", "polymarket_us-C"}
+
+
+def test_spread_id_parses_as_market_type_spread_downstream():
+    """The account page slices tickets by the segment after the date."""
+    from arbys.backend.performance import parse_group_id
+
+    assert parse_group_id("mlb-CHC-LAD-2026-08-05-spread-CHC-2.5") == ("mlb", "spread")
+
+
+def test_total_and_moneyline_ids_are_unchanged():
+    from decimal import Decimal
+
+    base = _game("kalshi", ("LAD", "CHC"), "2026-08-05", {"LAD": "K1", "CHC": "K2"})
+    poly = _game("polymarket_us", ("LAD", "CHC"), "2026-08-05", {"LAD": "P1", "CHC": "P2"})
+    assert match_games([base], [poly])[0].event_group_id() == "mlb-CHC-LAD-2026-08-05"
+    tk = replace(base, market_type="total", line=Decimal("8.5"),
+                 outcome_ids={"OVER": "ko", "UNDER": "ku"})
+    tp = replace(poly, market_type="total", line=Decimal("8.5"),
+                 outcome_ids={"OVER": "po", "UNDER": "pu"})
+    assert match_games([tk], [tp])[0].event_group_id() == "mlb-CHC-LAD-2026-08-05-total-8.5"
+
+
 def _matched(**per_venue_flags):
     """One matched MLB game, with per-venue (live, ended) as given."""
     games = []
