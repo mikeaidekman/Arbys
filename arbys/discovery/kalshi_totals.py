@@ -24,6 +24,7 @@ from decimal import Decimal, InvalidOperation
 
 import httpx
 
+from .horizon import discovery_horizon_days, within_horizon
 from .kalshi_sports import (
     _REQUEST_SPACING_S,
     KALSHI_BASE,
@@ -74,11 +75,17 @@ async def fetch_kalshi_totals(
     series_ticker: str | None = None,
     http_client: httpx.AsyncClient | None = None,
     limit: int = 100,
+    horizon_days: int | None = None,
 ) -> list[VenueGame]:
-    """One VenueGame per (game, line) with OVER/UNDER outcome ids."""
+    """One VenueGame per (game, line) with OVER/UNDER outcome ids.
+
+    ``horizon_days`` bounds how far ahead a game may be (``None`` reads
+    ``ARBYS_DISCOVERY_HORIZON_DAYS``); checked before the per-event market call.
+    """
     series = series_ticker or TOTALS_SERIES.get(sport)
     if series is None:
         raise ValueError(f"no Kalshi totals series known for sport {sport!r}")
+    days = discovery_horizon_days() if horizon_days is None else horizon_days
     owns_client = http_client is None
     client = http_client or httpx.AsyncClient(timeout=15.0, base_url=KALSHI_BASE)
     try:
@@ -90,7 +97,9 @@ async def fetch_kalshi_totals(
 
         games: list[VenueGame] = []
         for ev in events:
-            games.extend(await _parse_totals_event(client, ev, resolver, sport=sport))
+            games.extend(
+                await _parse_totals_event(client, ev, resolver, sport=sport, horizon_days=days)
+            )
             await asyncio.sleep(_REQUEST_SPACING_S)
         return games
     finally:
@@ -99,7 +108,12 @@ async def fetch_kalshi_totals(
 
 
 async def _parse_totals_event(
-    client: httpx.AsyncClient, event: dict, resolver: TeamResolver, *, sport: str
+    client: httpx.AsyncClient,
+    event: dict,
+    resolver: TeamResolver,
+    *,
+    sport: str,
+    horizon_days: int = 0,
 ) -> list[VenueGame]:
     ticker = event.get("event_ticker") or ""
     m = _TICKER_RE.match(ticker)
@@ -117,6 +131,11 @@ async def _parse_totals_event(
         return []
     team_a, team_b = resolver.by_code(pair[0]), resolver.by_code(pair[1])
     if team_a is None or team_b is None:
+        return []
+
+    # The market call is what costs a request; a game past the horizon is
+    # skipped before it is made.
+    if not within_horizon(game_date, days=horizon_days):
         return []
 
     resp = await _get_with_retry(client, "/markets", {"event_ticker": ticker, "limit": 60})

@@ -120,7 +120,9 @@ async def test_fetch_kalshi_totals_one_game_per_strike():
         timeout=5.0,
         base_url="https://api.elections.kalshi.com/trade-api/v2",
     )
-    games = await fetch_kalshi_totals(resolver=NFL_RESOLVER, sport="nfl", http_client=client)
+    games = await fetch_kalshi_totals(
+        resolver=NFL_RESOLVER, sport="nfl", http_client=client, horizon_days=0
+    )
     await client.aclose()
 
     assert len(games) == 2  # the strike-less market is skipped

@@ -12,6 +12,7 @@ from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 import httpx
 
+from .horizon import discovery_horizon_days, within_horizon
 from .teams import Team, TeamResolver
 
 KALSHI_BASE = "https://api.elections.kalshi.com/trade-api/v2"
@@ -98,11 +99,18 @@ async def fetch_kalshi_team_games(
     series_ticker: str | None = None,
     http_client: httpx.AsyncClient | None = None,
     limit: int = 100,
+    horizon_days: int | None = None,
 ) -> list[VenueGame]:
-    """Fetch open game events for a team sport and return a VenueGame per game."""
+    """Fetch open game events for a team sport and return a VenueGame per game.
+
+    ``horizon_days`` bounds how far ahead a game may be (``None`` reads
+    ``ARBYS_DISCOVERY_HORIZON_DAYS``); it is checked before the per-event
+    market call, which is what costs against Kalshi's rate limit.
+    """
     series = series_ticker or SERIES_TICKERS.get(sport)
     if series is None:
         raise ValueError(f"no Kalshi series ticker known for sport {sport!r}")
+    days = discovery_horizon_days() if horizon_days is None else horizon_days
     owns_client = http_client is None
     client = http_client or httpx.AsyncClient(timeout=15.0, base_url=KALSHI_BASE)
     try:
@@ -114,7 +122,9 @@ async def fetch_kalshi_team_games(
 
         games: list[VenueGame] = []
         for ev in events:
-            game = await _parse_kalshi_event(client, ev, resolver, sport=sport)
+            game = await _parse_kalshi_event(
+                client, ev, resolver, sport=sport, horizon_days=days
+            )
             if game is not None:
                 games.append(game)
             await asyncio.sleep(_REQUEST_SPACING_S)
@@ -137,7 +147,12 @@ async def fetch_kalshi_mlb_games(
 
 
 async def _parse_kalshi_event(
-    client: httpx.AsyncClient, event: dict, resolver: TeamResolver, *, sport: str = "mlb"
+    client: httpx.AsyncClient,
+    event: dict,
+    resolver: TeamResolver,
+    *,
+    sport: str = "mlb",
+    horizon_days: int = 0,
 ) -> VenueGame | None:
     event_ticker = event.get("event_ticker") or ""
     if not event_ticker:
@@ -145,6 +160,10 @@ async def _parse_kalshi_event(
 
     game_date = _parse_ticker_date(event_ticker)
     if game_date is None:
+        return None
+    # The market call is what costs a request; a game past the horizon is
+    # skipped before it is made.
+    if not within_horizon(game_date, days=horizon_days):
         return None
 
     markets_resp = await _get_with_retry(
