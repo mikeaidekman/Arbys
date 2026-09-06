@@ -1,4 +1,4 @@
-"""CLI: run one MLB discovery pass; print or upsert cross-venue event groups."""
+"""CLI: run one full discovery pass; print or upsert cross-venue event groups."""
 
 from __future__ import annotations
 
@@ -13,8 +13,8 @@ from arbys.discovery.service import discover_all_event_groups
 
 
 async def _main(dry_run: bool) -> int:
-    groups = await discover_all_event_groups()
-    print(f"discovered {len(groups)} cross-venue group(s):")
+    groups, complete = await discover_all_event_groups()
+    print(f"discovered {len(groups)} cross-venue group(s) (pass complete: {complete}):")
     for g in groups:
         print(f"  - {g.id}  ({g.title})  legs={len(g.legs)}")
         for leg in g.legs:
