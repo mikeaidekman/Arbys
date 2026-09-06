@@ -121,8 +121,9 @@ async def test_moneyline_maps_teams_to_long_and_short_outcome_ids():
 
 
 @pytest.mark.asyncio
-async def test_spread_markets_are_skipped_in_phase_1():
-    """Spreads are Phase 2. The payload contains one; it must not appear."""
+async def test_moneyline_fetcher_yields_only_moneyline_games():
+    """Spreads have their own fetcher (`fetch_polymarket_us_spreads`). The
+    payload contains one and the moneyline fetcher must not emit it."""
     client = _client(MLB_EVENTS)
     games = await fetch_polymarket_us_games(
         resolver=MLB_RESOLVER, sport="mlb", http_client=client

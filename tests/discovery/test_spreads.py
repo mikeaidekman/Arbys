@@ -11,6 +11,7 @@ import httpx
 import pytest
 
 from arbys.discovery.kalshi_spreads import anchor_code_from_ticker, fetch_kalshi_spreads
+from arbys.discovery.polymarket_us import _title_agrees, fetch_polymarket_us_spreads
 from arbys.discovery.teams import MLB_RESOLVER, NFL_RESOLVER
 
 # --- Kalshi -----------------------------------------------------------------
@@ -131,3 +132,170 @@ async def test_kalshi_event_past_the_horizon_makes_no_market_call():
 async def test_kalshi_unknown_sport_raises():
     with pytest.raises(ValueError):
         await fetch_kalshi_spreads(resolver=NFL_RESOLVER, sport="curling", horizon_days=0)
+
+
+# --- Polymarket US ------------------------------------------------------------
+
+
+def _pm_client(payload) -> httpx.AsyncClient:
+    def handler(request: httpx.Request) -> httpx.Response:
+        assert "gateway.polymarket.us" in str(request.url)
+        return httpx.Response(200, json=payload)
+
+    return httpx.AsyncClient(transport=httpx.MockTransport(handler), timeout=5.0)
+
+
+def _pm_event(markets: list[dict]) -> dict:
+    return {
+        "events": [
+            {
+                "slug": "mlb-mil-cin-2026-09-06",
+                "startTime": "2026-09-06T16:10:00Z",
+                "live": False,
+                "ended": False,
+                "teams": [
+                    {"name": "Milwaukee Brewers", "displayAbbreviation": "MIL", "safeName": "Brewers"},
+                    {"name": "Cincinnati Reds", "displayAbbreviation": "CIN", "safeName": "Reds"},
+                ],
+                "markets": markets,
+            }
+        ]
+    }
+
+
+def _pm_spread(
+    slug: str,
+    line,
+    title: str | None,
+    *,
+    kind: str = "baseball_team_full_game_spread",
+    long_team: str = "Milwaukee Brewers",
+    short_team: str = "Cincinnati Reds",
+) -> dict:
+    market = {
+        "slug": slug,
+        "sportsMarketType": kind,
+        "line": line,
+        "marketSides": [
+            {"long": True, "team": {"name": long_team}},
+            {"long": False, "team": {"name": short_team}},
+        ],
+    }
+    if title is not None:
+        market["title"] = title
+    return market
+
+
+# Observed live 2026-09-06. `line` is signed relative to the first-listed
+# team; the title names the team that must win by more than |line|.
+POS = _pm_spread("asc-mlb-mil-cin-2026-09-06-pos-2pt5", 2.5, "Cincinnati Reds wins by over 2.5 runs")
+NEG = _pm_spread("asc-mlb-mil-cin-2026-09-06-neg-2pt5", -2.5, "Milwaukee Brewers wins by over 2.5 runs")
+
+
+async def _pm_games(markets: list[dict]):
+    client = _pm_client(_pm_event(markets))
+    try:
+        return await fetch_polymarket_us_spreads(
+            resolver=MLB_RESOLVER, sport="mlb", http_client=client
+        )
+    finally:
+        await client.aclose()
+
+
+async def test_polymarket_negative_line_anchors_the_first_team():
+    games = await _pm_games([NEG])
+    assert len(games) == 1
+    g = games[0]
+    assert (g.market_type, g.anchor, g.line) == ("spread", "MIL", Decimal("2.5"))
+    assert isinstance(g.line, Decimal)
+    assert g.outcome_ids == {
+        "MIL": "asc-mlb-mil-cin-2026-09-06-neg-2pt5:LONG",
+        "CIN": "asc-mlb-mil-cin-2026-09-06-neg-2pt5:SHORT",
+    }
+    assert g.game_date == date(2026, 9, 6)
+    assert g.start_time == datetime(2026, 9, 6, 16, 10, tzinfo=UTC)
+    assert (g.live, g.ended) == (False, False)
+
+
+async def test_polymarket_positive_line_anchors_the_second_team_with_the_same_outcome_ids():
+    """Only the anchor flips with the sign. First team is always LONG."""
+    games = await _pm_games([POS])
+    assert len(games) == 1
+    g = games[0]
+    assert (g.anchor, g.line) == ("CIN", Decimal("2.5"))
+    assert g.outcome_ids == {
+        "MIL": "asc-mlb-mil-cin-2026-09-06-pos-2pt5:LONG",
+        "CIN": "asc-mlb-mil-cin-2026-09-06-pos-2pt5:SHORT",
+    }
+
+
+async def test_polymarket_title_naming_the_other_team_is_skipped(caplog):
+    """Two venue fields contradicting each other is the signal that the sign
+    convention moved. A backwards sign near even money is a 2-4c phantom edge
+    the plausible-edge ceiling cannot see, so the market is refused."""
+    bad = _pm_spread("asc-mlb-mil-cin-2026-09-06-pos-2pt5", 2.5, "Milwaukee Brewers wins by over 2.5 runs")
+    with caplog.at_level("WARNING"):
+        games = await _pm_games([bad])
+    assert games == []
+    assert "contradicts" in caplog.text
+
+
+async def test_polymarket_title_with_a_different_line_is_skipped():
+    bad = _pm_spread("asc-mlb-mil-cin-2026-09-06-pos-2pt5", 2.5, "Cincinnati Reds wins by over 1.5 runs")
+    assert await _pm_games([bad]) == []
+
+
+async def test_polymarket_unparseable_title_is_accepted_and_counted(caplog):
+    """The structure is the source of truth; the title is a guard. A reworded
+    title disables the guard visibly rather than silently zeroing the league."""
+    odd = _pm_spread("asc-mlb-mil-cin-2026-09-06-pos-2pt5", 2.5, "Reds to cover the run line")
+    with caplog.at_level("WARNING"):
+        games = await _pm_games([odd])
+    assert len(games) == 1
+    assert "matched no known pattern" in caplog.text
+
+
+async def test_polymarket_missing_title_is_accepted():
+    games = await _pm_games([_pm_spread("asc-mlb-mil-cin-2026-09-06-pos-2pt5", 2.5, None)])
+    assert len(games) == 1
+
+
+async def test_polymarket_long_side_that_is_not_the_first_team_is_skipped():
+    swapped = _pm_spread(
+        "asc-mlb-mil-cin-2026-09-06-neg-2pt5", -2.5, "Cincinnati Reds wins by over 2.5 runs",
+        long_team="Cincinnati Reds", short_team="Milwaukee Brewers",
+    )
+    assert await _pm_games([swapped]) == []
+
+
+async def test_polymarket_zero_and_missing_lines_are_skipped():
+    zero = _pm_spread("asc-mlb-mil-cin-2026-09-06-pos-0", 0, "Cincinnati Reds wins by over 0 runs")
+    missing = _pm_spread("asc-mlb-mil-cin-2026-09-06-pos-2pt5", None, "Cincinnati Reds wins by over 2.5 runs")
+    assert await _pm_games([zero, missing]) == []
+
+
+async def test_polymarket_period_spreads_are_ignored():
+    """First-five, half and quarter spreads are Phase 3 and distinct types."""
+    f5 = _pm_spread(
+        "asc-mlb-mil-cin-2026-09-06-f5-pos-1pt5", 1.5,
+        "Cincinnati Reds wins by over 1.5 runs in first 5 innings",
+        kind="baseball_team_first_five_spread",
+    )
+    assert await _pm_games([f5]) == []
+
+
+async def test_polymarket_winner_and_total_markets_are_not_spreads():
+    winner = {"slug": "aec-mlb-mil-cin-2026-09-06", "sportsMarketType": "baseball_team_full_game_winner",
+              "marketSides": [{"long": True, "team": {"name": "Milwaukee Brewers"}},
+                              {"long": False, "team": {"name": "Cincinnati Reds"}}]}
+    assert await _pm_games([winner]) == []
+
+
+def test_title_agrees_is_tri_state():
+    assert _title_agrees("Cincinnati Reds wins by over 2.5 runs", "Cincinnati Reds", Decimal("2.5")) is True
+    assert _title_agrees("Seattle Seahawks wins by over 21.5 points", "Seattle Seahawks", Decimal("21.5")) is True
+    assert _title_agrees("Tar Heels wins by over 20.5 points", "Tar Heels", Decimal("20.5")) is True
+    assert _title_agrees("Cincinnati Reds wins by over 2.5 runs", "Milwaukee Brewers", Decimal("2.5")) is False
+    assert _title_agrees("Cincinnati Reds wins by over 1.5 runs", "Cincinnati Reds", Decimal("2.5")) is False
+    assert _title_agrees("Reds to cover", "Cincinnati Reds", Decimal("2.5")) is None
+    assert _title_agrees(None, "Cincinnati Reds", Decimal("2.5")) is None
