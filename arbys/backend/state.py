@@ -434,6 +434,40 @@ def max_days_to_start() -> float | None:
     return None if value <= 0 else value
 
 
+DEFAULT_MAX_PLAUSIBLE_EDGE = Decimal("0.15")
+
+
+def max_plausible_edge() -> Decimal | None:
+    """Largest per-contract profit a ticket may claim. ``None`` disables it.
+
+    Exactly one leg of a complete ticket settles at $1, so the edge is $1
+    minus what the legs cost. The most divergence ever measured between Kalshi
+    and Polymarket US is 2.75c, and both venues charge a fee peaking at a coin
+    flip, so a real edge is small. An edge of tens of cents is not an
+    opportunity; it is a leg priced off a book that is not real.
+
+    Measured 2026-09-05, during a Polymarket system-wide outage: our book held
+    a frozen Polymarket total while Kalshi tracked the live game, and
+    `ncaaf-AUB-BAY` Over 45.5 filled at a combined 36.8c against a $1 payout.
+    Return on capital that day was 10.64% against a 0.66% average.
+
+    An edge **ceiling**, which is the opposite of the edge *floor* that remains
+    an explicit non-goal: it refuses impossible edges and never small ones. The
+    0.15 default is five times the largest divergence ever observed, so it only
+    ever catches a broken quote.
+
+    Set ARBYS_MAX_PLAUSIBLE_EDGE=0 to turn it off.
+    """
+    raw = os.environ.get("ARBYS_MAX_PLAUSIBLE_EDGE")
+    if raw is None:
+        return DEFAULT_MAX_PLAUSIBLE_EDGE
+    try:
+        value = Decimal(raw)
+    except (ArithmeticError, ValueError):
+        return DEFAULT_MAX_PLAUSIBLE_EDGE
+    return None if value <= 0 else value
+
+
 # venue_id -> factory(outcome_ids) -> MarketDataAdapter
 AdapterFactory = Callable[[list[str]], MarketDataAdapter]
 

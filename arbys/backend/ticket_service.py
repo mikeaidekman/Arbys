@@ -39,9 +39,14 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from ..adapters.base import ExecutionIntent, IntentLeg
 from ..db import repositories as repo
 from ..db.session import run_write
-from ..shared.arb_engine import ArbOpportunity
+from ..shared.arb_engine import ArbOpportunity, net_edge_per_contract
 from ..shared.execution_router import InsufficientLegsError
-from .state import max_days_to_start, max_leg_age_skew_s, max_outcome_stake
+from .state import (
+    max_days_to_start,
+    max_leg_age_skew_s,
+    max_outcome_stake,
+    max_plausible_edge,
+)
 
 if TYPE_CHECKING:  # pragma: no cover - import cycle guard
     from .state import AppState
@@ -260,6 +265,44 @@ def stale_leg_skew(state: AppState, live: ArbOpportunity) -> str | None:
     )[:256]
 
 
+def implausible_edge(live: ArbOpportunity) -> str | None:
+    """Why this ticket claims more profit than the venues could offer, or None.
+
+    **A price check, and that is the whole point.** Back-dating, the quote age
+    limit and `stale_leg_skew` all derive from the venue's own `transactTime`,
+    so one frozen book that arrives stamped as current defeats all three at
+    once. Nothing else in the system asks whether the number itself is
+    possible.
+
+    Measured 2026-09-05, during a Polymarket system-wide outage: `ncaaf-AUB-BAY`
+    Over 45.5 filled as a pair costing 36.8c against a $1 payout, booking
+    $19.59 on $11.41 of stake, and `ncaaf-DUKE-TULN` Over 51.5 cost 64.1c and
+    booked $92.35. Nothing sells a certain dollar for 37 cents; the Polymarket
+    short leg was derived from a book frozen near its pre-game price while
+    Kalshi tracked the live game.
+
+    Gross of fees deliberately. Fees only shrink the real edge, so judging the
+    gross figure refuses in the safe direction and keeps this guard
+    independent of the fee registry.
+
+    An empty or single-leg buy set refuses too, for the same reason: a ticket
+    whose payout leg cannot be identified is not one to fill.
+    """
+    ceiling = max_plausible_edge()
+    if ceiling is None:
+        return None
+    costs = [leg.price for leg in live.legs if leg.is_buy]
+    edge = net_edge_per_contract(costs)
+    if edge <= ceiling:
+        return None
+    total = sum(costs, Decimal("0"))
+    return (
+        f"implausible_edge:{edge:.4f}/contract on {live.event_group_id} "
+        f"exceeds {ceiling} (ARBYS_MAX_PLAUSIBLE_EDGE); {len(costs)} buy legs "
+        f"cost {total:.4f} against a $1 payout"
+    )[:256]
+
+
 def cap_breach(state: AppState, live: ArbOpportunity, account_id: str) -> str | None:
     """Why this ticket would breach ARBYS_MAX_OUTCOME_STAKE, or None.
 
@@ -461,6 +504,19 @@ async def _submit_checked(
                 source=source, status="missed", reason=reason, economics=None,
             )
         return TicketResult(ticket_id, "missed", (), reason)
+
+    # An edge no venue could offer means a leg is priced off a book that is
+    # not real. Judged before skew and before the cap: an impossible price is
+    # not a question of whether the legs are contemporaneous or affordable.
+    impossible = implausible_edge(live)
+    if impossible is not None:
+        if record_nonfill:
+            await _write_ticket(
+                ticket_id=ticket_id, account_id=account_id, opp=live, title=title,
+                starts_at=starts_at, source=source, status="rejected",
+                reason=impossible, economics=live,
+            )
+        return TicketResult(ticket_id, "rejected", (), impossible)
 
     # Before the cap, because a ticket priced off a leg the venue abandoned
     # should not be judged on whether we could afford it.

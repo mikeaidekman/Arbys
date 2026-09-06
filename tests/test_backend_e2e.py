@@ -294,6 +294,10 @@ def test_repeat_fills_stop_at_the_position_cap(monkeypatch):
 
 def test_position_cap_can_be_disabled(monkeypatch):
     monkeypatch.setenv("ARBYS_MAX_OUTCOME_STAKE", "0")
+    # 0.10/0.20 implies a 70c edge, which the plausibility ceiling refuses as a
+    # broken quote. These are round numbers chosen to make the position
+    # arithmetic below readable; this test pins the cap, not a realistic book.
+    monkeypatch.setenv("ARBYS_MAX_PLAUSIBLE_EDGE", "0")
     with TestClient(create_app()) as client:
         _register(client, "eg-nocap", "n-yes", "n-no")
         # Depth of 100 on each ask pins every ticket at 100 units.
@@ -322,6 +326,9 @@ def test_execute_by_event_group_picks_that_group(tmp_path, monkeypatch):
     # arithmetic on a $200 budget, and it exists to pin *ranking*, not
     # whatever the shipped default happens to be.
     monkeypatch.setenv("ARBYS_MAX_TICKET_STAKE", "200")
+    # Likewise synthetic: eg-beta at 0.10/0.30 implies a 60c edge. This test
+    # exists to pin *ranking* between two groups, not the realism of either.
+    monkeypatch.setenv("ARBYS_MAX_PLAUSIBLE_EDGE", "0")
     with TestClient(create_app()) as client:
         _register(client, "eg-alpha", "a-yes", "a-no")
         _register(client, "eg-beta", "b-yes", "b-no")

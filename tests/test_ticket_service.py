@@ -39,7 +39,10 @@ async def _fresh_state(tmp_path: Path, seed_reference_rows):
 
 
 async def _arb_group(
-    *, ask_size: Decimal | None = None, start_time: datetime | None = None
+    *,
+    ask_size: Decimal | None = None,
+    start_time: datetime | None = None,
+    prices: tuple[str, str] = ("0.40", "0.50"),
 ):
     """An eg-1 group quoted 0.40 / 0.50 — a live 10c gross edge."""
     s = get_state()
@@ -56,7 +59,7 @@ async def _arb_group(
     s.engine.register_group(group)
     async with session_scope() as session:
         await repo.ensure_paper_account(session, s.default_account_id)
-    for oid, px in (("p-yes", Decimal("0.40")), ("k-no", Decimal("0.50"))):
+    for oid, px in (("p-yes", Decimal(prices[0])), ("k-no", Decimal(prices[1]))):
         s.quotebook.upsert(
             Quote(
                 outcome_id=oid,
@@ -696,6 +699,87 @@ async def test_the_far_out_refusal_honours_record_nonfill_false(monkeypatch):
     result = await submit_arb_ticket(s, opp, source="auto", record_nonfill=False)
 
     assert result.status == "rejected"
+    async with session_scope() as session:
+        tickets = await repo.list_paper_tickets(session, s.default_account_id)
+    assert tickets == []
+
+
+# --- ARBYS_MAX_PLAUSIBLE_EDGE: an impossible edge is a broken quote ---------
+
+
+async def test_an_impossible_edge_is_refused(monkeypatch):
+    """A matched pair pays exactly $1, so a 63c edge is a mispriced leg.
+
+    Measured 2026-09-05, during a Polymarket system-wide outage: our book held
+    a frozen Polymarket total while Kalshi tracked the live game, and
+    `ncaaf-AUB-BAY` Over 45.5 filled as a pair costing 36.8c against a $1
+    payout -- $19.59 booked on $11.41 of stake. The largest divergence ever
+    observed between these two venues is 2.75c.
+
+    Every existing guard passed, because every existing guard measures *time*:
+    back-dating, the 600s age limit and the 30s leg-skew check all derive from
+    the venue's own transactTime, and a frozen book carrying a current
+    timestamp satisfies all three. Nothing asked whether the price was
+    possible. This is that question.
+    """
+    monkeypatch.delenv("ARBYS_MAX_PLAUSIBLE_EDGE", raising=False)  # default: 0.15
+    s, _ = await _arb_group(prices=("0.17", "0.20"))
+    opp = s.engine.evaluate_now("eg-1")[0]
+
+    result = await submit_arb_ticket(s, opp, source="auto")
+
+    assert result.status == "rejected"
+    assert result.reason is not None
+    assert result.reason.startswith("implausible_edge:")
+    assert result.order_ids == ()
+    async with session_scope() as session:
+        tickets = await repo.list_paper_tickets(session, s.default_account_id)
+    assert [t["status"] for t in tickets] == ["rejected"]
+
+
+async def test_a_realistic_edge_still_fills(monkeypatch):
+    """The ceiling refuses impossible edges, never small ones.
+
+    An edge *floor* stays an explicit non-goal. This is its opposite and must
+    not become one by accident, so a fat but achievable edge has to pass.
+    """
+    monkeypatch.delenv("ARBYS_MAX_PLAUSIBLE_EDGE", raising=False)
+    s, _ = await _arb_group(prices=("0.42", "0.45"))
+    opp = s.engine.evaluate_now("eg-1")[0]
+
+    result = await submit_arb_ticket(s, opp, source="auto")
+
+    assert result.status == "filled", result.reason
+
+
+async def test_the_edge_ceiling_can_be_disabled(monkeypatch):
+    monkeypatch.setenv("ARBYS_MAX_PLAUSIBLE_EDGE", "0")
+    s, _ = await _arb_group(prices=("0.17", "0.20"))
+    opp = s.engine.evaluate_now("eg-1")[0]
+
+    result = await submit_arb_ticket(s, opp, source="auto")
+
+    assert result.status == "filled", result.reason
+
+
+async def test_the_edge_ceiling_refusal_honours_record_nonfill_false(monkeypatch):
+    """Consistent with every other pre-execution refusal.
+
+    The auto-trader passes this only after it has already written one non-fill
+    row for the group inside its window, so the fault still leaves a trace at
+    about a row a minute. Exempting this guard would instead flood the ledger
+    during exactly the incident it exists to surface, because a feed serving
+    impossible prices republishes on every depth tick.
+    """
+    monkeypatch.delenv("ARBYS_MAX_PLAUSIBLE_EDGE", raising=False)
+    s, _ = await _arb_group(prices=("0.17", "0.20"))
+    opp = s.engine.evaluate_now("eg-1")[0]
+
+    result = await submit_arb_ticket(s, opp, source="auto", record_nonfill=False)
+
+    assert result.status == "rejected"
+    assert result.reason is not None
+    assert result.reason.startswith("implausible_edge:")
     async with session_scope() as session:
         tickets = await repo.list_paper_tickets(session, s.default_account_id)
     assert tickets == []

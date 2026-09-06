@@ -22,7 +22,7 @@ Run everything from the repo root with the venv Python — `venv\Scripts\python.
 — rather than a bare `python`.
 
 ```powershell
-venv\Scripts\python.exe -m pytest -q            # 538 tests, must stay green
+venv\Scripts\python.exe -m pytest -q            # 542 tests, must stay green
 venv\Scripts\python.exe -m ruff check .         # must stay clean
 venv\Scripts\python.exe -m mypy arbys           # see caveat below — NOT clean today
 ```
@@ -519,6 +519,17 @@ Feature flags in `.env` (copy from `.env.example`; `.env` is gitignored):
   the Fill button therefore stays live on a far-out row; greying it needs a
   flag on `/monitored` and is deferred until a click actually hits the
   refusal.
+- `ARBYS_MAX_PLAUSIBLE_EDGE` — largest per-contract profit a ticket may
+  claim, default 0.15, `0` disables. An edge **ceiling**, and the exact
+  opposite of the edge *floor* that stays a non-goal: it refuses impossible
+  edges and never small ones. Exactly one leg settles at $1, so the edge is $1
+  minus what the legs cost, and the most divergence ever measured between the
+  venues is 2.75c. **It is the only guard that reads the price rather than the
+  clock**, which is why it exists — see **A frozen book can arrive stamped as
+  current** below. Applied at submission in
+  `ticket_service.implausible_edge`, and deliberately **not** pre-checked away
+  by the auto-trader: an impossible edge is a fault signal, not a routine
+  condition, so it leaves an audit row.
 - `ARBYS_POLYMARKET_US_POLL_S` — seconds between `/bbo` sweeps, default 5,
   clamped to a 1s floor. This is the **credential-less fallback** path only;
   with credentials set the WebSocket is used instead (see **Venues**).
@@ -1071,6 +1082,24 @@ against a live Kalshi leg.
   The rejection reason carries each leg's age, because **nothing else records
   it** — `paper_order` has no age column, so without that string the evidence
   for a phantom fill lives only as long as the process that saw it.
+- **A price no venue could offer is refused (2026-09-05).** Every other
+  invariant here measures *time*, and all of them derive from one field: the
+  venue's own `transactTime`. Back-dating, `ARBYS_QUOTE_MAX_AGE_S` and
+  `stale_leg_skew` are therefore defeated together by a single failure, a
+  frozen book that arrives stamped as current. During a Polymarket
+  system-wide outage that is what happened: our book held college-football
+  totals near their pre-game prices while Kalshi tracked the live games, and
+  the derived short leg inherited the staleness inverted, which made it look
+  absurdly cheap. `ncaaf-AUB-BAY` Over 45.5 filled as a pair costing **36.8c
+  against a $1 payout**, booking $19.59 on $11.41; `ncaaf-DUKE-TULN` Over 51.5
+  cost 64.1c and booked $92.35. Return on capital that day was **10.64%
+  against a 0.66% average**, and **128 tickets settled won with 0 lost** —
+  which is not itself a signal, because a phantom pair is as arithmetically
+  certain as a real one once both legs are bought under a dollar. The
+  discriminator is the *size* of the edge, never the win rate.
+  `ARBYS_MAX_PLAUSIBLE_EDGE` asks the one question no clock can answer.
+  **Do not "fix" a recurrence by loosening it** — an edge of tens of cents is
+  a broken feed, not an opportunity.
 - **Groups are retired.** Discovery removes `source="discovery"` groups a
   *complete* pass no longer finds; `source="manual"` is never touched, and
   retirement is skipped when any sub-pass raised so a venue outage isn't read
