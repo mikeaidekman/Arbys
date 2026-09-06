@@ -105,8 +105,14 @@ async def test_kalshi_event_past_the_horizon_makes_no_market_call():
     """The per-event /markets request is what costs against Kalshi's rate
     limit; a game beyond the horizon is skipped before it is made."""
     far = {"events": [{"event_ticker": "KXNFLSPREAD-30SEP09NESEA"}]}
+    far_markets = {
+        "markets": [
+            {"ticker": "KXNFLSPREAD-30SEP09NESEA-SEA4", "floor_strike": 3.5, "strike_type": "greater"},
+            {"ticker": "KXNFLSPREAD-30SEP09NESEA-NE4", "floor_strike": 3.5, "strike_type": "greater"},
+        ]
+    }
     calls: list[str] = []
-    client = _kalshi_client(far, KALSHI_MARKETS, calls)
+    client = _kalshi_client(far, far_markets, calls)
     games = await fetch_kalshi_spreads(
         resolver=NFL_RESOLVER, sport="nfl", http_client=client, horizon_days=3
     )
