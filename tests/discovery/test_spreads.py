@@ -11,6 +11,7 @@ import httpx
 import pytest
 
 from arbys.discovery.kalshi_spreads import anchor_code_from_ticker, fetch_kalshi_spreads
+from arbys.discovery.matcher import match_games, match_to_event_group
 from arbys.discovery.polymarket_us import _title_agrees, fetch_polymarket_us_spreads
 from arbys.discovery.teams import MLB_RESOLVER, NFL_RESOLVER
 
@@ -299,3 +300,111 @@ def test_title_agrees_is_tri_state():
     assert _title_agrees("Cincinnati Reds wins by over 1.5 runs", "Cincinnati Reds", Decimal("2.5")) is False
     assert _title_agrees("Reds to cover", "Cincinnati Reds", Decimal("2.5")) is None
     assert _title_agrees(None, "Cincinnati Reds", Decimal("2.5")) is None
+
+
+# --- Cross-venue: THE convention test -------------------------------------------
+
+KALSHI_MILCIN_EVENTS = {"events": [{"event_ticker": "KXMLBSPREAD-26SEP061210MILCIN"}]}
+
+
+def _kalshi_milcin(*suffixes_and_strikes: tuple[str, float]) -> dict:
+    return {
+        "markets": [
+            {"ticker": f"KXMLBSPREAD-26SEP061210MILCIN-{suffix}",
+             "floor_strike": strike, "strike_type": "greater"}
+            for suffix, strike in suffixes_and_strikes
+        ]
+    }
+
+
+async def _both(kalshi_markets: dict, pm_markets: list[dict]):
+    k_client = _kalshi_client(KALSHI_MILCIN_EVENTS, kalshi_markets)
+    p_client = _pm_client(_pm_event(pm_markets))
+    try:
+        kalshi = await fetch_kalshi_spreads(
+            resolver=MLB_RESOLVER, sport="mlb", http_client=k_client, horizon_days=0
+        )
+        poly = await fetch_polymarket_us_spreads(
+            resolver=MLB_RESOLVER, sport="mlb", http_client=p_client
+        )
+    finally:
+        await k_client.aclose()
+        await p_client.aclose()
+    return kalshi, poly
+
+
+async def test_a_positive_polymarket_line_pairs_with_kalshi_yes_on_the_second_team():
+    """Kalshi CIN3 ("Cincinnati wins by over 2.5 runs") and Polymarket
+    pos-2pt5 (Brewers +2.5, long = Brewers) are the same binary with opposite
+    sides: the Reds covering is Kalshi YES and Polymarket SHORT.
+
+    Pinned live on 2026-09-06 16:20Z, NFL: asc-nfl-ne-sea-…-pos-3pt5 long
+    0.51/0.52 vs KXNFLSPREAD-26SEP09NESEA-SEA4 NO 0.51/0.52; pos-10pt5 long
+    0.72/0.74 vs SFLAR-LAR11 NO 0.72/0.74. Getting this backwards near even
+    money produces a 2-4c phantom edge the plausible-edge ceiling cannot
+    see, which is why this test exists.
+    """
+    kalshi, poly = await _both(_kalshi_milcin(("CIN3", 2.5)), [POS])
+    matches = match_games(kalshi, poly)
+    assert len(matches) == 1
+    group = match_to_event_group(matches[0])
+
+    assert group.id == "mlb-CIN-MIL-2026-09-06-spread-CIN-2.5"
+    assert group.title == "Cincinnati Reds vs Milwaukee Brewers — Cincinnati Reds -2.5 (2026-09-06)"
+    assert group.start_time == datetime(2026, 9, 6, 16, 10, tzinfo=UTC)
+    yes = {leg.outcome_id for leg in group.legs if leg.is_yes_side}
+    no = {leg.outcome_id for leg in group.legs if not leg.is_yes_side}
+    assert yes == {
+        "KXMLBSPREAD-26SEP061210MILCIN-CIN3:YES",
+        "asc-mlb-mil-cin-2026-09-06-pos-2pt5:SHORT",
+    }
+    assert no == {
+        "KXMLBSPREAD-26SEP061210MILCIN-CIN3:NO",
+        "asc-mlb-mil-cin-2026-09-06-pos-2pt5:LONG",
+    }
+    assert {leg.venue_id for leg in group.legs} == {"kalshi", "polymarket_us"}
+
+
+async def test_a_negative_polymarket_line_pairs_with_kalshi_yes_on_the_first_team():
+    """neg-3pt5 long 0.26/0.27 vs NESEA-NE4 YES 0.25/0.27; neg-10pt5 long
+    0.08/0.11 vs SFLAR-SF11 YES 0.08/0.14 (2026-09-06)."""
+    kalshi, poly = await _both(_kalshi_milcin(("MIL3", 2.5)), [NEG])
+    matches = match_games(kalshi, poly)
+    assert len(matches) == 1
+    group = match_to_event_group(matches[0])
+    assert group.id == "mlb-CIN-MIL-2026-09-06-spread-MIL-2.5"
+    yes = {leg.outcome_id for leg in group.legs if leg.is_yes_side}
+    assert yes == {
+        "KXMLBSPREAD-26SEP061210MILCIN-MIL3:YES",
+        "asc-mlb-mil-cin-2026-09-06-neg-2pt5:LONG",
+    }
+
+
+async def test_opposite_anchors_on_the_same_line_never_pair_across_venues():
+    """Kalshi MIL3 (Brewers by more than 2.5) against Polymarket pos-2pt5
+    (Reds by more than 2.5) share a line and a game and are different bets."""
+    kalshi, poly = await _both(_kalshi_milcin(("MIL3", 2.5)), [POS])
+    assert match_games(kalshi, poly) == []
+
+
+async def test_a_full_ladder_yields_one_group_per_shared_anchor_and_line():
+    """Kalshi lists ±1.5/±2.5/±3.5 for MLB, Polymarket only ±1.5/±2.5; the
+    intersection is what becomes groups. Observed 4 per MLB game live."""
+    pm = [
+        _pm_spread("asc-mlb-mil-cin-2026-09-06-neg-1pt5", -1.5, "Milwaukee Brewers wins by over 1.5 runs"),
+        _pm_spread("asc-mlb-mil-cin-2026-09-06-neg-2pt5", -2.5, "Milwaukee Brewers wins by over 2.5 runs"),
+        _pm_spread("asc-mlb-mil-cin-2026-09-06-pos-1pt5", 1.5, "Cincinnati Reds wins by over 1.5 runs"),
+        _pm_spread("asc-mlb-mil-cin-2026-09-06-pos-2pt5", 2.5, "Cincinnati Reds wins by over 2.5 runs"),
+    ]
+    kalshi, poly = await _both(
+        _kalshi_milcin(("MIL2", 1.5), ("MIL3", 2.5), ("MIL4", 3.5),
+                       ("CIN2", 1.5), ("CIN3", 2.5), ("CIN4", 3.5)),
+        pm,
+    )
+    ids = sorted(m.event_group_id() for m in match_games(kalshi, poly))
+    assert ids == [
+        "mlb-CIN-MIL-2026-09-06-spread-CIN-1.5",
+        "mlb-CIN-MIL-2026-09-06-spread-CIN-2.5",
+        "mlb-CIN-MIL-2026-09-06-spread-MIL-1.5",
+        "mlb-CIN-MIL-2026-09-06-spread-MIL-2.5",
+    ]
