@@ -1,4 +1,4 @@
-from arbys.discovery.teams import MLB_RESOLVER
+from arbys.discovery.teams import MLB_RESOLVER, NFL_RESOLVER
 
 
 def test_by_code_case_insensitive():
@@ -203,3 +203,28 @@ def test_cfb_table_has_no_duplicate_codes():
     assert len(codes) == len(set(codes)), sorted(
         c for c in set(codes) if codes.count(c) > 1
     )
+
+
+def test_kalshi_code_alias_resolves_to_the_canonical_team():
+    """Kalshi writes the Diamondbacks as AZ in its totals and spread tickers
+    (KXMLBSPREAD-26SEP061410AZHOU-AZ2, observed 2026-09-06) and the Jaguars as
+    JAC; our tables and Polymarket US say ARI and JAX. The alias must yield
+    the canonical Team so outcome keys and spread anchors read ARI/JAX on
+    both venues and match."""
+    ari = MLB_RESOLVER.by_code("AZ")
+    assert ari is not None and ari.code == "ARI"
+    assert MLB_RESOLVER.by_code("az") is ari
+    jax = NFL_RESOLVER.by_code("JAC")
+    assert jax is not None and jax.code == "JAX"
+
+
+def test_unknown_code_is_still_none():
+    assert MLB_RESOLVER.by_code("ZZZ") is None
+
+
+def test_split_team_codes_sees_through_code_aliases():
+    """Both games were dropped from totals before the alias existed."""
+    from arbys.discovery.kalshi_totals import split_team_codes
+
+    assert split_team_codes("AZHOU", MLB_RESOLVER) == ("AZ", "HOU")
+    assert split_team_codes("CLEJAC", NFL_RESOLVER) == ("CLE", "JAC")

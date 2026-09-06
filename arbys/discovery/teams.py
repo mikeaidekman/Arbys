@@ -72,7 +72,10 @@ class TeamResolver:
     """
 
     def __init__(
-        self, teams: tuple[Team, ...], aliases: dict[str, str] | None = None
+        self,
+        teams: tuple[Team, ...],
+        aliases: dict[str, str] | None = None,
+        code_aliases: dict[str, str] | None = None,
     ) -> None:
         self._by_code: dict[str, Team] = {t.code.upper(): t for t in teams}
         # (city_lower, nickname_first_letter) -> code. Handles collisions
@@ -110,9 +113,20 @@ class TeamResolver:
             team = self._by_code.get(code.upper())
             if team is not None:
                 self._by_full[alias.strip().lower()] = team
+        # Venue codes that differ from ours. Kalshi writes the Diamondbacks as
+        # "AZ" and the Jaguars as "JAC" in its totals and spread tickers, where
+        # our tables (and Polymarket US) use "ARI" / "JAX". Resolved to the
+        # canonical Team so `.code` downstream is always ours, which is what
+        # lets a Kalshi anchor match a Polymarket one.
+        self._code_aliases: dict[str, Team] = {}
+        for alias, code in (code_aliases or {}).items():
+            team = self._by_code.get(code.upper())
+            if team is not None:
+                self._code_aliases[alias.upper()] = team
 
     def by_code(self, code: str) -> Team | None:
-        return self._by_code.get(code.upper())
+        key = code.upper()
+        return self._by_code.get(key) or self._code_aliases.get(key)
 
     def by_kalshi_title(self, title: str) -> Team | None:
         """Resolve a title like "Los Angeles D", "New York Y", or "Atlanta"."""
@@ -181,7 +195,11 @@ MLB_ALIASES = {
     "oakland athletics": "ATH",
 }
 
-MLB_RESOLVER = TeamResolver(MLB_TEAMS, aliases=MLB_ALIASES)
+# Kalshi ticker codes that differ from ours. Observed 2026-09-06 in
+# KXMLBSPREAD-26SEP061410AZHOU; the same code appears in KXMLBTOTAL.
+MLB_CODE_ALIASES = {"AZ": "ARI"}
+
+MLB_RESOLVER = TeamResolver(MLB_TEAMS, aliases=MLB_ALIASES, code_aliases=MLB_CODE_ALIASES)
 
 
 # Kalshi NFL codes and titles, verified against KXNFLGAME events on 2026-08-08.
@@ -222,7 +240,10 @@ NFL_TEAMS: tuple[Team, ...] = (
     Team("WAS", "Washington Commanders", "Washington", "Commanders"),
 )
 
-NFL_RESOLVER = TeamResolver(NFL_TEAMS)
+# Observed 2026-09-06 in KXNFLSPREAD-26SEP13CLEJAC.
+NFL_CODE_ALIASES = {"JAC": "JAX"}
+
+NFL_RESOLVER = TeamResolver(NFL_TEAMS, code_aliases=NFL_CODE_ALIASES)
 
 
 # Kalshi WNBA codes and Polymarket US names, verified against KXWNBAGAME
