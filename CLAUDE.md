@@ -137,10 +137,16 @@ Layers, strictly inward-depending:
   UI needed no changes.
 
   A `market_type="spread"` also carries an **anchor** — the participant its
-  signed line is stated for — and the anchor is in the bucket key for the same
-  reason the line is. Nothing sets it yet; every wired market type leaves it
-  `None`. It landed early so adding spreads is registering a market type
-  rather than reopening the matcher. See **Phase 2** below.
+  line is stated for — and the anchor is in the bucket key **and the group
+  id** for the same reason the line is: `CIN -2.5` and `MIL -2.5` on one game
+  are different bets. Wired 2026-09-06 for **nfl, mlb and ncaaf**
+  (`SPREADS_SPORTS`, `SPREADS_SERIES`, `SPREAD_TYPES`); see **Phase 2 —
+  spreads** below for the sign convention, which is the whole difficulty.
+  Group ids read `nfl-NE-SEA-2026-09-09-spread-SEA-3.5` and titles
+  `… — Seattle Seahawks -3.5 (…)`. Both id parsers (server
+  `performance.py`, frontend `performance.ts`) already read the segment
+  after the date as the market type, so `/account` gained a `spread` row
+  with no change.
 
   Totals are wired for **nfl, mlb, wnba and ncaaf** (`TOTALS_SPORTS`), each
   with a `TOTALS_SERIES` ticker and a `TOTAL_TYPES` entry. NBA stays out of
@@ -519,6 +525,28 @@ Feature flags in `.env` (copy from `.env.example`; `.env` is gitignored):
   the Fill button therefore stays live on a far-out row; greying it needs a
   flag on `/monitored` and is deferred until a click actually hits the
   refusal.
+- `ARBYS_DISCOVERY_HORIZON_DAYS` — how far ahead discovery looks, in Eastern
+  calendar days, for **every** market type, default 3, `0` disables. Kalshi
+  lists NFL a week or more out, and on 2026-09-03 the local database held 174
+  upcoming groups of which 127 started beyond the 7-day fill rule — pure
+  subscription cost. The edge is on game day: of 1,248 fills over
+  2026-08-28..09-03, 1,177 were on game day and 18 were four or more days
+  out, worth $0.67 of $177. **A game that is not registered cannot be
+  filled, so this is now what bounds capital lock**; `ARBYS_MAX_DAYS_TO_START`
+  stays as the chokepoint backstop for hand-registered groups. Judged on
+  `game_date`, which both venues carry as an Eastern date, so a game never
+  has one leg inside the window and one outside. Applied once in
+  `service._discover_pair` to every venue list, and again inside the Kalshi
+  event parsers *before* their per-event `/markets` call, since the date is
+  in the ticker — on a Sunday that skips most Kalshi requests, which is where
+  the 429s came from. It does **not** lower the weekend peak: a Saturday CFB
+  slate and a Sunday NFL slate are both inside 3 days by Thursday.
+- `ARBYS_ENABLE_SPREADS` — run the spread sub-passes, **1 by default**. The
+  kill switch for a scale problem found in production: spreads roughly triple
+  the group count, Kalshi carries every ticker on one socket with no known
+  ceiling, and the Polymarket US ceiling was found only by measuring. `0`
+  removes the passes and existing spread groups retire on the next complete
+  pass.
 - `ARBYS_MAX_PLAUSIBLE_EDGE` — largest per-contract profit a ticket may
   claim, default 0.15, `0` disables. An edge **ceiling**, and the exact
   opposite of the edge *floor* that stays a non-goal: it refuses impossible
@@ -957,15 +985,34 @@ The venue swap was Phase 1 of three. Design and plan live in
 [docs/superpowers/specs/](docs/superpowers/specs/) and
 [docs/superpowers/plans/](docs/superpowers/plans/).
 
-- **Phase 2 — spreads** (MLB + NFL). Both venues have deep books
-  (`KXMLBSPREAD`, `KXNFLSPREAD`; `baseball_team_full_game_spread`). The work
-  is sign normalisation: Kalshi names the team in its ticker
-  (`KXMLBSPREAD-…-SF3`, *"San Francisco wins by over 2.5 runs"*, threshold in
-  `floor_strike`), while Polymarket US anchors the signed line to **slug
-  position** (`asc-mlb-cle-det-…-neg-2pt5` means CLE −2.5). `CLE −2.5` and
-  `CLE wins by over 2.5` are the same binary — long side ≡ Kalshi YES — but
-  pairing `CLE −2.5` against `DET −2.5` invents an arb. The matcher's `anchor`
-  field already guards this.
+- **Phase 2 — spreads: wired 2026-09-06** for MLB, NFL and NCAAF. Both
+  venues are normalised to one canonical form — a **positive** line and an
+  **anchor**, the team that must win by more than it — with outcomes keyed by
+  team code like a moneyline; the anchor's leg is the TRUE side. Kalshi is
+  natively in that form: one market per (team, line), the team in the ticker
+  suffix (`KXNFLSPREAD-26SEP09NESEA-SEA4`), the line in `floor_strike`,
+  `strike_type` must be `greater` or the market is refused. Polymarket US
+  lists one market per **signed line on the first-listed team**, and long is
+  always that team covering it, so:
+
+  | Polymarket `line` | anchor | LONG ≡ | pinned by (2026-09-06) |
+  | --- | --- | --- | --- |
+  | `-3.5` (`neg-3pt5`) | first team | Kalshi **YES** on `NE4` | PM 0.26/0.27 vs Kalshi YES 0.25/0.27 |
+  | `+3.5` (`pos-3pt5`) | second team | Kalshi **NO** on `SEA4` | PM 0.51/0.52 vs Kalshi NO 0.51/0.52 |
+
+  Outcomes are therefore *always* first team → `:LONG`, second → `:SHORT`;
+  only the anchor flips with the sign. **Getting this backwards near even
+  money is a 2–4¢ phantom edge that `ARBYS_MAX_PLAUSIBLE_EDGE` cannot see**,
+  so the parser cross-checks its derivation against the venue's own `title`
+  (`"Seattle Seahawks wins by over 3.5 points"`, which named the derived
+  anchor on all 5,267 markets observed) and skips a market that contradicts
+  it; a title matching no pattern is accepted and counted, so a rewording
+  disables the guard visibly rather than zeroing the league.
+  `tests/discovery/test_spreads.py` pins the convention end to end. Two
+  Kalshi codes needed aliases on the way — `AZ` (Diamondbacks) and `JAC`
+  (Jaguars) — and had been silently dropping those games from totals.
+  Period spreads (`baseball_team_first_five_spread`, quarters, halves;
+  `KXMLBF5SPREAD`) are distinct types and remain Phase 3.
 - **Phase 3 — period markets**: first-five, halves, quarters. Kalshi has
   `KXMLBF5SPREAD`, `KXNFL1HTOTAL`, `KXNBA1QSPREAD` and friends; Polymarket US
   has the matching `sportsMarketType`s. Mechanically the same as Phase 2 once

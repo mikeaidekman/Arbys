@@ -176,6 +176,17 @@ One-off from the CLI:
 Discovery matches by `(sport, game_date, unordered team pair)` so opening-day
 tickers with unusual home/away conventions still align across venues.
 
+Three market types are discovered per team sport: moneyline, totals and
+(since 2026-09-06) full-game spreads. A spread group's id carries the anchor
+team and the line — `nfl-NE-SEA-2026-09-09-spread-SEA-3.5` is "Seattle wins
+by more than 3.5", TRUE side Kalshi `SEA4:YES` and Polymarket `…-pos-3pt5:SHORT`.
+`ARBYS_ENABLE_SPREADS=0` removes the spread passes without a redeploy.
+
+Discovery only registers games starting within `ARBYS_DISCOVERY_HORIZON_DAYS`
+(default 3) Eastern calendar days. A game further out is not fetched from
+Kalshi at all — its per-event market call is skipped — and is dropped from
+the Polymarket list before matching. Lower it to shed load, `0` to disable.
+
 ## 3. Adding a new venue
 
 Adding a fourth venue is a scoped change; the arb engine, paper broker, and
