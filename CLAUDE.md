@@ -1193,9 +1193,13 @@ groups its legs. Three things about it are deliberate:
 withholds that ticket from **every** aggregate while leaving it in place. The
 clause lives in `_ticket_filters`, the one builder every ticket query shares,
 so the ledger, its total and the activity counters cannot end up describing
-different populations. `count_excluded_tickets` is the other half and is not
-optional: `/account` renders it as a banner, because a voided window that
-simply reported fewer rows would be indistinguishable from a quiet one.
+different populations. `count_excluded_tickets` is the other half, and
+`GET /paper/{id}/performance` returns it as `excluded_tickets`, so the size of
+the gap is always queryable. `/account` **does not render it** -- the banner
+was removed on 2026-09-06, once the single incident it described had been
+reviewed. Put it back if exclusions ever stop being a one-off, because a voided
+window that merely reported fewer rows would be indistinguishable from a quiet
+one.
 
 Migration `0011` is the only thing that has ever set it, for the 2026-09-05
 Polymarket outage window. **Flagging alone would not have been enough**, and
