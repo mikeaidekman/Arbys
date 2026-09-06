@@ -51,14 +51,13 @@ primary_region = "ewr"
 [env]
   ARBYS_ENABLE_INGEST = "1"
   ARBYS_ENABLE_DISCOVERY = "1"
-  # TEMPORARILY 0 for the 0011 cleanup deploy, and to be put back to 1 in the
-  # very next commit. The release command corrects `paper_balance` before the
-  # new machine boots, but the OLD machine is still live while it runs, and the
-  # broker writes its own in-memory balance on every fill -- which would
-  # silently overwrite the correction with the pre-cleanup figure. Settlement
-  # writes balances too and has no flag, so this narrows the race rather than
-  # closing it; check buying power on /account once the deploy lands.
-  ARBYS_ENABLE_AUTO_TRADE = "0"
+  # Back to 1: the 0011 cleanup landed and its balances were verified on
+  # 2026-09-06. It was briefly 0 for that one deploy because the release
+  # command corrects `paper_balance` while the old machine is still live, and a
+  # fill landing in that window would have overwritten the correction with the
+  # pre-cleanup figure. Any future one-shot ledger migration wants the same
+  # pause, and the same check afterwards.
+  ARBYS_ENABLE_AUTO_TRADE = "1"
 
 [http_service]
   internal_port = 8000
