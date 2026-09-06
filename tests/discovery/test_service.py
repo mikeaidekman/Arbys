@@ -68,6 +68,8 @@ async def test_run_once_registers_new_groups_and_restarts_ingest(monkeypatch):
     monkeypatch.setattr(service_mod, "fetch_polymarket_us_tennis", _empty)
     monkeypatch.setattr(service_mod, "fetch_kalshi_totals", _empty)
     monkeypatch.setattr(service_mod, "fetch_polymarket_us_totals", _empty)
+    monkeypatch.setattr(service_mod, "fetch_kalshi_spreads", _empty)
+    monkeypatch.setattr(service_mod, "fetch_polymarket_us_spreads", _empty)
 
     # Bypass DB.
     monkeypatch.setattr(service_mod, "run_write", _committing_run_write)
@@ -127,6 +129,8 @@ async def test_run_once_noop_when_group_unchanged(monkeypatch):
     monkeypatch.setattr(service_mod, "fetch_polymarket_us_tennis", _empty)
     monkeypatch.setattr(service_mod, "fetch_kalshi_totals", _empty)
     monkeypatch.setattr(service_mod, "fetch_polymarket_us_totals", _empty)
+    monkeypatch.setattr(service_mod, "fetch_kalshi_spreads", _empty)
+    monkeypatch.setattr(service_mod, "fetch_polymarket_us_spreads", _empty)
     monkeypatch.setattr(service_mod, "run_write", _committing_run_write)
     monkeypatch.setattr(service_mod.repo, "upsert_event_group", AsyncMock())
 
@@ -170,7 +174,8 @@ async def test_run_once_retires_discovered_groups_that_vanish(monkeypatch):
 
     for name in ("fetch_kalshi_team_games", "fetch_polymarket_us_games",
                  "fetch_kalshi_tennis_matches", "fetch_polymarket_us_tennis",
-                 "fetch_kalshi_totals", "fetch_polymarket_us_totals"):
+                 "fetch_kalshi_totals", "fetch_polymarket_us_totals",
+                 "fetch_kalshi_spreads", "fetch_polymarket_us_spreads"):
         monkeypatch.setattr(service_mod, name, _empty)
 
     monkeypatch.setattr(service_mod, "run_write", _committing_run_write)
@@ -257,7 +262,8 @@ async def test_failed_subpass_does_not_retire_anything(monkeypatch):
 
     for name in ("fetch_polymarket_us_games", "fetch_kalshi_tennis_matches",
                  "fetch_polymarket_us_tennis", "fetch_kalshi_totals",
-                 "fetch_polymarket_us_totals"):
+                 "fetch_polymarket_us_totals", "fetch_kalshi_spreads",
+                 "fetch_polymarket_us_spreads"):
         monkeypatch.setattr(service_mod, name, _empty)
     monkeypatch.setattr(service_mod, "fetch_kalshi_team_games", _boom)
 
@@ -298,7 +304,8 @@ async def test_polymarket_us_outage_does_not_retire_anything(monkeypatch):
 
     for name in ("fetch_kalshi_team_games", "fetch_kalshi_tennis_matches",
                  "fetch_polymarket_us_tennis", "fetch_kalshi_totals",
-                 "fetch_polymarket_us_totals"):
+                 "fetch_polymarket_us_totals", "fetch_kalshi_spreads",
+                 "fetch_polymarket_us_spreads"):
         monkeypatch.setattr(service_mod, name, _empty)
     monkeypatch.setattr(service_mod, "fetch_polymarket_us_games", _boom)
 
@@ -362,3 +369,120 @@ async def test_dropped_batch_leaves_app_state_untouched(monkeypatch):
     assert group.id not in state.event_groups, "dropped batch must not be applied"
     state.engine.register_group.assert_not_called()
     state.sync_ingest.assert_not_awaited()
+
+
+# --- spreads registry, kill switch, horizon on every pass ------------------------
+
+
+def _dated_game(venue: str, day: date, sport: str = "mlb") -> VenueGame:
+    lad = MLB_RESOLVER.by_code("LAD")
+    chc = MLB_RESOLVER.by_code("CHC")
+    assert lad is not None and chc is not None
+    return VenueGame(
+        sport=sport,
+        venue_id=venue,
+        game_date=day,
+        teams=(lad, chc),
+        outcome_ids={"LAD": f"{venue}-{day}-L", "CHC": f"{venue}-{day}-C"},
+        ref=f"{venue}-{day}",
+    )
+
+
+async def _empty_fetch(**_):
+    return []
+
+
+ALL_FETCHERS = (
+    "fetch_kalshi_team_games", "fetch_polymarket_us_games",
+    "fetch_kalshi_totals", "fetch_polymarket_us_totals",
+    "fetch_kalshi_spreads", "fetch_polymarket_us_spreads",
+    "fetch_kalshi_tennis_matches", "fetch_polymarket_us_tennis",
+)
+
+
+@pytest.mark.asyncio
+async def test_spreads_pass_runs_for_each_registered_sport_and_the_flag_removes_it(monkeypatch):
+    seen: list[str] = []
+
+    async def _spy(**kw):
+        seen.append(kw["sport"])
+        return []
+
+    for name in ALL_FETCHERS:
+        monkeypatch.setattr(service_mod, name, _empty_fetch)
+    monkeypatch.setattr(service_mod, "fetch_kalshi_spreads", _spy)
+
+    monkeypatch.delenv("ARBYS_ENABLE_SPREADS", raising=False)
+    _groups, complete = await service_mod.discover_all_event_groups()
+    assert complete
+    assert sorted(seen) == ["mlb", "ncaaf", "nfl"]
+
+    seen.clear()
+    monkeypatch.setenv("ARBYS_ENABLE_SPREADS", "0")
+    await service_mod.discover_all_event_groups()
+    assert seen == []
+
+
+@pytest.mark.asyncio
+async def test_horizon_drops_a_far_game_from_a_team_sport_pass(monkeypatch):
+    """A game in 2030 is on both venues and would match; the horizon keeps it
+    out. With the horizon off it is registered."""
+    near, far = date(2026, 8, 5), date(2030, 8, 5)
+
+    async def fake_kalshi(**_):
+        return [_dated_game("kalshi", near), _dated_game("kalshi", far)]
+
+    async def fake_poly(**_):
+        return [_dated_game("polymarket_us", near), _dated_game("polymarket_us", far)]
+
+    monkeypatch.setattr(service_mod, "fetch_kalshi_team_games", fake_kalshi)
+    monkeypatch.setattr(service_mod, "fetch_polymarket_us_games", fake_poly)
+
+    monkeypatch.setenv("ARBYS_DISCOVERY_HORIZON_DAYS", "3")
+    groups = await service_mod.discover_team_sport_event_groups("mlb", MLB_RESOLVER)
+    assert [g.id for g in groups] == ["mlb-CHC-LAD-2026-08-05"]
+
+    monkeypatch.setenv("ARBYS_DISCOVERY_HORIZON_DAYS", "0")
+    groups = await service_mod.discover_team_sport_event_groups("mlb", MLB_RESOLVER)
+    assert {g.id for g in groups} == {"mlb-CHC-LAD-2026-08-05", "mlb-CHC-LAD-2030-08-05"}
+
+
+@pytest.mark.asyncio
+async def test_horizon_applies_to_tennis_and_ufc_passes_too(monkeypatch):
+    far = date(2030, 8, 5)
+
+    async def fake_kalshi(**_):
+        return [_dated_game("kalshi", far, sport="atp")]
+
+    async def fake_poly(**_):
+        return [_dated_game("polymarket_us", far, sport="atp")]
+
+    monkeypatch.setattr(service_mod, "fetch_kalshi_tennis_matches", fake_kalshi)
+    monkeypatch.setattr(service_mod, "fetch_polymarket_us_tennis", fake_poly)
+    monkeypatch.setenv("ARBYS_DISCOVERY_HORIZON_DAYS", "3")
+    assert await service_mod.discover_tennis_event_groups() == []
+    assert await service_mod.discover_ufc_event_groups() == []
+    monkeypatch.setenv("ARBYS_DISCOVERY_HORIZON_DAYS", "0")
+    assert len(await service_mod.discover_tennis_event_groups()) == 1
+
+
+@pytest.mark.asyncio
+async def test_spreads_pass_builds_groups_from_both_fetchers(monkeypatch):
+    from dataclasses import replace
+    from decimal import Decimal
+
+    def _spread(venue: str) -> VenueGame:
+        base = _dated_game(venue, date(2026, 8, 5))
+        return replace(base, market_type="spread", line=Decimal("2.5"), anchor="CHC")
+
+    async def fake_kalshi(**_):
+        return [_spread("kalshi")]
+
+    async def fake_poly(**_):
+        return [_spread("polymarket_us")]
+
+    monkeypatch.setattr(service_mod, "fetch_kalshi_spreads", fake_kalshi)
+    monkeypatch.setattr(service_mod, "fetch_polymarket_us_spreads", fake_poly)
+    monkeypatch.setenv("ARBYS_DISCOVERY_HORIZON_DAYS", "0")
+    groups = await service_mod.discover_spreads_event_groups("mlb", MLB_RESOLVER)
+    assert [g.id for g in groups] == ["mlb-CHC-LAD-2026-08-05-spread-CHC-2.5"]

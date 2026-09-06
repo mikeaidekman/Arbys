@@ -10,7 +10,9 @@ import os
 from ..db import repositories as repo
 from ..db.session import run_write
 from ..shared.types import EventGroup
+from .horizon import discovery_horizon_days, filter_horizon
 from .kalshi_sports import fetch_kalshi_team_games
+from .kalshi_spreads import fetch_kalshi_spreads
 from .kalshi_tennis import UFC_SERIES, fetch_kalshi_tennis_matches
 from .kalshi_totals import fetch_kalshi_totals
 from .matcher import match_games, match_to_event_group
@@ -18,6 +20,7 @@ from .polymarket_us import (
     UFC_LEAGUES,
     UFC_WINNER_TYPES,
     fetch_polymarket_us_games,
+    fetch_polymarket_us_spreads,
     fetch_polymarket_us_tennis,
     fetch_polymarket_us_totals,
 )
@@ -53,6 +56,56 @@ TOTALS_SPORTS: tuple[tuple[str, TeamResolver], ...] = (
     ("ncaaf", CFB_RESOLVER),
 )
 
+# Sports whose full-game spreads both venues quote. All three wired together
+# on 2026-09-06 after the sign convention was pinned by live prices — see
+# docs/superpowers/specs/2026-09-06-spreads-and-discovery-horizon-design.md.
+# NBA and WNBA stay out until their seasons open, as with totals.
+SPREADS_SPORTS: tuple[tuple[str, TeamResolver], ...] = (
+    ("nfl", NFL_RESOLVER),
+    ("mlb", MLB_RESOLVER),
+    ("ncaaf", CFB_RESOLVER),
+)
+
+
+def _spreads_enabled() -> bool:
+    """``ARBYS_ENABLE_SPREADS``, on by default.
+
+    The kill switch for a scale problem found in production. Spreads roughly
+    triple the group count, Kalshi carries every ticker on one socket with no
+    known ceiling, and the Polymarket US per-connection ceiling was found only
+    by measuring — so if quote ages creep at the new size this is a secret
+    change and a restart rather than a redeploy. Existing spread groups
+    retire on the next complete pass once it is off.
+    """
+    raw = os.environ.get("ARBYS_ENABLE_SPREADS", "1").strip().lower()
+    return raw not in ("0", "false", "no", "off")
+
+
+async def _discover_pair(
+    label: str,
+    kalshi_coro,
+    poly_coro,
+    *,
+    date_tolerance_days: int = 0,
+) -> list[EventGroup]:
+    """Fetch both venues, bound them to the discovery horizon, match.
+
+    Every sub-pass is this shape; the label is for the log line. The horizon
+    is applied here, once, to every venue list before matching — the Kalshi
+    fetchers also apply it before their per-event market call, but that is an
+    optimisation of the same rule, not a second rule.
+    """
+    kalshi_games, poly_games = await asyncio.gather(kalshi_coro, poly_coro)
+    days = discovery_horizon_days()
+    kalshi_games = filter_horizon(kalshi_games, days=days)
+    poly_games = filter_horizon(poly_games, days=days)
+    matches = match_games(kalshi_games, poly_games, date_tolerance_days=date_tolerance_days)
+    log.info(
+        "discovery[%s]: kalshi=%d polymarket_us=%d matched=%d (horizon %dd)",
+        label, len(kalshi_games), len(poly_games), len(matches), days,
+    )
+    return [match_to_event_group(m) for m in matches]
+
 
 async def discover_team_sport_event_groups(
     sport: str, resolver: TeamResolver
@@ -65,16 +118,11 @@ async def discover_team_sport_event_groups(
     window risks pairing one venue's game with the other venue's *next* game.
     Matching on exact start time is the real fix.
     """
-    kalshi_games, poly_games = await asyncio.gather(
+    return await _discover_pair(
+        sport,
         fetch_kalshi_team_games(resolver=resolver, sport=sport),
         fetch_polymarket_us_games(resolver=resolver, sport=sport),
     )
-    matches = match_games(kalshi_games, poly_games)
-    log.info(
-        "discovery[%s]: kalshi=%d polymarket_us=%d matched=%d",
-        sport, len(kalshi_games), len(poly_games), len(matches),
-    )
-    return [match_to_event_group(m) for m in matches]
 
 
 async def discover_totals_event_groups(
@@ -86,16 +134,27 @@ async def discover_totals_event_groups(
     Over 47.5 are different bets. Kalshi lists many strikes per game and
     Polymarket a narrower set, so expect a subset of Kalshi's ladder.
     """
-    kalshi_games, poly_games = await asyncio.gather(
+    return await _discover_pair(
+        f"{sport} totals",
         fetch_kalshi_totals(resolver=resolver, sport=sport),
         fetch_polymarket_us_totals(resolver=resolver, sport=sport),
     )
-    matches = match_games(kalshi_games, poly_games)
-    log.info(
-        "discovery[%s totals]: kalshi=%d polymarket_us=%d matched=%d",
-        sport, len(kalshi_games), len(poly_games), len(matches),
+
+
+async def discover_spreads_event_groups(
+    sport: str, resolver: TeamResolver
+) -> list[EventGroup]:
+    """Discover spread groups, one per (game, anchor, line).
+
+    Only (anchor, line) pairs quoted on *both* venues survive the match.
+    Kalshi lists ±1.5/±2.5/±3.5 per MLB game and Polymarket US ±1.5/±2.5, so
+    expect four MLB groups a game; NFL and CFB ladders overlap on ~20-27.
+    """
+    return await _discover_pair(
+        f"{sport} spreads",
+        fetch_kalshi_spreads(resolver=resolver, sport=sport),
+        fetch_polymarket_us_spreads(resolver=resolver, sport=sport),
     )
-    return [match_to_event_group(m) for m in matches]
 
 
 async def discover_mlb_event_groups() -> list[EventGroup]:
@@ -109,12 +168,12 @@ async def discover_tennis_event_groups() -> list[EventGroup]:
     Kalshi's tennis tickers embed a "trading day" that can differ from the
     match's UTC date, so we allow a 1-day tolerance when matching.
     """
-    kalshi_games, poly_games = await asyncio.gather(
+    return await _discover_pair(
+        "tennis",
         fetch_kalshi_tennis_matches(),
         fetch_polymarket_us_tennis(),
+        date_tolerance_days=1,
     )
-    matches = match_games(kalshi_games, poly_games, date_tolerance_days=1)
-    return [match_to_event_group(m) for m in matches]
 
 
 async def discover_ufc_event_groups() -> list[EventGroup]:
@@ -136,12 +195,12 @@ async def discover_ufc_event_groups() -> list[EventGroup]:
     card: two different fighters coding to the same token could pair the wrong
     contests, which is pre-existing exposure on the tennis path too.
     """
-    kalshi_games, poly_games = await asyncio.gather(
+    return await _discover_pair(
+        "ufc",
         fetch_kalshi_tennis_matches(series=UFC_SERIES),
         fetch_polymarket_us_tennis(leagues=UFC_LEAGUES, winner_types=UFC_WINNER_TYPES),
+        date_tolerance_days=1,
     )
-    matches = match_games(kalshi_games, poly_games, date_tolerance_days=1)
-    return [match_to_event_group(m) for m in matches]
 
 
 DEFAULT_MAX_CONCURRENT_PASSES = 1
@@ -189,16 +248,17 @@ async def discover_all_event_groups() -> tuple[list[EventGroup], bool]:
         async with limit:
             return await coro
 
+    passes = [
+        *(discover_team_sport_event_groups(s, r) for s, r in TEAM_SPORTS),
+        *(discover_totals_event_groups(s, r) for s, r in TOTALS_SPORTS),
+        discover_tennis_event_groups(),
+        discover_ufc_event_groups(),
+    ]
+    if _spreads_enabled():
+        passes.extend(discover_spreads_event_groups(s, r) for s, r in SPREADS_SPORTS)
+
     results = await asyncio.gather(
-        *(
-            _bounded(c)
-            for c in (
-                *(discover_team_sport_event_groups(s, r) for s, r in TEAM_SPORTS),
-                *(discover_totals_event_groups(s, r) for s, r in TOTALS_SPORTS),
-                discover_tennis_event_groups(),
-                discover_ufc_event_groups(),
-            )
-        ),
+        *(_bounded(c) for c in passes),
         return_exceptions=True,
     )
     groups: list[EventGroup] = []
