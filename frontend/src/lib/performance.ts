@@ -396,6 +396,8 @@ export interface Dashboard {
    *  rate signal rather than ledger entries. */
   byStatus: Record<string, number>;
   rejectionReasons: { reason: string; count: number }[];
+  /** Tickets deliberately withheld from every figure above. */
+  excludedTickets: { reason: string; count: number }[];
   /** Bounds of the data actually present, so the page can state what it holds
    *  instead of implying a 90-day window contains 90 days. */
   firstSubmittedAt: string | null;
@@ -444,6 +446,7 @@ export function emptyDashboard(): Dashboard {
     medianSlippageCents: null,
     byStatus: {},
     rejectionReasons: [],
+    excludedTickets: [],
     firstSubmittedAt: null,
     lastSubmittedAt: null,
     accrualTotal: 0,
@@ -509,6 +512,7 @@ export function fromPerformance(p: Performance): Dashboard {
     medianSlippageCents: p.median_slippage_cents,
     byStatus: p.by_status,
     rejectionReasons: p.rejection_reasons,
+    excludedTickets: p.excluded_tickets ?? [],
     firstSubmittedAt: p.first_submitted_at,
     lastSubmittedAt: p.last_submitted_at,
     accrualTotal: Number(p.accrual_total),

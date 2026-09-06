@@ -553,6 +553,25 @@ export function AccountPage() {
           </div>
         ) : null}
 
+        {d.excludedTickets.length > 0 ? (
+          <div
+            className="vt-panel"
+            style={{ borderLeft: "3px solid var(--color-accent)", fontSize: 12 }}
+          >
+            <div className="vt-lab">Excluded from every figure below</div>
+            {d.excludedTickets.map((e) => (
+              <div key={e.reason} style={{ opacity: 0.8 }}>
+                <span className="vt-mono">{e.count}</span> tickets · {e.reason}
+              </div>
+            ))}
+            <div style={{ marginTop: "var(--space-2)", opacity: 0.65 }}>
+              Still in the ledger, and withheld on purpose. These filled against a
+              book the venue had frozen, so the profit they booked was never
+              available to trade. A voided window must not read as a quiet one.
+            </div>
+          </div>
+        ) : null}
+
         <div
           style={{
             display: "grid",

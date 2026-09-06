@@ -252,6 +252,11 @@ class PerformanceOut(BaseModel):
     # showing instead of implying a 90-day window holds 90 days.
     first_submitted_at: datetime | None
     last_submitted_at: datetime | None
+    # Tickets withheld from every figure above, and why. Non-empty means this
+    # window is deliberately incomplete, and the page has to say so: a voided
+    # window and a quiet one are otherwise indistinguishable, which is the
+    # exact failure that moving this aggregation server-side existed to end.
+    excluded_tickets: list[RejectionReasonOut] = []
 
     net_profit: Decimal | None
     gross_profit: Decimal | None

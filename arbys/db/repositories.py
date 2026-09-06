@@ -510,7 +510,13 @@ def _ticket_filters(
     400" is a lie the moment the count is scoped differently from the rows it
     is counting.
     """
-    clauses = [m.PaperTicket.account_id == account_id]
+    clauses = [
+        m.PaperTicket.account_id == account_id,
+        # Withheld tickets never reach any aggregate. Applied here rather than
+        # at each call site precisely because of this function's own contract:
+        # the page, its total and the counters must describe one population.
+        m.PaperTicket.excluded_reason.is_(None),
+    ]
     if since is not None:
         clauses.append(m.PaperTicket.submitted_at >= since)
     if isinstance(status, str):
@@ -527,6 +533,33 @@ def _ticket_filters(
 # which is what makes the aggregate affordable, since together they are ~83%
 # of all rows.
 TRADED_STATUSES = ("filled", "pending")
+
+
+async def count_excluded_tickets(
+    session: AsyncSession, account_id: str, *, since: datetime | None = None
+) -> list[dict]:
+    """How many tickets are withheld from the aggregates, and why.
+
+    The disclosure half of the exclusion. Every other query drops these rows,
+    so without this the page would quietly report a shorter history than it
+    holds -- the same failure that moving this aggregation server-side was
+    meant to end.
+    """
+    clauses = [
+        m.PaperTicket.account_id == account_id,
+        m.PaperTicket.excluded_reason.is_not(None),
+    ]
+    if since is not None:
+        clauses.append(m.PaperTicket.submitted_at >= since)
+    rows = (
+        await session.execute(
+            select(m.PaperTicket.excluded_reason, func.count())
+            .where(*clauses)
+            .group_by(m.PaperTicket.excluded_reason)
+            .order_by(func.count().desc())
+        )
+    ).all()
+    return [{"reason": r[0], "count": r[1]} for r in rows]
 
 
 async def paper_ticket_scalars(
@@ -931,6 +964,7 @@ async def update_paper_ticket_status(
 
 
 __all__ = [
+    "count_excluded_tickets",
     "count_open_paper_tickets",
     "delete_event_group",
     "ensure_outcome_placeholder",

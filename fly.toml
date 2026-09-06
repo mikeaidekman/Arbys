@@ -51,7 +51,14 @@ primary_region = "ewr"
 [env]
   ARBYS_ENABLE_INGEST = "1"
   ARBYS_ENABLE_DISCOVERY = "1"
-  ARBYS_ENABLE_AUTO_TRADE = "1"
+  # TEMPORARILY 0 for the 0011 cleanup deploy, and to be put back to 1 in the
+  # very next commit. The release command corrects `paper_balance` before the
+  # new machine boots, but the OLD machine is still live while it runs, and the
+  # broker writes its own in-memory balance on every fill -- which would
+  # silently overwrite the correction with the pre-cleanup figure. Settlement
+  # writes balances too and has no flag, so this narrows the race rather than
+  # closing it; check buying power on /account once the deploy lands.
+  ARBYS_ENABLE_AUTO_TRADE = "0"
 
 [http_service]
   internal_port = 8000

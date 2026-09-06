@@ -22,7 +22,7 @@ Run everything from the repo root with the venv Python — `venv\Scripts\python.
 — rather than a bare `python`.
 
 ```powershell
-venv\Scripts\python.exe -m pytest -q            # 542 tests, must stay green
+venv\Scripts\python.exe -m pytest -q            # 547 tests, must stay green
 venv\Scripts\python.exe -m ruff check .         # must stay clean
 venv\Scripts\python.exe -m mypy arbys           # see caveat below — NOT clean today
 ```
@@ -1187,6 +1187,27 @@ groups its legs. Three things about it are deliberate:
   narrower rule still holds for `submit_arb_ticket`, which the auto-trader
   calls: a detector finding nothing is not an attempt, or a bot would write
   thousands of rows a night saying nothing happened.
+
+**A ticket can be excluded without being deleted.**
+`paper_ticket.excluded_reason` is null for every normal row; a non-null string
+withholds that ticket from **every** aggregate while leaving it in place. The
+clause lives in `_ticket_filters`, the one builder every ticket query shares,
+so the ledger, its total and the activity counters cannot end up describing
+different populations. `count_excluded_tickets` is the other half and is not
+optional: `/account` renders it as a banner, because a voided window that
+simply reported fewer rows would be indistinguishable from a quiet one.
+
+Migration `0011` is the only thing that has ever set it, for the 2026-09-05
+Polymarket outage window. **Flagging alone would not have been enough**, and
+that is the part worth remembering: in the simulator the phantom profit is
+*real money*. The broker filled at the frozen price and settlement genuinely
+paid out $1, so leaving those gains as buying power would inflate every later
+position and the denominator of every return. Each excluded filled ticket is
+therefore reversed out of cash from **its own fills** -- the correct unit,
+because settlement blends `avg_price` across every ticket on an outcome -- and
+positions left open are rebuilt as the weighted average of the fills that
+survive, since refunding a ticket while keeping its contracts pays for them
+twice. Nothing here ever sells, which is what makes that rebuild well defined.
 
 `paper_settlement` records resolution events, which `settle_outcome_async`
 previously did not — a settled winner was indistinguishable from a position

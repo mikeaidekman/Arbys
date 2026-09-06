@@ -651,15 +651,22 @@ def create_app() -> FastAPI:
                 session, account_id, limit=_MAX_TRADED, since=since,
                 source=source, status=repo.TRADED_STATUSES,
             )
+            # Every query above drops excluded rows, so without this the page
+            # would quietly report a shorter history than the ledger holds.
+            excluded = await repo.count_excluded_tickets(
+                session, account_id, since=since
+            )
         # Decimal arithmetic over every traded ticket, off the event loop. A
         # handler that never awaits holds it for its whole duration, and
         # `list_monitored` is the standing lesson here: 23.9s on a throttled
         # core tripped the 6s in-play dark threshold and set the Polymarket
         # shards rebuilding. Quote freshness is the safety argument for this
         # system, so no report may compete with it.
-        return await asyncio.to_thread(
+        report = await asyncio.to_thread(
             summarize_performance, scalars=scalars, traded=traded
         )
+        report["excluded_tickets"] = excluded
+        return report
 
     @app.get("/paper/{account_id}/positions", response_model=list[PositionOut])
     async def paper_positions(account_id: str) -> list[PositionOut]:

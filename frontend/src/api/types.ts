@@ -205,6 +205,9 @@ export interface Performance {
   filled: number;
   by_status: Record<string, number>;
   rejection_reasons: RejectionReason[];
+  /** Tickets withheld from every figure here, and why. Non-empty means the
+   *  window is deliberately incomplete and the page must say so. */
+  excluded_tickets: RejectionReason[];
   /** Bounds of the data actually in the window, so the UI can say what it
    *  holds rather than implying a 90-day window contains 90 days. */
   first_submitted_at: string | null;

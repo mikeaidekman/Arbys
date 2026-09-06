@@ -427,3 +427,62 @@ async def test_reset_empties_the_audit_trail():
         assert await repo.list_paper_tickets(session, "default") == []
         assert await repo.count_open_paper_tickets(session, "default") == 0
         assert await repo.list_paper_settlements(session) == []
+
+
+# --- excluded tickets: kept as evidence, dropped from every aggregate -------
+
+
+async def _exclude(session, ticket_id: str, reason: str) -> None:
+    from sqlalchemy import update
+
+    await session.execute(
+        update(m.PaperTicket)
+        .where(m.PaperTicket.id == ticket_id)
+        .values(excluded_reason=reason)
+    )
+
+
+async def test_an_excluded_ticket_leaves_every_aggregate():
+    """A window voided by a venue outage must not move the numbers.
+
+    The row stays, because it is the evidence that the outage produced fills.
+    But a ticket priced off a frozen book describes no trade that could have
+    happened, so counting it keeps reporting a return that never existed --
+    10.64% on 2026-09-05 against a 0.66% average.
+
+    Filtered in `_ticket_filters`, the one clause builder every ticket query
+    shares, so the ledger page, its total and the activity counters cannot
+    disagree about which population they describe.
+    """
+    await create_all()
+    async with session_scope() as session:
+        await _two_leg_filled_ticket(session, ticket_id="tkt-keep")
+        await _two_leg_filled_ticket(session, ticket_id="tkt-void")
+        await _exclude(session, "tkt-void", "polymarket_outage_2026-09-05")
+
+    async with session_scope() as session:
+        tickets = await repo.list_paper_tickets(session, "default")
+        scalars = await repo.paper_ticket_scalars(session, "default")
+
+    assert [t["id"] for t in tickets] == ["tkt-keep"]
+    assert [s["id"] for s in scalars] == ["tkt-keep"]
+
+
+async def test_the_excluded_row_survives_and_is_countable():
+    """Excluding is not deleting, and the page has to be able to say so.
+
+    A silently shortened ledger is indistinguishable from a quiet one, which
+    is the same quiet lie that moving this aggregation server-side existed to
+    prevent.
+    """
+    await create_all()
+    async with session_scope() as session:
+        await _two_leg_filled_ticket(session, ticket_id="tkt-void")
+        await _exclude(session, "tkt-void", "polymarket_outage_2026-09-05")
+
+    async with session_scope() as session:
+        excluded = await repo.count_excluded_tickets(session, "default")
+        row = await session.get(m.PaperTicket, "tkt-void")
+
+    assert excluded == [{"reason": "polymarket_outage_2026-09-05", "count": 1}]
+    assert row is not None, "excluding must never delete the evidence"

@@ -303,6 +303,13 @@ class PaperTicket(Base):
     source: Mapped[str] = mapped_column(String(16), nullable=False, default="manual")
     status: Mapped[str] = mapped_column(String(16), nullable=False)
     rejection_reason: Mapped[str | None] = mapped_column(String(256))
+    # Non-null withholds this ticket from every aggregate while leaving the row
+    # in place. Excluding is not deleting: a ticket filled against a frozen
+    # book is the *evidence* that a feed failed, and deleting it would destroy
+    # the only durable record of the incident while also making a voided
+    # window indistinguishable from a quiet one. The string says why, so a
+    # reader is never left guessing which population a figure describes.
+    excluded_reason: Mapped[str | None] = mapped_column(String(128))
     total_stake: Mapped[Decimal | None] = mapped_column(NUM)
     expected_profit: Mapped[Decimal | None] = mapped_column(NUM)
     expected_edge_bps: Mapped[Decimal | None] = mapped_column(NUM)

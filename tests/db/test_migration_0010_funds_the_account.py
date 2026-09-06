@@ -126,6 +126,9 @@ def test_0010_is_a_no_op_on_an_unfunded_database(tmp_path):
     tables holding no rows for them to touch.
     """
     url = f"sqlite:///{tmp_path / 'empty.db'}"
-    _alembic(url, "head")
+    # Targets 0010 by name rather than `head`. This test is about *this*
+    # revision applying cleanly to empty tables, and pinning it to head made it
+    # fail the moment 0011 landed -- which says nothing about 0010.
+    _alembic(url, "0010_fund_trading_venues")
     assert _current_revision(url) == "0010_fund_trading_venues"
     assert _balances(url) == {}
