@@ -22,7 +22,7 @@ Run everything from the repo root with the venv Python — `venv\Scripts\python.
 — rather than a bare `python`.
 
 ```powershell
-venv\Scripts\python.exe -m pytest -q            # 588 tests, must stay green
+venv\Scripts\python.exe -m pytest -q            # 624 tests, must stay green
 venv\Scripts\python.exe -m ruff check .         # must stay clean
 venv\Scripts\python.exe -m mypy arbys           # see caveat below — NOT clean today
 ```
@@ -547,6 +547,10 @@ Feature flags in `.env` (copy from `.env.example`; `.env` is gitignored):
   ceiling, and the Polymarket US ceiling was found only by measuring. `0`
   removes the passes and existing spread groups retire on the next complete
   pass.
+- `ARBYS_ENABLE_CASH_SWEEP` / `ARBYS_CASH_SWEEP_INTERVAL_S` /
+  `ARBYS_CASH_SWEEP_MIN` — level free cash between the venues' paper books,
+  **1 by default** at 60s and a $25 floor. See **Per-venue cash needs
+  levelling** below for why this one defaults on.
 - `ARBYS_MAX_PLAUSIBLE_EDGE` — largest per-contract profit a ticket may
   claim, default 0.15, `0` disables. An edge **ceiling**, and the exact
   opposite of the edge *floor* that stays a non-goal: it refuses impossible
@@ -1365,6 +1369,87 @@ account strip and the equity curve would disagree on the same page.
 inline, because it needs the per-outcome breakdown `account_equity` doesn't
 return. Keep its mark logic (mid, falling back to `avg_price` when there's no
 live quote) in step with `account_equity`'s if that ever changes.
+
+## Per-venue cash needs levelling, and no starting split fixes it (2026-09-10)
+
+Each venue holds its own cash (`_AccountState.balances` is `venue_id -> cash`)
+and `ExecutionRouter.submit`'s preview refuses the whole ticket if any leg
+cannot pay. That is right — live buying power really is per venue — but with
+fixed funding it strands capital, and the size of that was invisible until the
+rejections were *classified* rather than counted.
+
+The preview loop evaluates **every** leg and never short-circuits, so a
+rejection naming one venue means the other leg previewed clean, its own cash
+check included. Of the local ledger's 6,316 rejected tickets:
+
+| cause | tickets | share |
+| --- | --- | --- |
+| **one venue dry, other leg clean** | **2,835** | **44.9%** |
+| no cash problem (limit / liquidity / quote) | 2,192 | 34.7% |
+| both venues dry | 751 | 11.9% |
+| one dry + other leg failed anyway | 538 | 8.5% |
+
+2,835 recoverable rejections against **1,248 total fills** — the misallocation
+cost 2.3x the entire filled book, and the dry venue was near-even (Polymarket
+1,544, Kalshi 1,291).
+
+**There is no per-venue bias to correct, which is the counter-intuitive part.**
+The obvious hypothesis — one venue habitually buys the dearer leg — is false. A
+pair is a heavy favourite against a longshot, so one venue is asked for ~95% of
+a ticket's capital and the other for ~5%, and *which* one is a coin flip: the
+Kalshi share of a ticket's cost runs **p10 0.054 to p90 0.947**, mean **0.508**,
+with Kalshi dearer on 52.4% of tickets. The aggregate drift that makes this look
+like a bias ($12,165 spent on Kalshi against $10,372 on Polymarket for the
+identical contract count) is the residue of that random walk. So
+**re-allocating the starting deposit does nothing** — the demand is symmetric in
+expectation and violently lopsided per trade, which is why the fix has to be
+continuous.
+
+`CashSweepService` (`arbys/ingest/`) levels toward an equal share every
+`ARBYS_CASH_SWEEP_INTERVAL_S`, planning with `shared/cash.py:plan_transfers`.
+Four things about it are deliberate:
+
+- **It defaults on**, unlike ingest, discovery and the auto-trader. Off, 44.9%
+  of rejections are an artefact of the simulator's funding model rather than a
+  fact about the market. It stays a flag because it is the only thing here that
+  moves money without a trade.
+- **A transfer is not a deposit.** `paper_transfer` is its own table for that
+  reason, and never feeds a return figure. `account_equity` sums cash across
+  brokers, so a sweep is equity-neutral by construction — migration `0010`
+  added capital and every return figure had to move with it; this adds none.
+  `test_a_sweep_is_equity_neutral` pins it.
+- **The whole plan lands in memory before anything is awaited**, the same
+  discipline `apply_fill`/`emit_order_events` keeps: persisting mid-plan would
+  let a fill or a settlement interleave and read a half-levelled account. Both
+  the audit rows and every touched balance then go in **one** `run_write`, so a
+  dropped write cannot leave a transfer row contradicting the balances it
+  explains.
+- **`ARBYS_CASH_SWEEP_MIN` is a floor on size, not on imbalance** — the same
+  reasoning as `ARBYS_MIN_CONTRACT_QTY`. Without it the sweep writes an audit
+  row every interval to move pennies. Amounts floor to the cent, so a plan can
+  never overdraw its source.
+
+**It models a rail that settles faster than the real one**, and that is a
+chosen simplification: Kalshi-to-Polymarket is a bank round trip, not an
+internal sweep. The honest alternative — cash in transit, counting toward
+equity but not buying power — has to be threaded through `account_equity`,
+`PnlSnapshotService` and `GET /paper/{id}`, or the equity curve dips by the
+transferred amount for the duration of every sweep. Worth building if fill
+timing is ever graded against what live trading could actually have done.
+
+**Enabling DraftKings would starve the other two.** The sweep levels across
+every broker in `AppState.fees`, so switching `ARBYS_ENABLE_DRAFTKINGS` on
+parks a third of the account's cash on a venue that has never carried a leg --
+the same untradeable-cash problem that flag was made to gate, arriving by a
+new route. Watch the first sweep if it is ever turned on.
+
+**What levelling cannot fix**: the 751 both-dry rejections are real capital
+exhaustion, and `plan_transfers` returns nothing for them rather than
+pretending. Both venues sitting at $1.77 and $3.75 with everything locked in
+open positions is the settlement problem, not this one. `/health` reports
+`cash_transfers` and `cash_moved`, because a sweep that never fires on a
+persistently lopsided account is otherwise indistinguishable from a balanced
+one — and the symptom would be rejections blaming the market.
 
 ## A dropped write is counted, not silent
 

@@ -387,6 +387,36 @@ class PaperPosition(Base):
     )
 
 
+class PaperTransfer(Base):
+    """One cash movement between two venues' paper books.
+
+    The audit trail for `shared/cash.py`. Deliberately its own table rather
+    than a `paper_balance` history: a transfer is **not** a deposit, and
+    nothing that computes a return may ever read it as new capital. Total
+    equity is unchanged by construction -- `account_equity` sums cash across
+    brokers -- so this records where the money went, not that there is more.
+
+    `event_group_id` has no analogue here on purpose: a sweep answers the
+    account's overall imbalance, never one game's.
+    """
+
+    __tablename__ = "paper_transfer"
+
+    id: Mapped[int] = mapped_column(
+        BigInteger().with_variant(Integer(), "sqlite"),
+        primary_key=True,
+        autoincrement=True,
+    )
+    account_id: Mapped[str] = mapped_column(ForeignKey("paper_account.id"), nullable=False)
+    from_venue_id: Mapped[str] = mapped_column(ForeignKey("venue.id"), nullable=False)
+    to_venue_id: Mapped[str] = mapped_column(ForeignKey("venue.id"), nullable=False)
+    amount: Mapped[Decimal] = mapped_column(NUM, nullable=False)
+    source: Mapped[str] = mapped_column(String(16), nullable=False, default="sweep")
+    ts: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), nullable=False, index=True
+    )
+
+
 class PaperPnlSnapshot(Base):
     __tablename__ = "paper_pnl_snapshot"
 

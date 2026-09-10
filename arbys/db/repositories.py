@@ -362,6 +362,30 @@ async def upsert_paper_position(
         row.open_fees = open_fees
 
 
+async def insert_paper_transfer(
+    session: AsyncSession,
+    *,
+    account_id: str,
+    from_venue_id: str,
+    to_venue_id: str,
+    amount: Decimal,
+    source: str = "sweep",
+) -> None:
+    """Record one cash movement between two venues' paper books.
+
+    Not a deposit -- see `models.PaperTransfer`. Total equity is unchanged.
+    """
+    session.add(
+        m.PaperTransfer(
+            account_id=account_id,
+            from_venue_id=from_venue_id,
+            to_venue_id=to_venue_id,
+            amount=amount,
+            source=source,
+        )
+    )
+
+
 async def insert_paper_pnl_snapshot(
     session: AsyncSession, *, account_id: str,
     cash: Decimal, mtm_positions: Decimal, total_equity: Decimal,
@@ -420,6 +444,12 @@ async def delete_paper_history(session: AsyncSession, account_id: str) -> None:
     )
     await session.execute(
         delete(m.PaperPosition).where(m.PaperPosition.account_id == account_id)
+    )
+    # Transfers describe a cash split that no longer exists once balances are
+    # re-seeded, so leaving them would make the audit trail contradict the
+    # ledger it audits.
+    await session.execute(
+        delete(m.PaperTransfer).where(m.PaperTransfer.account_id == account_id)
     )
     await session.execute(
         delete(m.PaperBalance).where(m.PaperBalance.account_id == account_id)

@@ -123,6 +123,24 @@ class PaperExecutionAdapter(ExecutionAdapter):
         st = self._accounts[account_id]
         st.balances[self.venue_id] = st.balances.get(self.venue_id, Decimal("0")) + amount
 
+    def withdraw(self, account_id: str, amount: Decimal) -> bool:
+        """Debit free cash. Returns False -- and moves nothing -- if it cannot.
+
+        The counterpart to `deposit`, so cash can be levelled between the
+        per-venue books (see `shared/cash.py`). Refusing rather than raising
+        keeps a caller moving several venues at once from aborting halfway.
+        """
+        st = self._accounts[account_id]
+        cash = st.balances.get(self.venue_id, Decimal("0"))
+        if amount <= 0 or amount > cash:
+            return False
+        st.balances[self.venue_id] = cash - amount
+        return True
+
+    def cash(self, account_id: str) -> Decimal:
+        """Free cash on this venue. `account_snapshot` without the positions."""
+        return self._accounts[account_id].balances.get(self.venue_id, Decimal("0"))
+
     def hydrate_balance(self, account_id: str, amount: Decimal) -> None:
         """Overwrite in-memory balance without triggering the persistence sink.
 

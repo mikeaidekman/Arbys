@@ -960,3 +960,57 @@ def test_the_position_cap_counts_both_legs_of_the_game_in_dollars(monkeypatch):
         assert "$130" in detail
         # Both legs, not the $40.00 sitting on c-yes alone.
         assert "holds $90.00" in detail
+
+
+def test_a_sweep_unblocks_the_rejection_it_exists_for(monkeypatch):
+    """The measured case, end to end through the real app.
+
+    2,835 of the local ledger's 6,316 rejected tickets had one venue out of
+    cash while the other leg previewed clean -- 2.3x the whole filled book,
+    refused for where the money was rather than whether it existed. This
+    drains one venue to below the ticket's cost, confirms the refusal names
+    that venue and only that venue, then sweeps and fills the same ticket.
+    """
+
+    from arbys.backend.state import get_state
+    from arbys.shared.equity import account_equity
+
+    # Pinned rather than inherited: `sweep_once` honours the flag, so an
+    # ambient ARBYS_ENABLE_CASH_SWEEP=0 would turn this into a silent pass.
+    monkeypatch.setenv("ARBYS_ENABLE_CASH_SWEEP", "1")
+
+    with TestClient(create_app()) as client:
+        _register(client, "eg-sweep", "s-yes", "s-no")
+        for oid, px in (("s-yes", "0.40"), ("s-no", "0.50")):
+            assert client.post(
+                "/quotes", json={"outcome_id": oid, "bid": px, "ask": px}
+            ).status_code == 204
+
+        state = get_state()
+        brokers = state.paper_brokers
+        # All the account's cash on Kalshi. Polymarket cannot pay for its leg.
+        poly = brokers["polymarket_us"]
+        stranded = poly.cash("default")
+        assert poly.withdraw("default", stranded) is True
+        brokers["kalshi"].deposit("default", stranded)
+        equity_before = account_equity(brokers, state.quotebook, "default").equity
+
+        r = client.post("/paper/execute", json={"event_group_id": "eg-sweep"})
+        assert r.status_code == 409
+        detail = r.json()["detail"]
+        assert "polymarket_us:insufficient_funds" in detail
+        # The other leg previewed clean -- this is a location problem, and the
+        # rejection has to say so or the sweep is fixing something invisible.
+        assert "kalshi:insufficient_funds" not in detail
+
+        # On the app's own loop -- the DB engine is bound to it, and a fresh
+        # loop here would fail the sweep's write rather than test it.
+        moved = client.portal.call(state.cash_sweep_service.sweep_once)
+        assert moved, "a fully lopsided account must produce a transfer"
+
+        # A transfer is not a deposit: the money moved, the account did not grow.
+        assert account_equity(brokers, state.quotebook, "default").equity == equity_before
+
+        r = client.post("/paper/execute", json={"event_group_id": "eg-sweep"})
+        assert r.status_code == 200, r.text
+        assert r.json()

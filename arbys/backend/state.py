@@ -28,6 +28,7 @@ from ..db import repositories as repo
 from ..db.session import run_write, session_scope
 from ..ingest.auto_settle_service import AutoSettleService
 from ..ingest.auto_trade_service import AutoTradeService
+from ..ingest.cash_sweep_service import CashSweepService
 from ..ingest.engine_runtime import EngineRuntime
 from ..ingest.pnl_service import PnlSnapshotService
 from ..ingest.worker import IngestWorker
@@ -100,6 +101,36 @@ def _discovery_interval_s() -> float:
         return max(30.0, float(raw))
     except ValueError:
         return 600.0
+
+
+def _cash_sweep_enabled() -> bool:
+    """Cash levelling master switch. **On** by default, unlike ingest.
+
+    Off, 44.9% of the ledger's rejections are an artefact of the simulator's
+    funding model rather than a fact about the market -- one venue dry with the
+    other leg previewing clean. That is not a behaviour worth defaulting to.
+    Kept as a flag because it is the one thing here that moves money without a
+    trade, so it has to be switchable off in one place.
+    """
+    return os.environ.get("ARBYS_ENABLE_CASH_SWEEP", "1") == "1"
+
+
+def _cash_sweep_interval_s() -> float:
+    raw = os.environ.get("ARBYS_CASH_SWEEP_INTERVAL_S", "60")
+    try:
+        return max(5.0, float(raw))
+    except ValueError:
+        return 60.0
+
+
+def _cash_sweep_min() -> Decimal:
+    """Smallest move worth an audit row. A floor on *size*, like MIN_CONTRACT_QTY."""
+    raw = os.environ.get("ARBYS_CASH_SWEEP_MIN", "25")
+    try:
+        value = Decimal(raw)
+    except (ArithmeticError, ValueError):
+        return Decimal("25")
+    return value if value > 0 else Decimal("0")
 
 
 def _auto_trade_enabled() -> bool:
@@ -565,6 +596,16 @@ class AppState:
             quotebook=self.quotebook,
             account_ids=[self.default_account_id],
         )
+        # Levels free cash between the venues. A matched pair costs ~$1.00
+        # all-in but splits it lopsidedly and unpredictably, so fixed funding
+        # strands capital on the side the last run of tickets did not need.
+        self.cash_sweep_service = CashSweepService(
+            brokers=self.paper_brokers,
+            account_ids=[self.default_account_id],
+            min_transfer=_cash_sweep_min(),
+            interval_s=_cash_sweep_interval_s(),
+            enabled=_cash_sweep_enabled,
+        )
         self.auto_settle_service = AutoSettleService(
             event_groups=self.event_groups,
             brokers=self.paper_brokers,
@@ -691,6 +732,17 @@ class AppState:
 
         await self.pnl_service.start()
         await self.auto_settle_service.start()
+        if _cash_sweep_enabled():
+            await self.cash_sweep_service.start()
+            log.info(
+                "cash sweep on (interval=%.0fs, min=$%s); free cash is levelled "
+                "across %d venues",
+                _cash_sweep_interval_s(),
+                _cash_sweep_min(),
+                len(self.paper_brokers),
+            )
+        else:
+            log.info("ARBYS_ENABLE_CASH_SWEEP != 1; per-venue cash is not levelled")
 
         if _auto_trade_enabled():
             await self.auto_trade_service.start()
@@ -966,6 +1018,7 @@ class AppState:
             await self._discovery_service.stop()
             self._discovery_service = None
         await self._stop_ingest()
+        await self.cash_sweep_service.stop()
         await self.auto_settle_service.stop()
         await self.pnl_service.stop()
 
@@ -992,6 +1045,10 @@ class AppState:
                 )
         self.auto_settle_service.clear_settled()
         self.auto_trade_service.clear_cooldowns()
+        # The transfer rows are gone, so the counters that summarise them must
+        # go too, or /health describes a ledger that no longer exists.
+        self.cash_sweep_service.transfers = 0
+        self.cash_sweep_service.moved = Decimal("0")
         log.info("paper account %s reset to $%s per venue", account_id, DEFAULT_STARTING_BALANCE)
 
     def _set_group_opportunities(

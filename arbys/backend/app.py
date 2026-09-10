@@ -250,6 +250,11 @@ def create_app() -> FastAPI:
             # that, a disconnect is our starved loop rather than the venue --
             # see loop_health.py.
             "loop_lag": loop_monitor().stats(),
+            # A sweep that never fires on a persistently lopsided account is
+            # indistinguishable from a balanced one without this, and the
+            # symptom would be rejections blaming the market.
+            "cash_transfers": get_state().cash_sweep_service.transfers,
+            "cash_moved": str(get_state().cash_sweep_service.moved),
         }
 
     # ------------------------------------------------------------------

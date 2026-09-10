@@ -142,3 +142,48 @@ def test_max_days_to_start_non_finite_falls_back(monkeypatch, bad):
     the default like any other unparseable input."""
     monkeypatch.setenv("ARBYS_MAX_DAYS_TO_START", bad)
     assert max_days_to_start() == 7.0
+
+
+def test_cash_sweep_is_on_by_default(monkeypatch):
+    """The one switch here that defaults on.
+
+    Off, 44.9% of the ledger's rejections were an artefact of the funding
+    model rather than a fact about the market.
+    """
+    monkeypatch.delenv("ARBYS_ENABLE_CASH_SWEEP", raising=False)
+    assert state_module._cash_sweep_enabled() is True
+
+
+def test_cash_sweep_off_only_by_exactly_zero(monkeypatch):
+    monkeypatch.setenv("ARBYS_ENABLE_CASH_SWEEP", "0")
+    assert state_module._cash_sweep_enabled() is False
+    for value in ("1", "true", "yes", "", "2"):
+        monkeypatch.setenv("ARBYS_ENABLE_CASH_SWEEP", value)
+        assert state_module._cash_sweep_enabled() is (value == "1")
+
+
+def test_cash_sweep_interval_defaults_and_floors(monkeypatch):
+    monkeypatch.delenv("ARBYS_CASH_SWEEP_INTERVAL_S", raising=False)
+    assert state_module._cash_sweep_interval_s() == 60.0
+    monkeypatch.setenv("ARBYS_CASH_SWEEP_INTERVAL_S", "15")
+    assert state_module._cash_sweep_interval_s() == 15.0
+    # A tight floor, not 0: this one writes rows, so a busy-loop sweep would
+    # fill the audit table rather than merely burn CPU.
+    monkeypatch.setenv("ARBYS_CASH_SWEEP_INTERVAL_S", "0")
+    assert state_module._cash_sweep_interval_s() == 5.0
+    monkeypatch.setenv("ARBYS_CASH_SWEEP_INTERVAL_S", "garbage")
+    assert state_module._cash_sweep_interval_s() == 60.0
+
+
+def test_cash_sweep_min_defaults_to_25_and_survives_garbage(monkeypatch):
+    monkeypatch.delenv("ARBYS_CASH_SWEEP_MIN", raising=False)
+    assert state_module._cash_sweep_min() == Decimal("25")
+    monkeypatch.setenv("ARBYS_CASH_SWEEP_MIN", "100.50")
+    assert state_module._cash_sweep_min() == Decimal("100.50")
+    # 0 disables the floor, as every other size floor here does.
+    monkeypatch.setenv("ARBYS_CASH_SWEEP_MIN", "0")
+    assert state_module._cash_sweep_min() == Decimal("0")
+    monkeypatch.setenv("ARBYS_CASH_SWEEP_MIN", "-5")
+    assert state_module._cash_sweep_min() == Decimal("0")
+    monkeypatch.setenv("ARBYS_CASH_SWEEP_MIN", "not-money")
+    assert state_module._cash_sweep_min() == Decimal("25")
