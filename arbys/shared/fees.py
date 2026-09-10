@@ -82,6 +82,52 @@ class PolymarketUsFeeModel:
 
 
 @dataclass(frozen=True)
+class NovigFeeModel:
+    """Novig (Ludlow Exchange) taker fee.
+
+    ``fee = 0.03 * C * p * (1 - p)`` — the same shape as Kalshi's and
+    Polymarket US's, at half the coefficient. Peaks at a coin flip ($0.75 per
+    100 contracts at p=0.50), which is the "capped at $0.0075 per contract"
+    figure the venue advertises, and vanishes at the extremes.
+
+    Why the coefficient matters more than it looks: fee drag is roughly
+    constant while divergence varies, and at even money the existing
+    Kalshi + Polymarket US pair drags 3.25c/contract against a maximum
+    observed divergence of 2.75c — which is why 12 groups were gross-positive
+    on 2026-08-22 and 0 were net-positive. Substituting a Novig leg drags
+    2.25c, under that ceiling, so a 50/50 market becomes net-positive-capable
+    at all. Fees are the only term in that comparison we can move.
+
+    Provenance: the venue's published taker schedule as read on 2026-09-09.
+    **Not yet confirmed against the Ludlow Exchange DCM rulebook**, and the
+    figure may describe the pre-designation app rather than the exchange.
+    Confirm before this model gates a live ticket.
+
+    Two deliberate omissions, matching how the other venues are treated:
+
+    * The maker credit is not modelled. Novig pays makers rather than charging
+      them, but the paper broker fills against the ask as a taker, so it would
+      never apply — the same reasoning that omits Polymarket US's -0.0125
+      maker rebate.
+    * No rounding, so modelled fees come out slightly low, on the same side as
+      the existing Kalshi and Polymarket US understatement.
+
+    Deliberately **not** registered in ``AppState.fees``: there is no Novig
+    adapter yet, and a fee model for a venue that carries no legs would seed a
+    paper broker and a starting balance for a venue that can never trade —
+    exactly the DraftKings defect migration 0010 had to undo.
+    """
+
+    venue_id: str = "novig"
+    rate: Decimal = Decimal("0.03")
+
+    def fee(self, *, price: Decimal, qty: Decimal, is_buy: bool) -> Decimal:
+        if qty <= 0:
+            return Decimal("0")
+        return self.rate * price * (Decimal("1") - price) * qty
+
+
+@dataclass(frozen=True)
 class SportsbookFeeModel:
     """Sportsbook 'fee' is the vig already embedded in the odds. If callers pass
     the *raw* implied probability from the offered odds (i.e. without de-vigging)
