@@ -57,6 +57,13 @@ primary_region = "ewr"
   # fill landing in that window would have overwritten the correction with the
   # pre-cleanup figure. Any future one-shot ledger migration wants the same
   # pause, and the same check afterwards.
+  #
+  # As of 2026-09-10 pausing this is **no longer sufficient** on its own:
+  # the cash sweep also writes `paper_balance`, on its own 60s timer and
+  # independently of any trade. A one-shot ledger migration now needs
+  # ARBYS_ENABLE_CASH_SWEEP = "0" for the same one deploy, or the old
+  # machine levels the pre-correction figures back over the release
+  # command's work.
   ARBYS_ENABLE_AUTO_TRADE = "1"
 
 [http_service]

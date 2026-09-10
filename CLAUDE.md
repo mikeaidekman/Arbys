@@ -1443,6 +1443,15 @@ parks a third of the account's cash on a venue that has never carried a leg --
 the same untradeable-cash problem that flag was made to gate, arriving by a
 new route. Watch the first sweep if it is ever turned on.
 
+**`paper_balance` now has a second writer, which changes how a ledger
+migration has to be run.** `fly.toml` pauses the auto-trader for a deploy
+whose release command corrects balances, because the old machine is still live
+and a fill landing in that window overwrites the correction — that is why
+`ARBYS_ENABLE_AUTO_TRADE` was briefly `0` for the `0011` cleanup. The sweep
+writes `paper_balance` too, on its own timer and with no trade involved, so
+pausing the auto-trader alone no longer quiesces balance writes:
+`ARBYS_ENABLE_CASH_SWEEP=0` belongs in the same pause.
+
 **What levelling cannot fix**: the 751 both-dry rejections are real capital
 exhaustion, and `plan_transfers` returns nothing for them rather than
 pretending. Both venues sitting at $1.77 and $3.75 with everything locked in
