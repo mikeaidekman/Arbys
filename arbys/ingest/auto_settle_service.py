@@ -115,6 +115,16 @@ class AutoSettleService:
         self._seen.clear()
         self._unresolved.clear()
 
+    def mark_settled(self, event_group_id: str) -> None:
+        """Record a group settled by another route -- the venue's own result.
+
+        Without it this service would settle the group again from its final
+        book, and `is_settled` would let the finished game be traded.
+        """
+        self._settled.add(event_group_id)
+        self._hits.pop(event_group_id, None)
+        self._unresolved.pop(event_group_id, None)
+
     def is_settled(self, event_group_id: str) -> bool:
         """Whether this group has been settled and must not be traded again.
 

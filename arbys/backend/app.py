@@ -255,6 +255,13 @@ def create_app() -> FastAPI:
             # symptom would be rejections blaming the market.
             "cash_transfers": get_state().cash_sweep_service.transfers,
             "cash_moved": str(get_state().cash_sweep_service.moved),
+            # Positions settled at the venue's published result, and how many
+            # finished-looking positions the last pass could not resolve. A
+            # non-zero unresolved count that never falls is a market the venue
+            # voided or never finalised -- worth a look by hand.
+            "venue_settled": get_state().venue_settle_service.settled_total,
+            "venue_unresolved": get_state().venue_settle_service.last_unresolved,
+            "venue_ghosts_closed": get_state().venue_settle_service.ghosts_closed_total,
         }
 
     # ------------------------------------------------------------------
@@ -715,6 +722,27 @@ def create_app() -> FastAPI:
         s = get_state()
         await s.reset_paper_account(account_id)
         return await paper_summary(account_id)
+
+    @app.post("/paper/settle-finished")
+    async def paper_settle_finished() -> dict[str, object]:
+        """Run one venue-result settlement pass now, rather than on the timer.
+
+        Settles every open position on a started game whose venue has
+        published a final result, and leaves the rest open. Never guesses, so
+        it is safe to press repeatedly.
+        """
+        r = await get_state().venue_settle_service.settle_once()
+        return {
+            "checked": r.checked,
+            "settled": len(r.settled),
+            "unresolved": r.unresolved,
+            "not_started": r.skipped_not_started,
+            "already_paid_closed": len(r.ghosts_closed),
+            "outcomes": [
+                {"venue_id": v, "outcome_id": o, "resolved_value": str(x)}
+                for v, o, x in r.settled
+            ],
+        }
 
     @app.post("/paper/execute", response_model=list[str])
     async def paper_execute(body: ExecuteArbIn) -> list[str]:

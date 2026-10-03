@@ -52,6 +52,11 @@ export function AdminPage() {
     onSuccess: () => qc.invalidateQueries({ queryKey: ["paper"] }),
   });
 
+  const settle = useMutation({
+    mutationFn: api.settleFinished,
+    onSuccess: () => qc.invalidateQueries({ queryKey: ["paper"] }),
+  });
+
   const updateLeg = (i: number, patch: Partial<EventGroupLeg>) =>
     setLegs((prev) => prev.map((l, j) => (j === i ? { ...l, ...patch } : l)));
 
@@ -271,6 +276,36 @@ export function AdminPage() {
 
         <section>
           <h2>Paper portfolio</h2>
+          <BlueprintCard
+            style={{ padding: "var(--space-4)", gap: "var(--space-3)", marginBottom: "var(--space-4)" }}
+          >
+            <p style={{ margin: 0, fontSize: 12, opacity: 0.7 }}>
+              Settle finished positions at the result each venue published. Positions on
+              games the venue has not finalised are left open. Also runs at startup and
+              every 15 minutes.
+            </p>
+            <div>
+              <button
+                type="button"
+                className="btn btn-secondary"
+                onClick={() => settle.mutate()}
+                disabled={settle.isPending}
+              >
+                {settle.isPending ? "Settling…" : "Settle finished positions"}
+              </button>
+              {settle.data ? (
+                <span style={{ marginLeft: 12, fontSize: 12 }}>
+                  Settled {settle.data.settled} of {settle.data.checked} checked;{" "}
+                  {settle.data.unresolved} not final yet.
+                </span>
+              ) : null}
+              {settle.error ? (
+                <span style={{ marginLeft: 12, fontSize: 12, color: "var(--vt-red-dark)" }}>
+                  {(settle.error as Error).message}
+                </span>
+              ) : null}
+            </div>
+          </BlueprintCard>
           <BlueprintCard style={{ padding: "var(--space-4)", gap: "var(--space-3)" }}>
             <p style={{ margin: 0, fontSize: 12, opacity: 0.7 }}>
               Reset the paper portfolio. Deletes all orders, positions, PnL snapshots and

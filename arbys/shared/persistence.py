@@ -14,6 +14,8 @@ from __future__ import annotations
 
 from decimal import Decimal
 
+from sqlalchemy.ext.asyncio import AsyncSession
+
 from ..adapters.base import Fill, Order, OrderStatus
 from ..db import repositories as repo
 from ..db.session import run_write
@@ -94,6 +96,48 @@ class DbPaperPersistenceSink:
             ),
         )
 
+    async def on_settled(
+        self,
+        outcome_id: str,
+        resolved_value: Decimal,
+        *,
+        venue_id: str,
+        source: str,
+        closed: tuple[tuple[str, Decimal, Decimal, Decimal], ...],
+    ) -> None:
+        """A settlement's balance, position and record in one transaction.
+
+        `closed` is (account, cash after, realized on the outcome, open fees)
+        per account that held the outcome. All of it lands or none of it does:
+        a paid-out balance beside a still-open position is what a restart
+        turned into a position held forever.
+        """
+
+        async def work(s: AsyncSession) -> None:
+            for account_id, balance, realized, open_fees in closed:
+                await repo.upsert_paper_balance(
+                    s, account_id=account_id, venue_id=venue_id, amount=balance
+                )
+                await repo.upsert_paper_position(
+                    s,
+                    account_id=account_id,
+                    venue_id=venue_id,
+                    outcome_id=outcome_id,
+                    qty=Decimal("0"),
+                    avg_price=Decimal("0"),
+                    realized_pnl=realized,
+                    open_fees=open_fees,
+                )
+            await repo.insert_paper_settlement(
+                s,
+                outcome_id=outcome_id,
+                venue_id=venue_id,
+                resolved_value=resolved_value,
+                source=source,
+            )
+
+        await run_write("sink.on_settled", work)
+
 
 class AccountScopedSink:
     """Wraps a `DbPaperPersistenceSink` and pins the account id on `on_order`."""
@@ -149,4 +193,17 @@ class AccountScopedSink:
     ) -> None:
         await self._inner.on_settlement(
             outcome_id, resolved_value, venue_id=venue_id, source=source
+        )
+
+    async def on_settled(
+        self,
+        outcome_id: str,
+        resolved_value: Decimal,
+        *,
+        venue_id: str,
+        source: str,
+        closed: tuple[tuple[str, Decimal, Decimal, Decimal], ...],
+    ) -> None:
+        await self._inner.on_settled(
+            outcome_id, resolved_value, venue_id=venue_id, source=source, closed=closed
         )

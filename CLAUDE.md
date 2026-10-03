@@ -22,7 +22,7 @@ Run everything from the repo root with the venv Python — `venv\Scripts\python.
 — rather than a bare `python`.
 
 ```powershell
-venv\Scripts\python.exe -m pytest -q            # 624 tests, must stay green
+venv\Scripts\python.exe -m pytest -q            # 633 tests, must stay green
 venv\Scripts\python.exe -m ruff check .         # must stay clean
 venv\Scripts\python.exe -m mypy arbys           # see caveat below — NOT clean today
 ```
@@ -1212,8 +1212,51 @@ Two rules make those safe:
   recoverable, a wrongly settled one silently corrupts the ledger.
   `unresolved_groups()` answers how many are in that state.
 
-There is no manual settle endpoint, so an unresolved group stays open until a
-quote reappears or the account is reset. Worth building if the count grows.
+### A fourth route: the venue's published result (2026-10-03)
+
+All three routes above reach a finished game only through **in-memory**
+state, and two ordinary events strand it: a **restart** empties
+`AutoSettleService._seen`, so a group retired before boot is never seen
+leaving; and a **dropped write** zeroes the position in memory but not in
+`paper_position`, so the next boot hydrates it open again. Either way the
+market is dark, so no price route can ever reach it. Reported as "a large
+number of open trades for events that finished well in the past", with
+`/health` at 319,913 dropped writes, mostly `QueuePool` timeouts.
+
+`VenueSettleService` (`ingest/venue_settle_service.py`) needs neither the
+quote book nor the registry. It walks the brokers' own open positions and asks
+each venue what that market settled at (`adapters/settlement.py`):
+
+- **Kalshi** `GET /markets/{ticker}`: `status` `finalized`/`settled` with
+  `result` `yes`/`no`. `determined` is deliberately not final yet.
+- **Polymarket US** `GET /v1/markets/{slug}/settlement`: `{"settlement": x}`,
+  the **long** side's payout, short is `1 - x`; **404 means not settled**.
+  A walkover settles "to fair market price", so a fraction is legitimate.
+
+Anything else, including errors, reads as not final and the position is left for
+the next pass, so it never guesses and is safe on a timer. It runs at boot,
+then every `ARBYS_VENUE_SETTLE_INTERVAL_S` (900), gated on
+`ARBYS_ENABLE_VENUE_SETTLE` (**1**) *and* ingest, and on demand from
+`POST /paper/settle-finished` (the `/admin` button). It skips legs of
+registered groups that have not started, writes `paper_settlement.source =
+"venue_result"`, and calls `AutoSettleService.mark_settled` so the group is
+neither settled twice nor traded. `/health` reports `venue_settled`,
+`venue_unresolved` and `venue_ghosts_closed`.
+
+**A position with a `paper_settlement` row is never paid again.** That is
+the ghost a dropped write leaves: the cash already moved and the record
+landed, but the position upsert did not. It is closed without cash
+(`close_already_settled`). This rests on balance writes being **absolute**:
+a payout credited in memory reaches the stored balance with the next balance
+write of any kind, and the cash sweep writes one every minute. The residual
+risk is a ghost whose settlement row was *also* dropped, which looks exactly
+like an unpaid position and will be paid twice; nothing on record can tell
+the two apart.
+
+To stop new ghosts being made, `settle_outcome_async` now writes balance,
+position and settlement record in **one** `run_write`
+(`DbPaperPersistenceSink.on_settled`). Sinks without that method (test fakes)
+fall back to the three separate writes.
 
 ## Trade history is ticket-level
 

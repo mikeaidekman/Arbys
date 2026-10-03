@@ -17,6 +17,8 @@ from collections.abc import Callable
 from datetime import UTC, datetime
 from decimal import Decimal
 
+import httpx
+
 from ..adapters.base import MarketDataAdapter
 from ..adapters.draftkings import DraftKingsAdapter, draftkings_enabled
 from ..adapters.kalshi import KalshiAdapter
@@ -24,6 +26,7 @@ from ..adapters.kalshi_ws import KalshiWebSocketAdapter, kalshi_ws_creds_from_en
 from ..adapters.polymarket_us import PolymarketUsAdapter
 from ..adapters.polymarket_us_auth import creds_from_env as polymarket_us_creds_from_env
 from ..adapters.polymarket_us_ws import PolymarketUsWebSocketAdapter
+from ..adapters.settlement import fetch_kalshi_settlement, fetch_polymarket_us_settlement
 from ..db import repositories as repo
 from ..db.session import run_write, session_scope
 from ..ingest.auto_settle_service import AutoSettleService
@@ -31,6 +34,7 @@ from ..ingest.auto_trade_service import AutoTradeService
 from ..ingest.cash_sweep_service import CashSweepService
 from ..ingest.engine_runtime import EngineRuntime
 from ..ingest.pnl_service import PnlSnapshotService
+from ..ingest.venue_settle_service import VenueSettleService
 from ..ingest.worker import IngestWorker
 from ..shared.arb_engine import ArbOpportunity
 from ..shared.execution_router import ExecutionRouter
@@ -131,6 +135,42 @@ def _cash_sweep_min() -> Decimal:
     except (ArithmeticError, ValueError):
         return Decimal("25")
     return value if value > 0 else Decimal("0")
+
+
+def _venue_settle_enabled() -> bool:
+    """Settle finished positions at the venue's published result. **On** by default.
+
+    It is the only route that reaches a position whose game ended before a
+    restart or whose settlement write was dropped -- see
+    `ingest/venue_settle_service.py`. It also needs the network, so it runs
+    only when ingest does.
+    """
+    return os.environ.get("ARBYS_ENABLE_VENUE_SETTLE", "1") == "1"
+
+
+def _venue_settle_interval_s() -> float:
+    raw = os.environ.get("ARBYS_VENUE_SETTLE_INTERVAL_S", "900")
+    try:
+        return max(60.0, float(raw))
+    except ValueError:
+        return 900.0
+
+
+async def _has_settlement_row(outcome_id: str) -> bool:
+    """Whether this outcome was ever settled, i.e. its cash already moved."""
+    from sqlalchemy import select
+
+    from ..db import models as m
+
+    async with session_scope() as session:
+        row = (
+            await session.execute(
+                select(m.PaperSettlement.id)
+                .where(m.PaperSettlement.outcome_id == outcome_id)
+                .limit(1)
+            )
+        ).first()
+    return row is not None
 
 
 def _auto_trade_enabled() -> bool:
@@ -611,6 +651,22 @@ class AppState:
             brokers=self.paper_brokers,
             quotebook=self.quotebook,
         )
+        # Built lazily: most AppStates (every test) never ask a venue anything.
+        self._settle_http: httpx.AsyncClient | None = None
+        self.venue_settle_service = VenueSettleService(
+            brokers=self.paper_brokers,
+            account_ids=[self.default_account_id],
+            resolvers={
+                "kalshi": lambda o: fetch_kalshi_settlement(self._settle_client(), o),
+                "polymarket_us": lambda o: fetch_polymarket_us_settlement(
+                    self._settle_client(), o
+                ),
+            },
+            event_groups=self.event_groups,
+            mark_group_settled=self.auto_settle_service.mark_settled,
+            already_settled=_has_settlement_row,
+            interval_s=_venue_settle_interval_s(),
+        )
         # Callables rather than `self`: this service lives in `arbys/ingest/`,
         # which must not import `arbys/backend/`. See its module docstring.
         self.auto_trade_service = AutoTradeService(
@@ -635,6 +691,11 @@ class AppState:
         self._subscribed: dict[str, set[str]] = {}
         self._ingest_worker: IngestWorker | None = None
         self._discovery_service = None
+
+    def _settle_client(self) -> httpx.AsyncClient:
+        if self._settle_http is None:
+            self._settle_http = httpx.AsyncClient(timeout=15.0)
+        return self._settle_http
 
     async def bootstrap(self) -> None:
         """Ensure schema, seed reference data, and hydrate in-memory state.
@@ -751,6 +812,12 @@ class AppState:
                 "net-positive opportunities into paper account %s",
                 self.default_account_id,
             )
+
+        if _ingest_enabled() and _venue_settle_enabled():
+            # Its first pass runs immediately, which is the point: positions
+            # stranded by the restart we are booting from settle now rather
+            # than one interval from now.
+            await self.venue_settle_service.start()
 
         if _ingest_enabled():
             await self._start_ingest()
@@ -1019,8 +1086,12 @@ class AppState:
             self._discovery_service = None
         await self._stop_ingest()
         await self.cash_sweep_service.stop()
+        await self.venue_settle_service.stop()
         await self.auto_settle_service.stop()
         await self.pnl_service.stop()
+        if self._settle_http is not None:
+            await self._settle_http.aclose()
+            self._settle_http = None
 
     async def reset_paper_account(self, account_id: str) -> None:
         """Wipe all history for a paper account and re-seed starting balances.
@@ -1049,6 +1120,9 @@ class AppState:
         # go too, or /health describes a ledger that no longer exists.
         self.cash_sweep_service.transfers = 0
         self.cash_sweep_service.moved = Decimal("0")
+        self.venue_settle_service.settled_total = 0
+        self.venue_settle_service.last_unresolved = 0
+        self.venue_settle_service.ghosts_closed_total = 0
         log.info("paper account %s reset to $%s per venue", account_id, DEFAULT_STARTING_BALANCE)
 
     def _set_group_opportunities(

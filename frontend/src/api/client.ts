@@ -69,6 +69,12 @@ export const api = {
     req<PnlSnapshot[]>(`/paper/${account_id}/pnl-snapshots?limit=${limit}`),
   paperReset: (account_id: string) =>
     req<PaperAccountSummary>(`/paper/${account_id}/reset`, { method: "POST" }),
+  /** Settle open positions whose venue has published a final result. */
+  settleFinished: () =>
+    req<{ checked: number; settled: number; unresolved: number; not_started: number }>(
+      "/paper/settle-finished",
+      { method: "POST" },
+    ),
   /**
    * One page of the ledger, newest first.
    *

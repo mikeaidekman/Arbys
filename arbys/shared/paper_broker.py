@@ -457,6 +457,8 @@ class PaperExecutionAdapter(ExecutionAdapter):
     async def settle_outcome_async(
         self, outcome_id: str, resolved_value: Decimal, *, source: str = "heuristic"
     ) -> None:
+        # (account, cash after, realized on the outcome, fees left on it)
+        closed: list[tuple[str, Decimal, Decimal, Decimal]] = []
         for account_id, st in self._accounts.items():
             qty = st.positions.get(outcome_id, Decimal("0"))
             if qty == 0:
@@ -475,10 +477,70 @@ class PaperExecutionAdapter(ExecutionAdapter):
             )
             st.positions[outcome_id] = Decimal("0")
             st.avg_price[outcome_id] = Decimal("0")
-            if self._sink is not None:
-                await self._emit(
-                    self._sink.on_balance(account_id, self.venue_id, st.balances[self.venue_id])
+            closed.append(
+                (
+                    account_id,
+                    st.balances[self.venue_id],
+                    st.realized_by_outcome[outcome_id],
+                    st.open_fees_by_outcome.get(outcome_id, Decimal("0")),
                 )
+            )
+        if self._sink is None:
+            return
+        # One transaction where the sink offers it. Written as three, a dropped
+        # position upsert after a landed balance left a paid-out position open
+        # in the database, and the next boot hydrated it as still held -- the
+        # "open trades on games long finished" of 2026-10-03.
+        on_settled = getattr(self._sink, "on_settled", None)
+        if on_settled is not None:
+            await self._emit(
+                on_settled(
+                    outcome_id,
+                    resolved_value,
+                    venue_id=self.venue_id,
+                    source=source,
+                    closed=tuple(closed),
+                )
+            )
+            return
+        for account_id, balance, realized_total, open_fees in closed:
+            await self._emit(self._sink.on_balance(account_id, self.venue_id, balance))
+            await self._emit(
+                self._sink.on_position(
+                    account_id,
+                    outcome_id,
+                    Decimal("0"),
+                    Decimal("0"),
+                    realized_total,
+                    venue_id=self.venue_id,
+                    open_fees=open_fees,
+                )
+            )
+        await self._emit(
+            self._sink.on_settlement(
+                outcome_id, resolved_value, venue_id=self.venue_id, source=source
+            )
+        )
+
+    async def close_already_settled(self, outcome_id: str) -> int:
+        """Zero a position whose settlement already paid out, paying nothing.
+
+        The ghost a dropped write leaves behind: settlement credited the cash
+        and wrote its `paper_settlement` row, but the position upsert was lost,
+        so a restart hydrated the position as still held. The cash is already
+        in the stored balance -- balance writes are absolute and land every
+        minute from the cash sweep alone -- so settling it again would pay it
+        twice. Returns how many accounts held it.
+        """
+        closed = 0
+        for account_id, st in self._accounts.items():
+            if st.positions.get(outcome_id, Decimal("0")) == 0:
+                continue
+            closed += 1
+            st.positions[outcome_id] = Decimal("0")
+            st.avg_price[outcome_id] = Decimal("0")
+            st.open_fees_by_outcome[outcome_id] = Decimal("0")
+            if self._sink is not None:
                 await self._emit(
                     self._sink.on_position(
                         account_id,
@@ -487,15 +549,10 @@ class PaperExecutionAdapter(ExecutionAdapter):
                         Decimal("0"),
                         st.realized_by_outcome[outcome_id],
                         venue_id=self.venue_id,
-                        open_fees=st.open_fees_by_outcome.get(outcome_id, Decimal("0")),
+                        open_fees=Decimal("0"),
                     )
                 )
-        if self._sink is not None:
-            await self._emit(
-                self._sink.on_settlement(
-                    outcome_id, resolved_value, venue_id=self.venue_id, source=source
-                )
-            )
+        return closed
 
     def settle_outcome(self, outcome_id: str, resolved_value: Decimal) -> None:
         """Synchronous settlement (no persistence). Kept for existing callers."""
