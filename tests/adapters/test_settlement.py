@@ -10,13 +10,23 @@ from __future__ import annotations
 from decimal import Decimal
 
 import httpx
+import pytest
 
+from arbys.adapters import settlement
 from arbys.adapters.settlement import (
     fetch_kalshi_settlement,
     fetch_polymarket_us_settlement,
 )
 
 D = Decimal
+
+
+@pytest.fixture(autouse=True)
+def _no_wait(monkeypatch):
+    async def instant(_s: float) -> None:
+        return None
+
+    monkeypatch.setattr(settlement, "_sleep", instant)
 
 
 def _client(handler) -> httpx.AsyncClient:
@@ -48,6 +58,40 @@ async def test_kalshi_open_or_determined_market_is_not_final():
     # Result known but not yet paid out: wait for `finalized`.
     async with _client(_kalshi("determined", "yes")) as c:
         assert await fetch_kalshi_settlement(c, "KXATPMATCH-26AUG27GAUWEN-GAU:YES") is None
+
+
+async def test_kalshi_tie_settles_at_its_scalar_value():
+    # NFL preseason, 2026-08-28: expiration_value "Tie".
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            200,
+            json={
+                "market": {
+                    "status": "finalized",
+                    "result": "scalar",
+                    "settlement_value_dollars": "0.5000",
+                }
+            },
+        )
+
+    async with _client(handler) as c:
+        assert await fetch_kalshi_settlement(c, "KXNFLGAME-26AUG28SEAKC-SEA:YES") == D("0.5")
+        assert await fetch_kalshi_settlement(c, "KXNFLGAME-26AUG28SEAKC-SEA:NO") == D("0.5")
+
+
+async def test_a_429_is_waited_out_and_retried():
+    calls = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        calls.append(1)
+        if len(calls) < 3:
+            return httpx.Response(429, headers={"Retry-After": "10"}, text="<html>")
+        return httpx.Response(200, json={"settlement": 1})
+
+    async with _client(handler) as c:
+        got = await fetch_polymarket_us_settlement(c, "aec-mlb-cin-chc-2026-08-28:LONG")
+    assert got == D("1")
+    assert len(calls) == 3
 
 
 async def test_kalshi_void_result_is_left_open():

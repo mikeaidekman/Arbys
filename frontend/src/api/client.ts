@@ -69,12 +69,10 @@ export const api = {
     req<PnlSnapshot[]>(`/paper/${account_id}/pnl-snapshots?limit=${limit}`),
   paperReset: (account_id: string) =>
     req<PaperAccountSummary>(`/paper/${account_id}/reset`, { method: "POST" }),
-  /** Settle open positions whose venue has published a final result. */
+  /** Start a pass settling positions whose venue has published a result. */
   settleFinished: () =>
-    req<{ checked: number; settled: number; unresolved: number; not_started: number }>(
-      "/paper/settle-finished",
-      { method: "POST" },
-    ),
+    req<SettleReport & { started: boolean }>("/paper/settle-finished", { method: "POST" }),
+  settleStatus: () => req<SettleReport>("/paper/settle-finished"),
   /**
    * One page of the ledger, newest first.
    *
@@ -113,3 +111,16 @@ export const api = {
   paperPositions: (account_id: string) =>
     req<PaperPosition[]>(`/paper/${account_id}/positions`),
 };
+
+export interface SettleReport {
+  running: boolean;
+  last_pass: {
+    finished_at: string | null;
+    checked: number;
+    settled: number;
+    recorded: number;
+    already_paid_closed: number;
+    not_started: number;
+    unresolved: { venue_id: string; outcome_id: string }[];
+  } | null;
+}

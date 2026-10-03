@@ -52,10 +52,20 @@ export function AdminPage() {
     onSuccess: () => qc.invalidateQueries({ queryKey: ["paper"] }),
   });
 
+  const settleStatus = useQuery({
+    queryKey: ["settle-finished"],
+    queryFn: api.settleStatus,
+    // Poll only while a pass is running; it takes minutes.
+    refetchInterval: (q) => (q.state.data?.running ? 5000 : false),
+  });
   const settle = useMutation({
     mutationFn: api.settleFinished,
-    onSuccess: () => qc.invalidateQueries({ queryKey: ["paper"] }),
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: ["settle-finished"] });
+      qc.invalidateQueries({ queryKey: ["paper"] });
+    },
   });
+  const lastPass = settleStatus.data?.last_pass;
 
   const updateLeg = (i: number, patch: Partial<EventGroupLeg>) =>
     setLegs((prev) => prev.map((l, j) => (j === i ? { ...l, ...patch } : l)));
@@ -281,22 +291,23 @@ export function AdminPage() {
           >
             <p style={{ margin: 0, fontSize: 12, opacity: 0.7 }}>
               Settle finished positions at the result each venue published. Positions on
-              games the venue has not finalised are left open. Also runs at startup and
-              every 15 minutes.
+              games the venue has not finalised are left open. Runs in the background for a
+              few minutes, and also at startup and every 15 minutes.
             </p>
             <div>
               <button
                 type="button"
                 className="btn btn-secondary"
                 onClick={() => settle.mutate()}
-                disabled={settle.isPending}
+                disabled={settle.isPending || settleStatus.data?.running}
               >
-                {settle.isPending ? "Settling…" : "Settle finished positions"}
+                {settleStatus.data?.running ? "Settling…" : "Settle finished positions"}
               </button>
-              {settle.data ? (
+              {lastPass ? (
                 <span style={{ marginLeft: 12, fontSize: 12 }}>
-                  Settled {settle.data.settled} of {settle.data.checked} checked;{" "}
-                  {settle.data.unresolved} not final yet.
+                  Last pass: settled {lastPass.settled}, recorded {lastPass.recorded}, closed{" "}
+                  {lastPass.already_paid_closed} already paid; {lastPass.unresolved.length} not
+                  final yet.
                 </span>
               ) : null}
               {settle.error ? (

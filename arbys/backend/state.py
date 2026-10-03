@@ -173,6 +173,35 @@ async def _has_settlement_row(outcome_id: str) -> bool:
     return row is not None
 
 
+async def _unrecorded_outcomes() -> list[tuple[str, str]]:
+    """(venue, outcome) traded on a filled ticket but never recorded settled.
+
+    Exactly the set `/account` reads as open: a ticket is open while any of
+    its outcomes lacks a `paper_settlement` row. Excluded tickets are left out,
+    as everywhere else.
+    """
+    from sqlalchemy import select
+
+    from ..db import models as m
+
+    settled = select(m.PaperSettlement.outcome_id)
+    async with session_scope() as session:
+        rows = (
+            await session.execute(
+                select(m.PaperOrder.venue_id, m.PaperOrder.outcome_id)
+                .join(m.PaperTicket, m.PaperTicket.id == m.PaperOrder.ticket_id)
+                .join(m.PaperFill, m.PaperFill.order_id == m.PaperOrder.id)
+                .where(
+                    m.PaperTicket.status == "filled",
+                    m.PaperTicket.excluded_reason.is_(None),
+                    m.PaperOrder.outcome_id.not_in(settled),
+                )
+                .distinct()
+            )
+        ).all()
+    return [(v, o) for v, o in rows]
+
+
 def _auto_trade_enabled() -> bool:
     """Auto-trader master switch. Off by default, like ingest and discovery.
 
@@ -665,6 +694,7 @@ class AppState:
             event_groups=self.event_groups,
             mark_group_settled=self.auto_settle_service.mark_settled,
             already_settled=_has_settlement_row,
+            unrecorded_outcomes=_unrecorded_outcomes,
             interval_s=_venue_settle_interval_s(),
         )
         # Callables rather than `self`: this service lives in `arbys/ingest/`,
@@ -1120,9 +1150,7 @@ class AppState:
         # go too, or /health describes a ledger that no longer exists.
         self.cash_sweep_service.transfers = 0
         self.cash_sweep_service.moved = Decimal("0")
-        self.venue_settle_service.settled_total = 0
-        self.venue_settle_service.last_unresolved = 0
-        self.venue_settle_service.ghosts_closed_total = 0
+        self.venue_settle_service.reset_counters()
         log.info("paper account %s reset to $%s per venue", account_id, DEFAULT_STARTING_BALANCE)
 
     def _set_group_opportunities(

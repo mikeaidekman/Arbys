@@ -262,6 +262,8 @@ def create_app() -> FastAPI:
             "venue_settled": get_state().venue_settle_service.settled_total,
             "venue_unresolved": get_state().venue_settle_service.last_unresolved,
             "venue_ghosts_closed": get_state().venue_settle_service.ghosts_closed_total,
+            "venue_recorded": get_state().venue_settle_service.recorded_total,
+            "venue_settle_running": get_state().venue_settle_service.running,
         }
 
     # ------------------------------------------------------------------
@@ -723,26 +725,42 @@ def create_app() -> FastAPI:
         await s.reset_paper_account(account_id)
         return await paper_summary(account_id)
 
+    def _settle_report() -> dict[str, object]:
+        svc = get_state().venue_settle_service
+        r = svc.last_result
+        if r is None:
+            return {"running": svc.running, "last_pass": None}
+        return {
+            "running": svc.running,
+            "last_pass": {
+                "finished_at": r.finished_at.isoformat() if r.finished_at else None,
+                "checked": r.checked,
+                "settled": len(r.settled),
+                "recorded": len(r.recorded),
+                "already_paid_closed": len(r.ghosts_closed),
+                "not_started": r.skipped_not_started,
+                # Listed, not just counted: a market that never resolves is
+                # one to look up by hand, and this is where to find its id.
+                "unresolved": [
+                    {"venue_id": v, "outcome_id": o} for v, o in r.unresolved
+                ],
+            },
+        }
+
     @app.post("/paper/settle-finished")
     async def paper_settle_finished() -> dict[str, object]:
-        """Run one venue-result settlement pass now, rather than on the timer.
+        """Start a venue-result settlement pass now, rather than on the timer.
 
-        Settles every open position on a started game whose venue has
-        published a final result, and leaves the rest open. Never guesses, so
-        it is safe to press repeatedly.
+        Runs in the background: Polymarket is paced at a second a request, so
+        a pass takes minutes. Poll `GET` for the result. Never guesses, so it
+        is safe to press repeatedly.
         """
-        r = await get_state().venue_settle_service.settle_once()
-        return {
-            "checked": r.checked,
-            "settled": len(r.settled),
-            "unresolved": r.unresolved,
-            "not_started": r.skipped_not_started,
-            "already_paid_closed": len(r.ghosts_closed),
-            "outcomes": [
-                {"venue_id": v, "outcome_id": o, "resolved_value": str(x)}
-                for v, o, x in r.settled
-            ],
-        }
+        started = get_state().venue_settle_service.trigger()
+        return {"started": started, **_settle_report()}
+
+    @app.get("/paper/settle-finished")
+    async def paper_settle_status() -> dict[str, object]:
+        return _settle_report()
 
     @app.post("/paper/execute", response_model=list[str])
     async def paper_execute(body: ExecuteArbIn) -> list[str]:

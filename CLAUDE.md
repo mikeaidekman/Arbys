@@ -22,7 +22,7 @@ Run everything from the repo root with the venv Python — `venv\Scripts\python.
 — rather than a bare `python`.
 
 ```powershell
-venv\Scripts\python.exe -m pytest -q            # 633 tests, must stay green
+venv\Scripts\python.exe -m pytest -q            # 641 tests, must stay green
 venv\Scripts\python.exe -m ruff check .         # must stay clean
 venv\Scripts\python.exe -m mypy arbys           # see caveat below — NOT clean today
 ```
@@ -1252,6 +1252,26 @@ write of any kind, and the cash sweep writes one every minute. The residual
 risk is a ghost whose settlement row was *also* dropped, which looks exactly
 like an unpaid position and will be paid twice; nothing on record can tell
 the two apart.
+
+**`/account` reads a ticket as open while any of its outcomes has no
+`paper_settlement` row**, whatever the position says. So the mirror image of
+a ghost -- cash paid, position zeroed, *record* dropped -- shows open forever
+while holding nothing, and a pass over held positions never sees it. A second
+phase lists traded outcomes with no record (`_unrecorded_outcomes`, the same
+population the page counts) and writes the venue's result as a record only;
+`settle_outcome_async` moves no cash for an outcome nobody holds.
+
+**Polymarket's gateway throttles hard, and that was most of the first pass's
+76 unresolved.** Its Cloudflare front answered 429 with `Retry-After: 10`
+after about five requests, and still refused 6 of 40 at one a second; a pass
+that did not wait resolved 29 of 570 settled markets. `adapters/settlement.py`
+waits out `Retry-After`, and the service paces Polymarket at 1s and Kalshi at
+0.2s -- 60 of 60 real settled markets resolved at that pace, ~3s each. A pass
+therefore takes minutes, so `POST /paper/settle-finished` **starts** one in
+the background and `GET` reports the last pass, listing each unresolved
+outcome id. Kalshi settles a tie as `result: "scalar"` with
+`settlement_value_dollars` (0.5 on an NFL preseason tie), read as the YES
+payout.
 
 To stop new ghosts being made, `settle_outcome_async` now writes balance,
 position and settlement record in **one** `run_write`

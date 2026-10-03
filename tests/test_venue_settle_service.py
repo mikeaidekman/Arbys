@@ -62,7 +62,7 @@ def _service(brokers, kalshi: _Venue, pm: _Venue, groups=None, **kw) -> VenueSet
         account_ids=["default"],
         resolvers={"kalshi": kalshi, "polymarket_us": pm},
         event_groups=groups if groups is not None else {},
-        request_spacing_s=0,
+        request_spacing_s={},
         now=lambda: NOW,
         **kw,
     )
@@ -93,7 +93,7 @@ async def test_a_market_the_venue_has_not_finalised_stays_open():
     r = await _service(brokers, _Venue({}), _Venue({})).settle_once()
 
     assert r.settled == []
-    assert r.unresolved == 1
+    assert r.unresolved == [("kalshi", "KXATP-GAU:NO")]
     assert (await brokers["kalshi"].get_positions("default"))["KXATP-GAU:NO"] == D("100")
     assert brokers["kalshi"].cash("default") == D("1000")
 
@@ -153,6 +153,58 @@ async def test_closed_positions_are_not_looked_up():
     assert kalshi.asked == []
 
 
+async def test_a_closed_outcome_missing_its_record_gets_one_and_no_cash():
+    # Paid and zeroed, but the settlement record was dropped, so /account
+    # reads every ticket on it as open forever.
+    brokers = _brokers()
+    kalshi = _Venue({"KXATP-GAU:NO": D("1")})
+
+    async def unrecorded() -> list[tuple[str, str]]:
+        return [("kalshi", "KXATP-GAU:NO")]
+
+    r = await _service(
+        brokers, kalshi, _Venue({}), unrecorded_outcomes=unrecorded
+    ).settle_once()
+
+    assert r.recorded == [("kalshi", "KXATP-GAU:NO", D("1"))]
+    assert brokers["kalshi"].cash("default") == D("1000")
+
+
+async def test_a_held_outcome_missing_its_record_is_paid_once_not_twice():
+    brokers = _brokers()
+    _hold(brokers["kalshi"], "KXATP-GAU:NO", "100", "0.40")
+    kalshi = _Venue({"KXATP-GAU:NO": D("1")})
+
+    async def unrecorded() -> list[tuple[str, str]]:
+        return [("kalshi", "KXATP-GAU:NO")]
+
+    r = await _service(
+        brokers, kalshi, _Venue({}), unrecorded_outcomes=unrecorded
+    ).settle_once()
+
+    assert len(r.settled) == 1
+    assert r.recorded == []
+    assert kalshi.asked == ["KXATP-GAU:NO"]
+    assert brokers["kalshi"].cash("default") == D("1100")
+
+
+async def test_trigger_runs_one_pass_in_the_background():
+    import asyncio
+
+    brokers = _brokers()
+    _hold(brokers["kalshi"], "KXATP-GAU:NO", "100", "0.40")
+    svc = _service(brokers, _Venue({"KXATP-GAU:NO": D("1")}), _Venue({}))
+
+    assert svc.trigger() is True
+    assert svc.trigger() is False  # already running
+    for _ in range(50):
+        await asyncio.sleep(0)
+        if svc.last_result is not None:
+            break
+    assert svc.last_result is not None
+    assert svc.settled_total == 1
+
+
 async def test_a_position_already_settled_once_is_closed_without_paying_again():
     # Settlement paid the cash and wrote its record; only the position upsert
     # was dropped, so the restart hydrated it as held.
@@ -207,3 +259,43 @@ async def test_settlement_lands_balance_position_and_record_together(seed_refere
     assert bal == D("1100")
     assert pos == 0
     assert rec == ["venue_result"]
+
+
+async def test_unrecorded_outcomes_lists_exactly_what_account_reads_as_open(
+    seed_reference_rows,
+):
+    from arbys.backend.state import _unrecorded_outcomes
+    from arbys.db import models as m
+    from arbys.db import repositories as repo
+    from arbys.db.session import get_engine, session_scope
+
+    async with get_engine().begin() as conn:
+        await conn.run_sync(m.Base.metadata.create_all)
+    await seed_reference_rows()
+
+    async def ticket(tid: str, outcome: str, *, status: str = "filled", fill: bool = True):
+        async with session_scope() as s:
+            await repo.insert_paper_ticket(
+                s, ticket_id=tid, account_id="default", event_group_id="g",
+                title_snapshot="g", source="auto", status=status,
+            )
+            await s.flush()
+            await repo.insert_paper_order(
+                s, order_id=f"o-{tid}", account_id="default", venue_id="kalshi",
+                outcome_id=outcome, is_buy=True, qty=D("1"), limit_price=D("0.5"),
+                status="filled", ticket_id=tid,
+            )
+            if fill:
+                await repo.insert_paper_fill(
+                    s, order_id=f"o-{tid}", qty=D("1"), price=D("0.5"), fee=D("0")
+                )
+
+    await ticket("t1", "K-OPEN:YES")
+    await ticket("t2", "K-DONE:YES")
+    await ticket("t3", "K-REJ:YES", status="rejected", fill=False)
+    async with session_scope() as s:
+        await repo.insert_paper_settlement(
+            s, outcome_id="K-DONE:YES", venue_id="kalshi", resolved_value=D("1")
+        )
+
+    assert await _unrecorded_outcomes() == [("kalshi", "K-OPEN:YES")]
